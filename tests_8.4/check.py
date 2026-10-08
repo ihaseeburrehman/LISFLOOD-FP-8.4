@@ -9,6 +9,7 @@ number of failures.
 import bisect
 import filecmp
 import glob
+import math
 import os
 import sys
 
@@ -127,7 +128,12 @@ def check_mass(run, label, start_file, verror=True):
     as in 8.3; FV1's .mass volume includes the ghost cells, so its Verror is
     only reported)"""
     m = mass(run)
-    v0, v2 = start_volume(start_file), grid_volume(run, 2)
+    outs = glob.glob(os.path.join(OUT, run, "*-[0-9][0-9][0-9][0-9].wd"))
+    if not outs:
+        report(False, f"{run}: no outputs")
+        return
+    last = max(int(p[-7:-3]) for p in outs)
+    v0, v2 = start_volume(start_file), grid_volume(run, last)
     if not m or v0 is None or v2 is None:
         report(False, f"{run}: .mass or outputs missing")
         return
@@ -144,7 +150,7 @@ H0 = 0.4464
 T50, T100 = 4320000.0, 8640000.0
 RATE = 3.6 / 1000 / 86400 + 1e-8          # evaporation + infiltration, m/s
 START, WALL = "ETInfTest_start.ascii", "wall_start.ascii"
-if glob.glob(os.path.join(OUT, "t012_*")):
+if glob.glob(os.path.join(OUT, "t012_base_*")):
     print("== T012: flat basin, 0.4464 m of water, 100 days")
     print("   (expected depth: h0 minus the sum of rate x dt over the steps the model took)")
     r = "t012_base_cpu_acc_84"   # CPU reference: its own clock, 1e-4 m tolerance
@@ -185,6 +191,89 @@ if glob.glob(os.path.join(OUT, "t012_*")):
         check_dry(r, 2, cols=range(4), label=" left half (100 days)")
         check_depth(r, 2, H0, TOL, cols=range(5, 10), label=" right half (100 days)")
         check_mass(r, "wall: ", WALL, verror=not fv1)
+
+# ---------------------------------------------------------------- Green-Ampt
+GA_KS, GA_PSI, GA_DTH, GA_H0 = 10 / 3.6e6, 0.110, 0.23, 0.1
+
+
+def ga_stepped(run, k, cap=None, ks=GA_KS):
+    """depth after the step that writes output k (hourly), stepping Green-Ampt
+    exactly as the model does (implicit Euler with the logged steps)"""
+    st = steps(run)
+    ends = [t + dt for t, dt in st]
+    i = min(bisect.bisect_left(ends, k * 3600.0 - 1e-3), len(st) - 1)
+    F, h = 0.0, GA_H0
+    for _, dt in st[:i + 1]:
+        if h <= 0:
+            break
+        M = (GA_PSI + h) * GA_DTH
+        a = F + ks * dt
+        dF = 0.5 * (a + math.sqrt(a * a + 4 * ks * dt * M)) - F
+        if cap is not None:
+            dF = min(dF, max(cap - F, 0.0))
+        dF = min(dF, h)
+        F += dF
+        h -= dF
+    return h
+
+
+def ga_continuous(hours, cap=None, dt=0.25):
+    """depth of the pond from the continuous Green-Ampt equation (RK4)"""
+    f = lambda F: 0.0 if F >= GA_H0 or (cap is not None and F >= cap) else \
+        GA_KS * (1 + (GA_PSI + GA_H0 - F) * GA_DTH / F)
+    t, F, out = 1.0, math.sqrt(2 * GA_KS * (GA_PSI + GA_H0) * GA_DTH), {}
+    while t < max(hours) * 3600 - 1e-9:
+        k1 = f(F); k2 = f(F + dt / 2 * k1); k3 = f(F + dt / 2 * k2); k4 = f(F + dt * k3)
+        F = min(F + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4), GA_H0, cap if cap is not None else GA_H0)
+        t += dt
+        if abs(t / 3600 - round(t / 3600)) < 1e-9 and round(t / 3600) in hours:
+            out[round(t / 3600)] = GA_H0 - F
+    return out
+
+
+if glob.glob(os.path.join(OUT, "t012_ga_*")):
+    print("\n== Green-Ampt: flat basin, 0.1 m of water, Ks 10 mm/h, psi 110 mm, dtheta 0.23, 1 day")
+    hours = list(range(1, 25))
+    exact = ga_continuous(hours)
+    for s in ("cuda_fv1", "cuda_acc", "cuda_fv2", "cuda_dg2"):
+        r = f"t012_ga_pond_{s}_84"
+        if not os.path.isdir(os.path.join(OUT, r)):
+            continue
+        worst_step, worst_cont, ok = 0.0, 0.0, True
+        for k in hours:
+            g = wd(r, k)
+            if g is None:
+                ok = False
+                break
+            vals = [x for row in g for x in row]
+            e = ga_stepped(r, k)
+            err = max(abs(x - e) for x in vals)
+            ok = ok and err <= tol_for(r, GA_H0, e)
+            worst_step = max(worst_step, err)
+            worst_cont = max(worst_cont, max(abs(x - exact[k]) for x in vals))
+        report(ok, f"{r}: depth against Green-Ampt as stepped, 24 hourly outputs "
+               f"(largest error {1000 * worst_step:.4f} mm)")
+        report(worst_cont <= 6e-4, f"{r}: depth against the continuous Green-Ampt solution "
+               f"(largest difference {1000 * worst_cont:.3f} mm; 60 s steps)")
+        check_mass(r, "Green-Ampt: ", "ga_start.ascii", verror=(s == "cuda_acc"))
+        ok, msg = same_files(r, f"t012_ga_grid_{s}_84", "*-*")
+        report(ok, f"t012_ga_grid_{s}_84: parameters as grid files vs numbers: {msg}")
+        rc = f"t012_ga_cap_{s}_84"
+        last = wd(rc, 24)
+        if last is not None:
+            v = max(abs(x) for row in last for x in row)
+            report(abs(v - (GA_H0 - 0.2 * GA_DTH)) <= tol_for(rc, GA_H0, GA_H0 - 0.2 * GA_DTH),
+                   f"{rc}: soil depth 0.2 m stops infiltration at 46 mm: depth {v:.6f} m (expected 0.054000)")
+        rw = f"t012_ga_wall_{s}_84"
+        if os.path.isdir(os.path.join(OUT, rw)):
+            e = ga_stepped(rw, 3)
+            check_depth(rw, 3, e, tol_for(rw, GA_H0, e), cols=range(4), label=" left half, Ks 10 mm/h (3 h)")
+            check_depth(rw, 3, GA_H0, TOL, cols=range(5, 10), label=" right half, Ks 0 (3 h)")
+    rc = "t012_ga_conflict_cuda_fv1_84"
+    if os.path.isdir(os.path.join(OUT, rc)):
+        log = open(os.path.join(OUT, rc, "run.log")).read()
+        report("choose one infiltration model" in log and not glob.glob(os.path.join(OUT, rc, "*.wd")),
+               f"{rc}: both infiltration models in one file stop with an error")
 
 # ---------------------------------------------------------------- Alzette
 if glob.glob(os.path.join(OUT, "alz_*")):

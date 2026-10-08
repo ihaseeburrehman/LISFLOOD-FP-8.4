@@ -3,6 +3,8 @@
 #include "cuda_util.cuh"
 #include "../cuda/ghostraster.h"
 #include "io.h"
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace lis
@@ -53,6 +55,74 @@ __device__ NUMERIC_TYPE depth_after_loss
 	return h_new;
 }
 
+/**
+ * Green-Ampt: depth after this step's infiltration (and evaporation) on a
+ * cell with water; updates F, the depth infiltrated so far
+ */
+__device__ NUMERIC_TYPE depth_after_greenampt
+(
+	const LossParams& p,
+	int idx,
+	NUMERIC_TYPE h
+)
+{
+	NUMERIC_TYPE& residual = p.residual[idx];
+	if (h <= C(0.0))
+	{
+		residual = C(0.0);
+		return h;
+	}
+
+	double dt = cuda::dt;
+	double F = p.F[idx];
+	double ks = p.ks[idx];
+	double dF = 0.0;
+	if (ks > 0.0)
+	{
+		// implicit Euler: F_new = F + dt Ks (1 + (psi + h) dtheta / F_new)
+		double M = ((double)p.psi[idx] + (double)h) * (double)p.dtheta[idx];
+		double a = F + ks*dt;
+		dF = 0.5*(a + sqrt(a*a + 4.0*ks*dt*M)) - F;
+		if (p.fmax != nullptr)
+		{
+			dF = fmin(dF, fmax((double)p.fmax[idx] - F, 0.0));
+		}
+	}
+	double e = (double)p.evap_rate * dt;
+	if (dF + e <= 0.0)
+	{
+		residual = C(0.0);
+		return h;
+	}
+
+	NUMERIC_TYPE wanted = (NUMERIC_TYPE)(dF + e) + residual;
+	NUMERIC_TYPE h_new = h - wanted;
+	if (h_new <= C(0.0))
+	{
+		// not enough water: infiltration takes it first, evaporation the rest
+		p.F[idx] = F + fmin(dF, (double)h);
+		residual = C(0.0);
+		return C(0.0);
+	}
+	residual = wanted - (h - h_new); // h - h_new is exact (Sterbenz)
+	p.F[idx] = F + dF;
+	return h_new;
+}
+
+/** depth of cell idx after this step's losses */
+__device__ NUMERIC_TYPE depth_after_losses
+(
+	const LossParams& p,
+	int idx,
+	NUMERIC_TYPE h
+)
+{
+	if (p.greenampt) return depth_after_greenampt(p, idx, h);
+	NUMERIC_TYPE rate = ((p.rate_grid != nullptr) ? p.rate_grid[idx] : p.uniform_rate)
+		+ p.evap_rate;
+	return depth_after_loss(h, rate, p.residual[idx]);
+}
+
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
 apply_losses_fv1
@@ -61,10 +131,7 @@ apply_losses_fv1
 	NUMERIC_TYPE* HU,
 	NUMERIC_TYPE* HV,
 	NUMERIC_TYPE* DEM,
-	NUMERIC_TYPE* rate_grid,
-	NUMERIC_TYPE* residual,
-	NUMERIC_TYPE uniform_rate,
-	NUMERIC_TYPE evap_rate,
+	LossParams p,
 	double* volume
 )
 {
@@ -80,9 +147,7 @@ apply_losses_fv1
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE rate = ((rate_grid != nullptr) ? rate_grid[idx] : uniform_rate)
-				+ evap_rate;
-			NUMERIC_TYPE h_new = depth_after_loss(h, rate, residual[idx]);
+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
 			if (h_new == h) continue;
 
 			H[idx] = h_new;
@@ -114,10 +179,7 @@ apply_losses_slopes
 	NUMERIC_TYPE* HV, NUMERIC_TYPE* HV1x, NUMERIC_TYPE* HV1y,
 	NUMERIC_TYPE* DEM,
 	NUMERIC_TYPE face,
-	NUMERIC_TYPE* rate_grid,
-	NUMERIC_TYPE* residual,
-	NUMERIC_TYPE uniform_rate,
-	NUMERIC_TYPE evap_rate,
+	LossParams p,
 	double* volume
 )
 {
@@ -133,9 +195,7 @@ apply_losses_slopes
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE rate = ((rate_grid != nullptr) ? rate_grid[idx] : uniform_rate)
-				+ evap_rate;
-			NUMERIC_TYPE h_new = depth_after_loss(h, rate, residual[idx]);
+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
 			if (h_new == h) continue;
 
 			H[idx] = h_new;
@@ -176,10 +236,7 @@ apply_losses_acc
 (
 	NUMERIC_TYPE* H,
 	NUMERIC_TYPE* DEM,
-	NUMERIC_TYPE* rate_grid,
-	NUMERIC_TYPE* residual,
-	NUMERIC_TYPE uniform_rate,
-	NUMERIC_TYPE evap_rate,
+	LossParams p,
 	double* volume
 )
 {
@@ -195,9 +252,7 @@ apply_losses_acc
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE rate = ((rate_grid != nullptr) ? rate_grid[idx] : uniform_rate)
-				+ evap_rate;
-			NUMERIC_TYPE h_new = depth_after_loss(h, rate, residual[idx]);
+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
 			if (h_new == h) continue;
 
 			H[idx] = h_new;
@@ -206,6 +261,16 @@ apply_losses_acc
 	}
 
 	add_block_sum(removed*cuda::geometry.dx*cuda::geometry.dy, volume);
+}
+
+/** true and the value if spec is a number (and nothing else) */
+static bool parse_number(const char* spec, double& value)
+{
+	char* end = nullptr;
+	value = strtod(spec, &end);
+	if (end == spec) return false;
+	while (*end == ' ' || *end == '\t') end++;
+	return *end == '\0';
 }
 
 }
@@ -222,9 +287,13 @@ lis::cuda::Losses::Losses
 	int verbose
 )
 :
+geometry(geometry),
+pitch(pitch),
+offset(offset),
 acc(states.acceleration == ON)
 {
 	infiltration = (states.calc_infiltration == ON);
+	greenampt = (states.calc_greenampt == ON);
 	evaporation = (states.calc_evap == ON);
 	if (!enabled()) return;
 
@@ -233,37 +302,9 @@ acc(states.acceleration == ON)
 		if (strlen(filenames.infilfilename) > 0)
 		{
 			// per-cell rate, mm/h -> m/s
-			NUMERIC_TYPE* rate = acc ? lis::GhostRaster::allocate_H(geometry)
-				: lis::GhostRaster::allocate(geometry);
-			FILE* file = fopen_or_die(filenames.infilfilename, "rb",
-					"Loading infilfile\n", verbose);
-			Geometry file_geometry;
-			NUMERIC_TYPE no_data_value;
-			AsciiRaster::read_header(file, file_geometry, no_data_value);
-			AsciiRaster::match_cell_dimensions_or_die(geometry, file_geometry,
-					"infilfile");
-			AsciiRaster::read(file, rate, geometry, pitch, offset);
-			fclose(file);
-			AsciiRaster::replace_no_data(rate, geometry, pitch, offset,
-					no_data_value, C(0.0));
-			for (int j=0; j<geometry.ysz; j++)
-			{
-				for (int i=0; i<geometry.xsz; i++)
-				{
-					NUMERIC_TYPE& r = rate[j*pitch + i + offset];
-					r = (r > C(0.0)) ? r/C(3600000.0) : C(0.0);
-				}
-			}
-			if (acc)
-			{
-				d_rate = GhostRaster::allocate_device_H(geometry);
-				GhostRaster::copy_H(d_rate, rate, geometry);
-			}
-			else
-			{
-				d_rate = GhostRaster::allocate_device(geometry);
-				GhostRaster::copy(d_rate, rate, geometry);
-			}
+			NUMERIC_TYPE* rate = host_grid(filenames.infilfilename, C(3600000.0),
+					"infilfile", verbose);
+			d_rate = to_device(rate);
 			delete[] rate;
 			if (verbose) printf("Infiltration: per-cell rates from %s\n",
 					filenames.infilfilename);
@@ -274,6 +315,66 @@ acc(states.acceleration == ON)
 			if (verbose) printf("Infiltration: uniform rate %.10" NUM_FMT" m/s\n",
 					uniform_rate);
 		}
+	}
+
+	if (greenampt)
+	{
+		const char* missing = nullptr;
+		if (strlen(filenames.greenampt_ks) == 0) missing = "greenampt_ks";
+		else if (strlen(filenames.greenampt_psi) == 0) missing = "greenampt_psi";
+		else if (strlen(filenames.greenampt_porosity) == 0) missing = "greenampt_porosity";
+		else if (strlen(filenames.greenampt_theta_init) == 0) missing = "greenampt_theta_init";
+		if (missing != nullptr)
+		{
+			fprintf(stderr, "ERROR: infiltration greenampt needs %s (a number or a grid file)\n",
+					missing);
+			exit(-1);
+		}
+		NUMERIC_TYPE* ks = host_grid(filenames.greenampt_ks, C(3600000.0),
+				"greenampt_ks", verbose);       // mm/h -> m/s
+		NUMERIC_TYPE* psi = host_grid(filenames.greenampt_psi, C(1000.0),
+				"greenampt_psi", verbose);      // mm -> m
+		NUMERIC_TYPE* porosity = host_grid(filenames.greenampt_porosity, C(1.0),
+				"greenampt_porosity", verbose);
+		NUMERIC_TYPE* theta = host_grid(filenames.greenampt_theta_init, C(1.0),
+				"greenampt_theta_init", verbose);
+		NUMERIC_TYPE* depth = (strlen(filenames.greenampt_soil_depth) > 0)
+			? host_grid(filenames.greenampt_soil_depth, C(1.0),
+					"greenampt_soil_depth", verbose)
+			: nullptr;
+
+		// dtheta = porosity - initial moisture (not below 0); fmax = depth x dtheta
+		long wetter = 0;
+		for (int j=0; j<geometry.ysz; j++)
+		{
+			for (int i=0; i<geometry.xsz; i++)
+			{
+				int idx = j*pitch + i + offset;
+				NUMERIC_TYPE d = porosity[idx] - theta[idx];
+				if (d < C(0.0)) { d = C(0.0); wetter++; }
+				porosity[idx] = d;
+				if (depth != nullptr) depth[idx] *= d;
+			}
+		}
+		if (wetter > 0)
+		{
+			fprintf(stderr, "WARNING: greenampt_theta_init > greenampt_porosity in %ld cells; "
+					"there the soil is taken as saturated\n", wetter);
+		}
+		d_ks = to_device(ks);
+		d_psi = to_device(psi);
+		d_dtheta = to_device(porosity);
+		if (depth != nullptr) d_fmax = to_device(depth);
+		delete[] ks; delete[] psi; delete[] porosity; delete[] theta; delete[] depth;
+
+		int elements = acc ? lis::GhostRaster::elements_H(geometry)
+			: lis::GhostRaster::elements(geometry);
+		double* zeros = new double[elements]();
+		d_F = static_cast<double*>(malloc_device(elements*sizeof(double)));
+		copy(d_F, zeros, elements*sizeof(double));
+		delete[] zeros;
+		if (verbose) printf("Infiltration: Green-Ampt%s\n",
+				(d_fmax != nullptr) ? ", with soil depth" : "");
 	}
 
 	if (evaporation)
@@ -288,16 +389,7 @@ acc(states.acceleration == ON)
 	// residuals start at zero, in the layout of H
 	NUMERIC_TYPE* zeros = acc ? lis::GhostRaster::allocate_H(geometry)
 		: lis::GhostRaster::allocate(geometry);
-	if (acc)
-	{
-		d_residual = GhostRaster::allocate_device_H(geometry);
-		GhostRaster::copy_H(d_residual, zeros, geometry);
-	}
-	else
-	{
-		d_residual = GhostRaster::allocate_device(geometry);
-		GhostRaster::copy(d_residual, zeros, geometry);
-	}
+	d_residual = to_device(zeros);
 	delete[] zeros;
 
 	d_volume = static_cast<double*>(malloc_device(sizeof(double)));
@@ -305,12 +397,84 @@ acc(states.acceleration == ON)
 	copy(d_volume, &zero, sizeof(double));
 }
 
-NUMERIC_TYPE lis::cuda::Losses::evaporation_rate
+NUMERIC_TYPE* lis::cuda::Losses::host_grid
+(
+	const char* spec,
+	NUMERIC_TYPE divisor,
+	const char* keyword,
+	int verbose
+)
+{
+	NUMERIC_TYPE* grid = acc ? lis::GhostRaster::allocate_H(geometry)
+		: lis::GhostRaster::allocate(geometry);
+	double number;
+	if (parse_number(spec, number))
+	{
+		NUMERIC_TYPE v = (NUMERIC_TYPE)number;
+		v = (v > C(0.0)) ? v/divisor : C(0.0);
+		for (int j=0; j<geometry.ysz; j++)
+		{
+			for (int i=0; i<geometry.xsz; i++) grid[j*pitch + i + offset] = v;
+		}
+		if (verbose) printf("%s = %s (uniform)\n", keyword, spec);
+		return grid;
+	}
+
+	FILE* file = fopen_or_die(spec, "rb", keyword, verbose);
+	Geometry file_geometry;
+	NUMERIC_TYPE no_data_value;
+	AsciiRaster::read_header(file, file_geometry, no_data_value);
+	AsciiRaster::match_cell_dimensions_or_die(geometry, file_geometry, keyword);
+	AsciiRaster::read(file, grid, geometry, pitch, offset);
+	fclose(file);
+	AsciiRaster::replace_no_data(grid, geometry, pitch, offset, no_data_value, C(0.0));
+	for (int j=0; j<geometry.ysz; j++)
+	{
+		for (int i=0; i<geometry.xsz; i++)
+		{
+			NUMERIC_TYPE& r = grid[j*pitch + i + offset];
+			r = (r > C(0.0)) ? r/divisor : C(0.0);
+		}
+	}
+	return grid;
+}
+
+NUMERIC_TYPE* lis::cuda::Losses::to_device
+(
+	NUMERIC_TYPE* host
+)
+{
+	NUMERIC_TYPE* d;
+	if (acc)
+	{
+		d = GhostRaster::allocate_device_H(geometry);
+		GhostRaster::copy_H(d, host, geometry);
+	}
+	else
+	{
+		d = GhostRaster::allocate_device(geometry);
+		GhostRaster::copy(d, host, geometry);
+	}
+	return d;
+}
+
+lis::cuda::LossParams lis::cuda::Losses::params
 (
 	NUMERIC_TYPE t
 )
 {
-	return evaporation ? InterpolateTimeSeries(evap, t) : C(0.0);
+	LossParams p;
+	p.greenampt = greenampt;
+	p.rate_grid = d_rate;
+	p.uniform_rate = infiltration ? uniform_rate : C(0.0);
+	p.evap_rate = evaporation ? InterpolateTimeSeries(evap, t) : C(0.0);
+	p.residual = d_residual;
+	p.F = d_F;
+	p.ks = d_ks;
+	p.psi = d_psi;
+	p.dtheta = d_dtheta;
+	p.fmax = d_fmax;
+	return p;
 }
 
 void lis::cuda::Losses::apply_fv1
@@ -323,8 +487,7 @@ void lis::cuda::Losses::apply_fv1
 	dim3 grid_size
 )
 {
-	apply_losses_fv1<<<grid_size, CUDA_BLOCK_SIZE>>>(H, HU, HV, DEM, d_rate,
-			d_residual, infiltration ? uniform_rate : C(0.0), evaporation_rate(t), d_volume);
+	apply_losses_fv1<<<grid_size, CUDA_BLOCK_SIZE>>>(H, HU, HV, DEM, params(t), d_volume);
 }
 
 void lis::cuda::Losses::apply_slopes
@@ -339,8 +502,7 @@ void lis::cuda::Losses::apply_slopes
 )
 {
 	apply_losses_slopes<<<grid_size, CUDA_BLOCK_SIZE>>>(H, H1x, H1y, HU, HU1x, HU1y,
-			HV, HV1x, HV1y, DEM, face, d_rate, d_residual,
-			infiltration ? uniform_rate : C(0.0), evaporation_rate(t), d_volume);
+			HV, HV1x, HV1y, DEM, face, params(t), d_volume);
 }
 
 void lis::cuda::Losses::apply_acc
@@ -351,8 +513,7 @@ void lis::cuda::Losses::apply_acc
 	dim3 grid_size
 )
 {
-	apply_losses_acc<<<grid_size, CUDA_BLOCK_SIZE>>>(H, DEM, d_rate,
-			d_residual, infiltration ? uniform_rate : C(0.0), evaporation_rate(t), d_volume);
+	apply_losses_acc<<<grid_size, CUDA_BLOCK_SIZE>>>(H, DEM, params(t), d_volume);
 }
 
 double lis::cuda::Losses::total_volume()
@@ -375,5 +536,10 @@ lis::cuda::Losses::~Losses()
 {
 	free_device(d_rate);
 	free_device(d_residual);
+	free_device(d_F);
+	free_device(d_ks);
+	free_device(d_psi);
+	free_device(d_dtheta);
+	free_device(d_fmax);
 	free_device(d_volume);
 }

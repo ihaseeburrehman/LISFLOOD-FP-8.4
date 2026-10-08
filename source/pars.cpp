@@ -483,6 +483,26 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 		Statesptr->gsection = ON;
 		return;
 	}
+	// infiltration greenampt: Green-Ampt instead of a constant rate (8.4)
+	if (STRCMPi("infiltration", param_name) == 0)
+	{
+		char word[64] = "";
+		sscanf(param_value_ptr, "%63s", word);
+		if (STRCMPi(word, "greenampt") == 0)
+		{
+			Statesptr->calc_greenampt = ON;
+			if (verbose == ON) printf("infiltration = greenampt\n");
+			return;
+		}
+	}
+	if (read_string_param(param_name, line_number, param_value_ptr, "greenampt_ks", Fnameptr->greenampt_ks, verbose, mode) ||
+		read_string_param(param_name, line_number, param_value_ptr, "greenampt_psi", Fnameptr->greenampt_psi, verbose, mode) ||
+		read_string_param(param_name, line_number, param_value_ptr, "greenampt_porosity", Fnameptr->greenampt_porosity, verbose, mode) ||
+		read_string_param(param_name, line_number, param_value_ptr, "greenampt_theta_init", Fnameptr->greenampt_theta_init, verbose, mode) ||
+		read_string_param(param_name, line_number, param_value_ptr, "greenampt_soil_depth", Fnameptr->greenampt_soil_depth, verbose, mode))
+	{
+		return;
+	}
 	if (read_numeric_param(param_name, line_number, param_value_ptr, "infiltration", &Parptr->InfilRate, verbose, mode) ||
 		read_numeric_param(param_name, line_number, param_value_ptr, "inf", &Parptr->InfilRate, verbose, mode))
 	{

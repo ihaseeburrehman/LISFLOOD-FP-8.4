@@ -213,6 +213,7 @@ int main(int argc, char *argv[])
 	SimStates.save_Qs = OFF;
 	SimStates.calc_infiltration = OFF;
 	SimStates.calc_distributed_infiltration = OFF;
+	SimStates.calc_greenampt = OFF;
 	SimStates.call_gzip = OFF;
 	SimStates.alt_ascheader = OFF;
 	SimStates.checkpoint = OFF;
@@ -432,6 +433,19 @@ int main(int argc, char *argv[])
 	{
 		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
 			"(they are, by the CUDA FV1, FV2, DG2 and ACC solvers)\n");
+	}
+	// Green-Ampt is a separate choice from the constant rate, and only the
+	// CUDA FV1, FV2, DG2 and ACC solvers apply it
+	if (Statesptr->calc_greenampt == ON && Statesptr->calc_infiltration == ON)
+	{
+		fprintf(stderr, "ERROR: choose one infiltration model: either 'infiltration <rate>' "
+			"or 'infilfile <file>' (constant rate), or 'infiltration greenampt'\n");
+		return -1;
+	}
+	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
+	{
+		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
+			"(it is, by the CUDA FV1, FV2, DG2 and ACC solvers)\n");
 	}
 
 #ifdef CUDA

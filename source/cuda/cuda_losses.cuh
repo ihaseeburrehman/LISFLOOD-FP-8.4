@@ -9,27 +9,61 @@ namespace cuda
 {
 
 /**
+ * What the loss kernels need for one time step (passed by value).
+ *
+ * Constant rate (greenampt == false): rate_grid or uniform_rate, m/s.
+ * Green-Ampt (greenampt == true): per-cell grids ks (m/s), psi (m),
+ * dtheta (porosity - initial moisture) and, optionally, fmax (m, the most
+ * the soil can take: soil depth x dtheta), and the state F (m, infiltrated
+ * depth so far, double precision).
+ * Both: evap_rate (m/s, uniform), and residual (m, the part of the loss that
+ * rounding to single precision dropped, carried to the next step).
+ */
+struct LossParams
+{
+	bool greenampt;
+	NUMERIC_TYPE* rate_grid;
+	NUMERIC_TYPE uniform_rate;
+	NUMERIC_TYPE evap_rate;
+	NUMERIC_TYPE* residual;
+	double* F;
+	NUMERIC_TYPE* ks;
+	NUMERIC_TYPE* psi;
+	NUMERIC_TYPE* dtheta;
+	NUMERIC_TYPE* fmax;
+};
+
+/**
  * Floodplain infiltration and evaporation for the CUDA FV1, FV2, DG2 and ACC
- * solvers,
- * as in the CPU routines FPInfiltration and Evaporation (infevap.cpp):
- * every wet cell (depth > DepthThresh) outside NoData loses
+ * solvers (8.4). Two infiltration models, chosen in the .par file:
+ *
+ * Constant rate, as the CPU routines FPInfiltration and Evaporation
+ * (infevap.cpp): every wet cell (depth > DepthThresh, not NoData) loses
  * (infiltration rate + evaporation rate) * dt of depth, never below zero.
+ *   infiltration <rate>   uniform rate, m/s
+ *   infilfile <file>      rate per cell, ESRI ASCII grid in mm/h (NoData and
+ *                         negative values: 0); used instead of the uniform rate
  *
- * .par keywords, as for the CPU solvers:
- *   infiltration <rate>   uniform infiltration rate, m/s
- *   infilfile <file>      infiltration rate per cell, ESRI ASCII grid in mm/h
- *                         (same size as the DEM; NoData and negative values: 0);
- *                         used instead of the uniform rate
- *   evaporation <file>    evaporation time series in mm/day, uniform in space
+ * Green-Ampt (infiltration greenampt), on every cell with water:
+ *   f = Ks (1 + (psi + h) dtheta / F),  dtheta = porosity - initial moisture,
+ * with h the ponded depth and F the depth infiltrated so far, advanced with
+ * implicit Euler, which has a closed form per step:
+ *   F_new = (a + sqrt(a^2 + 4 Ks dt (psi + h) dtheta)) / 2,  a = F + Ks dt,
+ * limited by the water available and, optionally, by the soil depth.
+ *   greenampt_ks <number|file>          saturated conductivity, mm/h
+ *   greenampt_psi <number|file>         wetting-front suction, mm
+ *   greenampt_porosity <number|file>    saturated moisture content, m3/m3
+ *   greenampt_theta_init <number|file>  initial moisture content, m3/m3
+ *   greenampt_soil_depth <number|file>  optional: soil depth, m (storage cap)
+ * The soil does not recover between rain events (F never decreases).
  *
- * The volume removed is accumulated on the GPU for the .mass file.
+ * Evaporation, with either model:
+ *   evaporation <file>    time series in mm/day, uniform in space
  *
- * Depth is single precision, and the loss per time step is often close to
- * its resolution (e.g. 2 mm/h x 0.5 s = 3e-7 m on a 1 m deep cell), so every
- * subtraction is rounded, the same way each step. Each cell therefore keeps
- * the part of the loss that rounding dropped and adds it to its next step
- * (compensated subtraction): over many steps the depth lost equals
- * rate x time to within one rounding step.
+ * Depth is single precision and the loss per step is often close to its
+ * resolution, so each cell carries the part of the loss that rounding dropped
+ * to its next step (compensated subtraction). The volume removed is summed on
+ * the GPU for the .mass file.
  */
 class Losses
 {
@@ -45,7 +79,7 @@ public:
 		int verbose
 	);
 
-	bool enabled() const { return infiltration || evaporation; }
+	bool enabled() const { return infiltration || greenampt || evaporation; }
 
 	/** FV1: ghost-cell layout; scales HU and HV with the depth */
 	void apply_fv1
@@ -63,8 +97,8 @@ public:
 	 * slopes are kept (a uniform loss keeps the water surface flat) and the
 	 * discharge average and slopes are scaled with the depth; if a face
 	 * would become dry (wet/dry edge), the cell becomes first order (all
-	 * slopes zero); a cell that dries loses its slopes and discharge. face: the face value is
-	 * average +- face x slope (FV2: 0.5, DG2: sqrt(3)).
+	 * slopes zero); a cell that dries loses its slopes and discharge.
+	 * face: the face value is average +- face x slope (FV2: 0.5, DG2: sqrt(3)).
 	 */
 	void apply_slopes
 	(
@@ -95,15 +129,30 @@ public:
 	~Losses();
 
 private:
-	NUMERIC_TYPE evaporation_rate(NUMERIC_TYPE t);
+	LossParams params(NUMERIC_TYPE t);
 
+	/** a grid in the layout of H, on the host: a number for every cell, or a
+	 * file (NoData and negative values: 0); values divided by divisor */
+	NUMERIC_TYPE* host_grid(const char* spec, NUMERIC_TYPE divisor,
+			const char* keyword, int verbose);
+	NUMERIC_TYPE* to_device(NUMERIC_TYPE* host);
+
+	Geometry& geometry;
+	int pitch;
+	int offset;
 	bool infiltration = false;
+	bool greenampt = false;
 	bool evaporation = false;
 	bool acc = false;
 	NUMERIC_TYPE uniform_rate = C(0.0);   /**< m/s */
 	NUMERIC_TYPE* d_rate = nullptr;      /**< m/s per cell, or nullptr */
 	NUMERIC_TYPE* d_residual = nullptr;  /**< loss not yet applied (rounding), m */
-	::TimeSeries* evap = nullptr;          /**< m/s */
+	double* d_F = nullptr;               /**< Green-Ampt: infiltrated depth, m */
+	NUMERIC_TYPE* d_ks = nullptr;        /**< Green-Ampt: m/s */
+	NUMERIC_TYPE* d_psi = nullptr;       /**< Green-Ampt: m */
+	NUMERIC_TYPE* d_dtheta = nullptr;    /**< Green-Ampt: - */
+	NUMERIC_TYPE* d_fmax = nullptr;      /**< Green-Ampt: m, or nullptr */
+	::TimeSeries* evap = nullptr;        /**< m/s */
 	double* d_volume = nullptr;          /**< cumulative volume removed, m3 */
 	double reported = 0.0;
 };

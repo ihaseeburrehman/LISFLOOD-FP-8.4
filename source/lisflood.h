@@ -417,6 +417,12 @@ struct Fnames{
 	char LinkListfilename[256]; // JCN
 	char SGCdirnfilename[256];  // PFU
 	char infilfilename[256]; // JCN
+	// Green-Ampt infiltration (CUDA solvers, 8.4): a number or a grid file each
+	char greenampt_ks[256];         // saturated conductivity, mm/h
+	char greenampt_psi[256];        // wetting-front suction, mm
+	char greenampt_porosity[256];   // saturated moisture content, m3/m3
+	char greenampt_theta_init[256]; // initial moisture content, m3/m3
+	char greenampt_soil_depth[256]; // optional soil depth, m (storage cap)
     char dynamicrainfilename[256];
 };
 
@@ -586,6 +592,7 @@ struct States{
 	int save_Qs;
 	int calc_infiltration;
 	int calc_distributed_infiltration; // uses a file to use spatially distributed infiltration rates
+	int calc_greenampt; // Green-Ampt infiltration (infiltration greenampt; CUDA solvers, 8.4)
 	int call_gzip;
 	int alt_ascheader;
 	int checkpoint;

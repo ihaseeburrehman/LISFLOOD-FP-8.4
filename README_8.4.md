@@ -25,6 +25,30 @@ cell (deeper than `DepthThresh`, not NoData) loses
 | `infilfile <grid>` | infiltration rate per cell, ESRI ASCII grid in mm/h, same size as the DEM (like `manningfile`); NoData and negative values count as 0; used instead of `infiltration` | same file format (the CPU uses it only in the sub-grid solver) |
 | `evaporation <file>` | evaporation time series in mm/day, uniform in space | yes, same file and loader (`LoadEvap`) |
 
+**Green-Ampt infiltration**, a separate choice (`infiltration greenampt`
+instead of a rate; using both stops with an error). Each parameter is a number
+for the whole domain or a grid file like the Manning file:
+
+| `.par` keyword | meaning |
+|---|---|
+| `infiltration greenampt` | use Green-Ampt |
+| `greenampt_ks` | saturated hydraulic conductivity, mm/h |
+| `greenampt_psi` | wetting-front suction head, mm |
+| `greenampt_porosity` | saturated moisture content, m3/m3 |
+| `greenampt_theta_init` | initial moisture content, m3/m3 (e.g. from soil-moisture data) |
+| `greenampt_soil_depth` | optional: soil depth, m; infiltration stops when it is full |
+
+Every cell with water infiltrates at `f = Ks (1 + (psi + h) dtheta / F)`
+(`dtheta` = porosity - initial moisture, `h` the ponded depth, `F` the depth
+infiltrated so far, kept per cell in double precision), stepped with implicit
+Euler, which has a closed form per step and starts from `F = 0`; never more
+than the water present, and not beyond `soil depth x dtheta`. Evaporation
+works with either model. The soil does not recover between rain events.
+**Cells under water at the start need care:** rivers and lakes should get
+`Ks = 0`, and soils already flooded at the start should get an initial moisture
+close to saturation (`theta_init` = `porosity`); sealed surfaces `Ks = 0`.
+Otherwise they infiltrate as if dry soil (see the Alzette test below).
+
 - **FV1** stores discharge, so when a cell loses depth its discharges are
   scaled with it (velocity kept), and set to zero when the cell becomes dry.
 - **ACC** stores discharges on the cell faces; only the depth changes.
@@ -74,7 +98,13 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 | CUDA ACC, Carlisle (6 h) and EA test 5 (6 h), 5 mm/h, against the CPU ACC solver | water removed by infiltration agrees within 1.9 % and 0.7 %; time step and maximum depth unchanged |
 | T012, CUDA FV2 and DG2 (base, ramp, wall, half rate) | within 0.07-0.21 % of the loss, either sign (0.15-0.76 mm of 223-360 mm); without the keywords identical to 8.3 |
 | CUDA FV2 and DG2, EA test 5 (6 h), 5 mm/h | stored water falls by the volume removed within 0.1 % (FV2) and 0.5 % (DG2); without the keywords identical to 8.3 |
-| cost | about 11-20 % more run time |
+| Green-Ampt, flat basin with 0.1 m of water (Ks 10 mm/h, psi 110 mm, dtheta 0.23), 1 day, FV1, FV2, DG2, ACC | depth matches Green-Ampt as stepped within 0.0009 mm and the continuous Green-Ampt solution within 0.47 mm (the implicit-Euler error of the 60 s test steps; 0.01 mm at 1 s); volume removed = depth lost (364 500 m3) |
+| Green-Ampt parameters as grid files vs numbers | identical output |
+| Green-Ampt with soil depth 0.2 m | infiltration stops at 46 mm (0.054 m of water left) |
+| Green-Ampt with Ks on the left half only (wall in between) | right half unchanged |
+| `infiltration greenampt` and a rate in one file | stops with an error |
+| Alzette FV1, 6 h: none / constant 2 mm/h / Green-Ampt (Ks 10 mm/h, theta_init 0.30 everywhere) | stored water after 6 h 27.4 / 24.4 / 12.6 million m3; removed 0 / 3.2 / 16.0 million m3; time step, maximum depth unchanged, no cell deeper. Of the 14.8 million m3 less water than without infiltration, 12.5 million are in cells already under water at the start (5.7 in rivers and the lake deeper than 0.5 m, 6.8 on floodplain flooded 1 cm to 0.5 m by the previous day), which were given the same dry initial moisture as everywhere else; only 2.3 million in cells dry at the start |
+| cost | about 11-20 % more run time (Green-Ampt: none measurable on Alzette) |
 
 FV1 and ACC remove exactly rate x dt. FV2 and DG2 remove it too, but their
 results differ from the exact answer by about +-0.1-0.2 % of the loss (in
@@ -107,10 +137,12 @@ Found on the way, already in 8.2/8.3 and not changed here:
 
 1. Constant-rate infiltration and evaporation in CUDA FV1, FV2, DG2 and ACC (this
    version), tested as above.
-2. Then, if 1 works: Green-Ampt infiltration, started from a soil-moisture
-   grid (e.g. WRF `SMOIS` at the start of the run) and soil-property grids
-   (saturated conductivity, suction, porosity), with the infiltrated depth
-   tracked per cell; tested against the exact Green-Ampt solution.
+2. Done: Green-Ampt infiltration (`infiltration greenampt`), with
+   soil-property and initial-moisture grids, tested as above.
+   Next for real runs: Ks = 0 on river, lake and sealed cells; parameter
+   grids from the soil map and soil moisture (Geoportal or WRF `SMOIS`).
+   Possible later: recovery between rain events (SWMM-style, drying rate
+   from evapotranspiration).
 3. Possibly later: the same in Metal FV1; gridded evaporation.
 
 Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
