@@ -20,7 +20,7 @@ Tel: +44-117-928-9108, Fax: +44-117-928-7878
 
 // release name printed at start-up; the numbers above stay as in 8.2
 // because they are written into checkpoint files
-#define LF_Release "8.3"
+#define LF_Release "8.4"
 
 /*
 ########################### Version History #########################################
@@ -28,6 +28,8 @@ Reserved for major changes, use list below this one and subversion for full deta
 
 Ver  Date         Details
 ---  ----         -------------------------------------------------------------------------
+8.4  Oct 08 2026  CUDA FV1 and ACC: floodplain infiltration (uniform or per-cell grid) and
+                  evaporation, as in the CPU solvers (HR)
 8.3  Oct 07 2026  CUDA: max-depth grid on the GPU (large grids run), dry NoData cells skip
                   the mass counter, flux kernels synchronised; Metal FV1 back end (HR)
 8.1  Nov 23 2020  Merged changes from v7.1 (d8subgrid) into v8 (PFU)

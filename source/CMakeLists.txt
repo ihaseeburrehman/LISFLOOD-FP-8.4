@@ -83,6 +83,7 @@ if (CMAKE_CUDA_COMPILER)
 		cuda/cuda_geometry.cu
 		cuda/cuda_hll.cu
 		cuda/cuda_max_field.cu
+		cuda/cuda_losses.cu
 		cuda/cuda_rain.cu
 		cuda/cuda_sample.cu
 		cuda/cuda_simulate.cu

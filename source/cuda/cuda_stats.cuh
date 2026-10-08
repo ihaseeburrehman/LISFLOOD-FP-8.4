@@ -35,6 +35,10 @@ public:
 	NUMERIC_TYPE previous_volume = C(0.0);
 	MassStats* d_instantaneous_mass; /**< through BCs/PSs during timestep*/
 
+	/** infiltration and evaporation (cuda_losses), m3: set before create_entry */
+	double interval_loss = 0.0; /**< since the previous entry */
+	double total_loss = 0.0;    /**< since the start */
+
 private:
 	NUMERIC_TYPE area
 	(

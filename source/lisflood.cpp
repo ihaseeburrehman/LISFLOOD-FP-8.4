@@ -416,6 +416,23 @@ int main(int argc, char *argv[])
 
 	LoadDEM(Fnameptr, Statesptr, Parptr, Arrptr, verbosemode);
 	
+	// infiltration and evaporation: CPU classic and sub-grid solvers, and
+	// (from 8.4) the CUDA FV1 and ACC solvers; the others ignore them
+#ifdef CUDA
+	const bool losses_on_gpu = (Statesptr->cuda == ON &&
+		(Statesptr->fv1 == ON || Statesptr->acceleration == ON));
+#else
+	const bool losses_on_gpu = false; // e.g. Metal FV1 does not apply them
+#endif
+	if ((Statesptr->calc_infiltration == ON || Statesptr->calc_evap == ON) &&
+		!losses_on_gpu &&
+		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
+		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
+	{
+		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
+			"(they are, by the CUDA FV1 and ACC solvers)\n");
+	}
+
 #ifdef CUDA
 	if (Statesptr->cuda == ON)
 	{

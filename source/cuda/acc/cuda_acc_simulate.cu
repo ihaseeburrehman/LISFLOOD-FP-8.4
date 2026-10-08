@@ -8,6 +8,7 @@
 #include "cuda_rain.cuh"
 #include "cuda_max_field.cuh"
 #include "cuda_stats.cuh"
+#include "cuda_losses.cuh"
 #include "cuda_unifiedallocator.cuh"
 #include "../rain/rain.h"
 #include "io.h"
@@ -88,6 +89,7 @@ void lis::cuda::acc::Simulation::run
 	
 
 	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
+	Losses losses(filenames, states, pars, geometry, pitch, offset, verbose);
 
 
 	//Load checkpointed data if this job has been restarted
@@ -202,6 +204,12 @@ void lis::cuda::acc::Simulation::run
 					stats_collector.instantaneous_mass(), grid_size); 
 		}
 
+		// infiltration and evaporation, before rain as in the CPU solver
+		if (losses.enabled())
+		{
+			losses.apply_acc(d_U.H, d_DEM, solver.t, grid_size);
+		}
+
 		if (states.rainfall == ON) {
 
 			rainfall_uniform.update_rainfall(filenames.rainfilename, solver.t);
@@ -264,6 +272,11 @@ void lis::cuda::acc::Simulation::run
 
 //			lis::StatsEntry Stats_Entry;
 
+			if (losses.enabled())
+			{
+				stats_collector.interval_loss = losses.take_interval_volume();
+				stats_collector.total_loss = losses.total_volume();
+			}
 			lis::StatsEntry Stats_Entry = stats_collector.create_entry(solver, d_U.H);
 
 			stats.write(Stats_Entry);

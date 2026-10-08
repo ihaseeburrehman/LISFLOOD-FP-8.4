@@ -106,6 +106,12 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 
 	zero_cumulative_mass();
 
+	// water removed by infiltration and evaporation is not an error
+	NUMERIC_TYPE volume_error = (interval_loss != 0.0)
+		? net_source_flux - volume_change - (NUMERIC_TYPE)interval_loss
+		: net_source_flux - volume_change;
+	interval_loss = 0.0;
+
 	return { 
 		solver.t,
 		cuda::dt,
@@ -114,8 +120,9 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 		area(H),
 		current_volume,
 		h_instantaneous_mass,
-		net_source_flux - volume_change,
-		(net_source_flux - volume_change)/time
+		volume_error,
+		volume_error/time,
+		(NUMERIC_TYPE)total_loss
 	};
 }
 
