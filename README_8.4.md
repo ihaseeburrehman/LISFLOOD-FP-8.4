@@ -2,7 +2,7 @@
 
 This folder is a working copy of LISFLOOD-FP 8.3 (`README.md` describes 8.3).
 **8.4 adds one thing:** floodplain infiltration and evaporation for the CUDA
-FV1 and CUDA ACC solvers. Nothing else changes. It is developed in parallel
+FV1, FV2, DG2 and ACC solvers. Nothing else changes. It is developed in parallel
 with the 8.3 paper and will be released only if every test below passes.
 
 ## Why
@@ -15,7 +15,7 @@ cannot be represented on the GPU at all.
 
 ## What 8.4 does
 
-The CUDA FV1 and ACC solvers apply the CPU rules at every time step: every wet
+The CUDA FV1, FV2, DG2 and ACC solvers apply the CPU rules at every time step: every wet
 cell (deeper than `DepthThresh`, not NoData) loses
 `(infiltration rate + evaporation rate) x dt` of depth, never below zero.
 
@@ -28,14 +28,20 @@ cell (deeper than `DepthThresh`, not NoData) loses
 - **FV1** stores discharge, so when a cell loses depth its discharges are
   scaled with it (velocity kept), and set to zero when the cell becomes dry.
 - **ACC** stores discharges on the cell faces; only the depth changes.
+- **FV2 and DG2** store slopes besides the cell averages. The loss lowers the
+  average depth and keeps the depth slopes (a flat water surface over sloping
+  ground stays flat); discharge average and slopes are scaled with the depth.
+  If a face would become dry (a cell on a wet/dry edge), the cell is made first
+  order (all slopes zero): a face with discharge but no depth stopped DG2's
+  time step in the first version.
 - **Mass balance:** the volume removed is summed on the GPU. In the `.mass`
   file, `Verror` no longer counts it as an error, and the last column
   (`Rain-(Inf+Evap)`, always 0 on the GPU before) shows minus the volume
   removed since the start (rain is not counted in this column).
 - **Without these keywords** 8.4 computes exactly what 8.3 computes; outputs,
   `.mass` file included, are identical byte for byte.
-- Solvers that do not apply them (CUDA FV2, DG2, ACC-nugrid, adaptive; Metal
-  FV1; CPU FV1/FV2/DG2) now print a warning instead of ignoring them silently.
+- Solvers that do not apply them (CUDA ACC-nugrid and adaptive; Metal FV1; CPU
+  FV1/FV2/DG2) now print a warning instead of ignoring them silently.
 - Start-up line: `LISFLOOD-FP 8.4`.
 
 Code: `source/cuda/cuda_losses.cu` (new), calls in
@@ -66,7 +72,14 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 | Alzette FV1, uniform 2 mm/h vs `infilfile` 2 mm/h | identical (grid loader checked on 10.6 M cells) |
 | Alzette FV1 with infiltration (and evaporation) | 3.25 (3.44) million m3 removed in 6 h; no cell deeper than without |
 | CUDA ACC, Carlisle (6 h) and EA test 5 (6 h), 5 mm/h, against the CPU ACC solver | water removed by infiltration agrees within 1.9 % and 0.7 %; time step and maximum depth unchanged |
+| T012, CUDA FV2 and DG2 (base, ramp, wall, half rate) | within 0.07-0.21 % of the loss, either sign (0.15-0.76 mm of 223-360 mm); without the keywords identical to 8.3 |
+| CUDA FV2 and DG2, EA test 5 (6 h), 5 mm/h | stored water falls by the volume removed within 0.1 % (FV2) and 0.5 % (DG2); without the keywords identical to 8.3 |
 | cost | about 11-20 % more run time |
+
+FV1 and ACC remove exactly rate x dt. FV2 and DG2 remove it too, but their
+results differ from the exact answer by about +-0.1-0.2 % of the loss (in
+either direction, not proportional to the rate): their closed walls exchange a
+little water while the water level changes. This is accepted and documented.
 
 Found on the way (fixed in 8.4): depth is single precision, so small losses
 per step were rounded the same way every step (3.7 mm off after 50 days in
@@ -84,10 +97,15 @@ Found on the way, already in 8.2/8.3 and not changed here:
   although the water is removed correctly.
 - The CUDA `.mass` file: FV1 volume includes the ghost cells; the first row
   always shows the whole volume as `Verror`.
+- CUDA DG2 writes negative depths on EA test 5 even without losses (down to
+  -0.86 m in 27 000 cells after 6 h; total volume still conserved).
+- CUDA ACC on Alzette: stable with a uniform Manning's n of 0.05, unstable with
+  the land-use map (446 000 cells at n = 0.016); ACC is known to become
+  unstable at low friction on fine grids.
 
 ## Plan
 
-1. Constant-rate infiltration and evaporation in CUDA FV1 and ACC (this
+1. Constant-rate infiltration and evaporation in CUDA FV1, FV2, DG2 and ACC (this
    version), tested as above.
 2. Then, if 1 works: Green-Ampt infiltration, started from a soil-moisture
    grid (e.g. WRF `SMOIS` at the start of the run) and soil-property grids

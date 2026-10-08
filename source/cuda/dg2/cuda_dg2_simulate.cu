@@ -11,6 +11,7 @@
 #include "cuda_max_field.cuh"
 #include "cuda_rain.cuh"
 #include "cuda_stats.cuh"
+#include "cuda_losses.cuh"
 #include "cuda_unifiedallocator.cuh"
 #include "../rain/rain.h"
 #include "io.h"
@@ -92,6 +93,7 @@ void lis::cuda::dg2::Simulation::run
 	solver.MinTstep = solver.InitTstep;
 
 	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
+	Losses losses(filenames, states, pars, geometry, pitch, offset, verbose);
 	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
 			grid_size, pars.output_precision);
 
@@ -172,6 +174,11 @@ void lis::cuda::dg2::Simulation::run
 			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM._0, 
 					stats_collector.instantaneous_mass(), grid_size);
 		}
+		if (losses.enabled())
+		{
+			losses.apply_slopes(d_U.H, d_U.H1x, d_U.H1y, d_U.HU, d_U.HU1x, d_U.HU1y,
+					d_U.HV, d_U.HV1x, d_U.HV1y, d_DEM._0, SQRT(C(3.0)), solver.t, grid_size);
+		}
 		stats_collector.accumulate_mass();
 		max_field.update(d_U.H);
 
@@ -181,6 +188,11 @@ void lis::cuda::dg2::Simulation::run
 			solve->zero_ghost_cells();
 			cuda::sync();
 
+			if (losses.enabled())
+			{
+				stats_collector.interval_loss = losses.take_interval_volume();
+				stats_collector.total_loss = losses.total_volume();
+			}
 			stats.write(stats_collector.create_entry(solver, d_U.H));
 			sampler.write_if_buffer_full();
 		}

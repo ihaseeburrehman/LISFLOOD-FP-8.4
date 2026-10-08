@@ -49,6 +49,12 @@ grid(os.path.join(t, "wall_start.ascii"),
 grid(os.path.join(t, "wall_infil.ascii"),
      [["0.3" if i < 4 else "0" for i in range(10)] for _ in range(5)], header)
 
+# DG2 also reads the slopes of the DEM and of the start depth (<file>1x, 1y):
+# zero on these piecewise flat grids
+for name in ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii", "wall_dtm.ascii", "wall_start.ascii"):
+    for suffix in ("1x", "1y"):
+        grid(os.path.join(t, name + suffix), [["0"] * 10 for _ in range(5)], header)
+
 common = ("sim_time 8640000.0\nmassint 86400.0\nsaveint 4320000.0\n"
           "fpfric 0.06\nelevoff\noutput_precision 6\n")
 fixed = "initial_tstep 86400.0\nadaptoff\n"   # as the original T012 (CPU ACC)
@@ -57,6 +63,8 @@ solvers = {
     "cpu_acc": "acceleration\n" + fixed,
     "cuda_acc": "acceleration\ncuda\n" + fixed,
     "cuda_fv1": "fv1\ncuda\n" + adaptive,
+    "cuda_fv2": "fv2\ncuda\n" + adaptive,
+    "cuda_dg2": "dg2\ncuda\n" + adaptive,
 }
 cases = {
     "base": ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii",

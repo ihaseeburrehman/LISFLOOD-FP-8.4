@@ -47,6 +47,15 @@ TOL = 2e-6       # m: two units of the last written digit (output_precision 6)
 THRESH = 0.001   # m: DepthThresh; shallower cells lose nothing (CPU rule)
 
 
+def tol_for(run, h0, expected):
+    """FV1 and ACC remove exactly rate x dt; FV2 and DG2 remove it too, but
+    their closed walls let about 0.1 % of it back in while the level falls
+    (README_8.4.md), so they are checked to 0.2 % of the expected loss"""
+    if "fv2" in run or "dg2" in run:
+        return max(TOL, 2e-3 * (h0 - expected))
+    return TOL
+
+
 def steps(run):
     """(t, dt) of every time step, from the run.log of a run with -v"""
     out = []
@@ -142,29 +151,39 @@ if glob.glob(os.path.join(OUT, "t012_*")):
     check_depth(r, 1, H0 - RATE * T50, 1e-4, label=" (50 days)")
     check_dry(r, 2, label=" (100 days)")
     check_mass(r, "", START)
-    for s in ("cuda_acc", "cuda_fv1"):
+    GPU = [s for s in ("cuda_acc", "cuda_fv1", "cuda_fv2", "cuda_dg2")
+           if os.path.isdir(os.path.join(OUT, f"t012_base_{s}_84"))]
+    for s in GPU:
         r = f"t012_base_{s}_84"
-        check_depth(r, 1, exact_depth(r, 1, H0, lambda t: RATE, T50, s == "cuda_fv1"), TOL,
-                    label=" (50 days)")
+        # FV1, FV2, DG2 apply the loss at the end of a step, ACC at its start;
+        # their .mass volume includes the ghost cells (Verror not checked)
+        end = (s != "cuda_acc")
+        e = exact_depth(r, 1, H0, lambda t: RATE, T50, end)
+        check_depth(r, 1, e, tol_for(r, H0, e), label=" (50 days)")
         check_dry(r, 2, label=" (100 days)")
-        check_mass(r, "", START, verror=(s != "cuda_fv1"))
-    for s in ("cpu_acc", "cuda_acc", "cuda_fv1"):
-        check_depth(f"t012_off_{s}_84", 2, H0, 1e-6, label=" (no losses, 100 days)")
-    for s in ("cuda_acc", "cuda_fv1"):
-        ok, msg = same_files(f"t012_off_{s}_84", f"t012_off_{s}_83")
-        report(ok, f"t012 off, {s}: 8.4 vs 8.3: {msg}")
-        fv1 = (s == "cuda_fv1")
+        check_mass(r, "", START, verror=not end)
+    for s in ["cpu_acc"] + GPU:
+        if os.path.isdir(os.path.join(OUT, f"t012_off_{s}_84")):
+            check_depth(f"t012_off_{s}_84", 2, H0, TOL, label=" (no losses, 100 days)")
+    for s in GPU:
+        if os.path.isdir(os.path.join(OUT, f"t012_off_{s}_83")):
+            ok, msg = same_files(f"t012_off_{s}_84", f"t012_off_{s}_83")
+            report(ok, f"t012 off, {s}: 8.4 vs 8.3: {msg}")
+        if not os.path.isdir(os.path.join(OUT, f"t012_ramp_{s}_84")):
+            continue
+        fv1 = (s != "cuda_acc")
         r = f"t012_ramp_{s}_84"   # evaporation 0 -> 7.2 mm/day (about 90 and 360 mm lost)
         ramp = lambda t: 7.2 / 1000 / 86400 * t / T100
-        check_depth(r, 1, exact_depth(r, 1, H0, ramp, T50, fv1), TOL, label=" (ramp, 50 days)")
-        check_depth(r, 2, exact_depth(r, 2, H0, ramp, T50, fv1), TOL, label=" (ramp, 100 days)")
+        for k, label in ((1, " (ramp, 50 days)"), (2, " (ramp, 100 days)")):
+            e = exact_depth(r, k, H0, ramp, T50, fv1)
+            check_depth(r, k, e, tol_for(r, H0, e), label=label)
         check_mass(r, "ramp: ", START, verror=not fv1)
         r = f"t012_wall_{s}_84"   # 0.3 mm/h on the left half only
         left = 0.3 / 1000 / 3600
-        check_depth(r, 1, exact_depth(r, 1, H0, lambda t: left, T50, fv1), TOL, cols=range(4),
-                    label=" left half (50 days)")
+        e = exact_depth(r, 1, H0, lambda t: left, T50, fv1)
+        check_depth(r, 1, e, tol_for(r, H0, e), cols=range(4), label=" left half (50 days)")
         check_dry(r, 2, cols=range(4), label=" left half (100 days)")
-        check_depth(r, 2, H0, 1e-6, cols=range(5, 10), label=" right half (100 days)")
+        check_depth(r, 2, H0, TOL, cols=range(5, 10), label=" right half (100 days)")
         check_mass(r, "wall: ", WALL, verror=not fv1)
 
 # ---------------------------------------------------------------- Alzette

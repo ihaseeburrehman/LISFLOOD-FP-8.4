@@ -9,7 +9,8 @@ namespace cuda
 {
 
 /**
- * Floodplain infiltration and evaporation for the CUDA FV1 and ACC solvers,
+ * Floodplain infiltration and evaporation for the CUDA FV1, FV2, DG2 and ACC
+ * solvers,
  * as in the CPU routines FPInfiltration and Evaporation (infevap.cpp):
  * every wet cell (depth > DepthThresh) outside NoData loses
  * (infiltration rate + evaporation rate) * dt of depth, never below zero.
@@ -53,6 +54,25 @@ public:
 		NUMERIC_TYPE* HU,
 		NUMERIC_TYPE* HV,
 		NUMERIC_TYPE* DEM,
+		NUMERIC_TYPE t,
+		dim3 grid_size
+	);
+
+	/**
+	 * FV2 and DG2: the loss lowers the cell average of the depth; the depth
+	 * slopes are kept (a uniform loss keeps the water surface flat) and the
+	 * discharge average and slopes are scaled with the depth; if a face
+	 * would become dry (wet/dry edge), the cell becomes first order (all
+	 * slopes zero); a cell that dries loses its slopes and discharge. face: the face value is
+	 * average +- face x slope (FV2: 0.5, DG2: sqrt(3)).
+	 */
+	void apply_slopes
+	(
+		NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,
+		NUMERIC_TYPE* HU, NUMERIC_TYPE* HU1x, NUMERIC_TYPE* HU1y,
+		NUMERIC_TYPE* HV, NUMERIC_TYPE* HV1x, NUMERIC_TYPE* HV1y,
+		NUMERIC_TYPE* DEM,
+		NUMERIC_TYPE face,
 		NUMERIC_TYPE t,
 		dim3 grid_size
 	);

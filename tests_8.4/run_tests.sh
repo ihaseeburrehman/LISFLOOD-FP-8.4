@@ -27,7 +27,7 @@ run() {  # bin dir par name
   n=$(basename "$p" .par)
   run "$BIN84" "$WORK/t012" "$(basename "$p")" "t012_${n}_84"
 done
-[ "$ONLY" = alzette ] || for s in cuda_fv1 cuda_acc; do
+[ "$ONLY" = alzette ] || for s in cuda_fv1 cuda_acc cuda_fv2 cuda_dg2; do
   run "$BIN83" "$WORK/t012" off_$s.par "t012_off_${s}_83"
 done
 
