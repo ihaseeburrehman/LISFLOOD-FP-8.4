@@ -337,6 +337,23 @@ order: HWFV1 first (finite volume, no slopes), then MWDG2.
   the rest with the same input files and with the CPU or CUDA spread as
   baseline; every run must repeat bit for bit.
 
+### Where things are, and keeping 8.3 untouched
+
+The exact folders on the development machines (the 8.3 and 8.4 sources and
+zips, the Metal and CUDA builds, the reference outputs and prepared inputs on
+the HPC, the archive) are listed in `HANDOVER_LOCAL.md`, which is kept next to
+this source and out of the release. In general:
+
+- **8.3 is frozen.** Its release, its git history, its build used for the
+  8.3 paper, its test runs and its reference outputs are read only: read,
+  copy and compare, never edit, rebuild in place or write into them.
+- **Work in a copy of 8.4**, with new build and output folders, and new run
+  labels; never reuse a label of an existing reference run.
+- **Compare on the same inputs**: copy the prepared test inputs of the
+  reference runs (with their `.prepared` marker) instead of regenerating them.
+- **The CUDA references** are the 8.3 builds and their outputs; the CPU
+  references are the CPU solvers of the same version.
+
 ### Rules that held throughout
 
 - Without the new keywords, results must stay identical to 8.3, byte for
