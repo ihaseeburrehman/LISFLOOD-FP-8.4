@@ -60,7 +60,17 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
                 -o ${METALLIB_LOSSES}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/losses/metal_losses_kernels.metal
         COMMENT "Compiling Metal loss kernels")
-    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2} ${METALLIB_LOSSES})
+    set(METALLIB_TREE ${CMAKE_BINARY_DIR}/metal_tree_primitives.metallib)
+    add_custom_command(
+        OUTPUT ${METALLIB_TREE}
+        COMMAND xcrun -sdk macosx metal -fno-fast-math
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/adaptive/metal_tree_primitives.metal
+                -o ${CMAKE_BINARY_DIR}/metal_tree_primitives.air
+        COMMAND xcrun -sdk macosx metallib ${CMAKE_BINARY_DIR}/metal_tree_primitives.air
+                -o ${METALLIB_TREE}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/adaptive/metal_tree_primitives.metal
+        COMMENT "Compiling native Metal tree primitives")
+    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2} ${METALLIB_LOSSES} ${METALLIB_TREE})
 
     add_library(lisflood-metal STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/metal_integrate.cpp

@@ -1,5 +1,31 @@
 # LISFLOOD-FP 8.4: how it was built and tested
 
+## Current handover: incomplete native adaptive Metal support
+
+The dense Metal implementations and their 28 Alzette runs are completed.
+HWFV1, MWDG2 and ACC_NUGRID currently reuse dense FV1, DG2 and ACC operators;
+their native compressed meshes remain unimplemented. Release completion
+requires actual mesh construction, refinement/coarsening, neighbour handling,
+adaptive flow operators and soil-state transfer, tested on Apple hardware
+against CUDA and analytic conservation cases.
+
+CUDA Alzette job 36660527 did not merely need more wall time: its MWDG2
+loss-free run stalled at 11.372408 seconds with dt=6.282032e-8 seconds.
+Diagnose stability and floating-point time stagnation before resubmitting;
+then finish all four loss settings and verify the six-hour endpoint.
+The existing report is partial evidence, not a completed parity matrix.
+The final manuscript update must use completed results and distinguish
+numerical agreement from validation against basin observations.
+
+Native Metal development has started with GPU exclusive scan and stable
+compaction in `source/metal/adaptive/metal_tree_primitives.metal`. They pass
+CPU-reference checks on Apple hardware through 1,048,579 nodes, including
+partial threadgroups and recursive scans. Reproduce with
+`sh tests_8.4/run_metal_tree_primitives.sh`. They are compiled by the Metal
+build but not yet connected to the flow driver. The next implementation work
+is Morton hierarchy encoding, refinement flags, active-leaf traversal and
+neighbours, followed by adaptive flow updates and finest-grid loss transfer.
+
 `README.md` describes 8.4 and how to build and use it; this file records how
 8.4 was developed and tested, and the results.
 **8.4 adds two things to 8.3:** floodplain infiltration, evaporation and

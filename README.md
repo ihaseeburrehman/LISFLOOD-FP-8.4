@@ -1,5 +1,12 @@
 # LISFLOOD-FP 8.4
 
+Implementation status (9 October 2026): native adaptive Metal support is
+unfinished. HWFV1, MWDG2 and ACC_NUGRID currently dispatch to dense operators;
+accepting those keywords does not implement their compressed meshes. The
+28-run Metal Alzette matrix completed, but the CUDA matrix timed out in MWDG2.
+Neither full adaptive Metal support nor complete cross-backend validation is
+claimed. See the current handover in `README_8.4.md`.
+
 LISFLOOD-FP 8.3 with floodplain infiltration and evaporation on the GPU
 (constant rate or Green-Ampt) and every GPU solver on Apple computers.
 8.3 is LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA
