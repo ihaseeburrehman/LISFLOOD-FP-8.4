@@ -241,6 +241,112 @@ Found in the original solvers while porting (to report, not changed in 8.4):
 - CUDA applies dynamic rain and point sources with the previous step's dt
   (zero before the first step); ported unchanged.
 
+## Problems met while building 8.4, and how each was solved
+
+Kept here so that whoever extends 8.4 does not meet them again.
+
+| # | problem | how it showed | solution |
+|---|---|---|---|
+| 1 | Most source files have CRLF line endings; editing them with tools that write LF silently converts whole files | diffs of thousands of lines | read and write with the line endings preserved; check with `file` before committing |
+| 2 | The loss per step is often close to the resolution of a single-precision depth (a few um on metres of water), so it is rounded away | depths fell too slowly; small rates did nothing | compensated subtraction: each cell keeps the part of its loss that rounding dropped (`residual`) and adds it to its next step |
+| 3 | The GPU model clock (single precision) falls behind the sum of the time steps on long runs | expected depth `h0 - rate t` wrong by more than the tolerance | tests compute the expected depth from the steps the model logged (`-v` prints one `t= dt=` line per step; the Metal solvers now do too) |
+| 4 | DG2: a cell on a wet/dry edge whose loss makes a face dry, with discharge but no depth there | the time step collapsed to zero | if a face would become dry, the cell is made first order (all slopes zero) |
+| 5 | Apple GPUs have no double precision, which CUDA uses for the Green-Ampt depth F; `F_new - F` in float cancels | Green-Ampt wrong by percent in float | F kept as a pair of floats (exact two-sum), and the increment written without cancellation (`metal_losses_kernels.metal`, `greenampt_step`) |
+| 6 | Metal FV2 started from the FV1 host, whose boundary handling differs from CUDA FV2 | water lost at a fixed-discharge inflow (T031): the first steps ignored the inflow speed and were about 30 times too long | port CUDA's ghost-cell states and step order exactly (ghost cells, then the time step over every cell including them). Lesson: copying a host copies its boundary rules |
+| 7 | Metal allows 31 buffer arguments per kernel; a DG2 stage reads three sets of 9 coefficients and writes one | does not fit | one buffer of 9 planes per coefficient set |
+| 8 | CUDA DG2 limits slopes in place: a cell may read a neighbour's slope before or after it is limited | results could depend on thread timing | Metal limits into a separate buffer and copies back |
+| 9 | `generateDG2DEM`/`generateDG2start` built on macOS and Linux write slightly different files | every solver, FV1 included, differed from CUDA on T05 | compare back ends only on the same input files (copy the HPC's `work/data`) |
+| 10 | Metal writes output 0 after the first step, CUDA before it | output 0 always differs | comparisons skip output 0 |
+| 11 | CUDA FV2 and DG2 keep the bed elevation in single precision as given (20 m in T012) | losses 0.1-0.2 % off, water created or destroyed | proven with the DEM lowered to 0 m (exact); left as in 8.3 (changing it would change results without the keywords); tests allow 0.3 % for them; Metal shifts the DEM to its lowest cell and is exact |
+| 12 | CUDA ACC wrote its last snapshot in the background and freed the arrays without waiting (`snapshot.wait()` commented out in 8.2) | once: segmentation fault, last output cut short | `snapshot.wait()` restored |
+| 13 | Test-checker mistakes: a pattern for T012 also matched the Green-Ampt runs; FV1's `.mass` volume includes the ghost cells; the GPU's first `.mass` row holds the whole volume; ACC writes output 0 after its first step | false failures | fixed in `tests_8.4/check.py` (Verror not checked where the volume includes ghost cells) |
+| 14 | Long runs on a laptop stop when it sleeps | runs stalled overnight | run with `caffeinate -i` |
+| 15 | On the ECMWF HPC, `sbatch` drops empty arguments, and scratch is purged when unused | jobs got wrong arguments; data at risk | pass `all`, never `""`; archive results to `$PERM` |
+
+## Handover: what to do next
+
+The four uniform-grid GPU solvers (FV1, FV2, DG2, ACC) apply infiltration,
+evaporation and Green-Ampt on CUDA and Metal. Not yet covered: the CUDA
+adaptive solvers MWDG2 and HWFV1 (`source/cuda/adaptive`, keywords `mwdg2`,
+`hwfv1`), the CUDA ACC solver on a non-uniform grid (`source/cuda/acc_nugrid`),
+and the sub-grid channel model, which exists only on the CPU. In that order:
+
+### 1. Losses in CUDA MWDG2 and HWFV1
+
+What is different from the uniform solvers:
+- `lis::cuda::adaptive::Simulation::run(argc, argv)` parses the `.par` file
+  itself; it does not receive `Fnames`, `States` and `Pars`. Pass them from
+  `lisflood.cpp` (as for the other solvers) or read the loss keywords with the
+  solver's own `read_keyword_*` functions.
+- The solution is an `AssembledSolution` of active cells of a multiresolution
+  mesh (`h0, qx0, qy0`, for MWDG2 also the slopes `h1x, h1y, ...`; `levels`,
+  `act_idcs`, `length`) that changes every step. A cell at level `l` covers
+  `2^(L-l) x 2^(L-l)` cells of the finest grid, which is the DEM padded to
+  `2^L x 2^L`.
+- Its outputs and mass log (`write_cumulative_data`) are its own.
+
+Plan:
+1. Keep the parameters (rate, `Ks`, `psi`, `dtheta`, soil-depth cap) and the
+   state (`residual`, and `F` in double) on the **finest grid**, so they do
+   not depend on the mesh. Read them with `cuda::Losses`' parser
+   (`host_grid`) into the padded `2^L x 2^L` layout (NoData and padding: 0).
+2. After `fv1_update` / `dg2_update` and before the time step is computed for
+   the next step (`cuda_adaptive_simulate.cu`, after the solver branch), launch
+   one kernel over the active cells: for an active cell, take the mean
+   parameters of its finest children, apply `depth_after_loss` /
+   `depth_after_greenampt` (copy them from `cuda_losses.cu`) to `h0`, scale
+   `qx0, qy0` (FV1 rule) or, for MWDG2, apply the slope rule of
+   `apply_losses_slopes` with face value `sqrt(3)`; then add the same `dF` and
+   residual to every finest child, so that `F` survives when the mesh changes.
+3. Volume removed = depth change x cell area (`dx_finest^2 x 4^(L-l)`); sum it
+   (block sum + `atomicAdd` on a double, as in `cuda_losses.cu`) and report it
+   in the solver's mass log, so that its volume error does not count it.
+4. Tests: run the T012 variants and the Green-Ampt tests of `tests_8.4` with
+   `mwdg2` and `hwfv1` (add the solvers to `make_inputs.py`; with `epsilon` 0
+   the mesh is adapted only at the first step and should stay at the finest
+   level, so the expected depths of `check.py` should apply unchanged; check
+   this first), then with `epsilon` > 0 on a case whose mesh
+   adapts (check the volume balance and that `F` is continuous when cells
+   merge and split). Without the keywords the outputs must be identical to
+   8.3, byte for byte.
+
+### 2. Losses in CUDA ACC on a non-uniform grid (`acc_nugrid`)
+
+Same idea; its cells also have several sizes (`NonUniformNeighbours`,
+`AssembledSolution` in `cuda/acc_nugrid`). ACC changes only the depth.
+
+### 3. MWDG2 and HWFV1 on Metal
+
+A large port (the adaptive solver has 56 CUDA kernels, and 11 of its files
+use CUB for sorting, scans and compaction of the Morton-ordered mesh). Suggested
+order: HWFV1 first (finite volume, no slopes), then MWDG2.
+- Replace CUB: Metal has no equivalent library. Write a radix sort and an
+  exclusive scan in Metal (or use a well-tested open-source one); compaction
+  is a scan plus a scatter. Check each against the CUDA result on random input
+  before porting anything else.
+- Port the multiresolution analysis (`mra/`: encode, threshold, decode) and
+  the neighbour search (`neighbours/`) kernel by kernel, and compare the mesh
+  (`levels`, `act_idcs`) with CUDA after every step on a small case: it must be
+  identical, or nothing after it can be.
+- Then the update operators (`operators/fv1_update`, `dg2_update`, friction,
+  limiter) and the time step, as for FV2 and DG2 here: same boundary and step
+  order as CUDA, each face flux computed once, no fast math, deterministic
+  reductions (no float atomics in anything that feeds the solution).
+- Losses: reuse `source/metal/losses` with the finest-grid state of step 1.
+- Verify as in this file: identical to CUDA on the small cases where possible,
+  the rest with the same input files and with the CPU or CUDA spread as
+  baseline; every run must repeat bit for bit.
+
+### Rules that held throughout
+
+- Without the new keywords, results must stay identical to 8.3, byte for
+  byte (`tests/run_suite.sh` + `hash_outputs.sh` + `compare_hashes.py`).
+- Small test first, then the full set; check mass balance and repeatability.
+- Compare against a reference on the same inputs, and report the spread
+  between existing back ends (CPU vs CUDA) next to the new one.
+- Defects found in the existing solvers are reported, not silently changed
+  (list above).
+
 ## Plan
 
 1. Constant-rate infiltration and evaporation in CUDA FV1, FV2, DG2 and ACC (this
