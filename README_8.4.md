@@ -3,10 +3,9 @@
 `README.md` describes 8.4 and how to build and use it; this file records how
 8.4 was developed and tested, and the results.
 **8.4 adds two things to 8.3:** floodplain infiltration and evaporation for the
-CUDA and Metal FV1, FV2, DG2 and ACC solvers, and Metal (Apple Silicon)
-versions of the FV2, DG2 and ACC solvers, so that every solver 8.3 runs on an
-NVIDIA GPU also runs on a Mac (see "Metal back end" below). Nothing else
-changes.
+CUDA and Metal FV1, FV2, DG2 and ACC solvers and CUDA MWDG2/HWFV1;
+and Metal (Apple Silicon) versions of FV2, DG2 and ACC, covering the four
+uniform-grid GPU solvers on a Mac (see "Metal back end" below).
 
 ## Why
 
@@ -67,7 +66,7 @@ Otherwise they infiltrate as if dry soil (see the Alzette test below).
   removed since the start (rain is not counted in this column).
 - **Without these keywords** 8.4 computes exactly what 8.3 computes; outputs,
   `.mass` file included, are identical byte for byte.
-- Solvers that do not apply them (CUDA ACC-nugrid and adaptive; CPU
+- Solvers that do not apply them (CUDA ACC-nugrid; CPU
   FV1/FV2/DG2) now print a warning instead of ignoring them silently.
 - Start-up line: `LISFLOOD-FP 8.4`.
 
@@ -266,56 +265,68 @@ Kept here so that whoever extends 8.4 does not meet them again.
 ## Handover: what to do next
 
 The four uniform-grid GPU solvers (FV1, FV2, DG2, ACC) apply infiltration,
-evaporation and Green-Ampt on CUDA and Metal. Not yet covered: the CUDA
-adaptive solvers MWDG2 and HWFV1 (`source/cuda/adaptive`, keywords `mwdg2`,
-`hwfv1`), the CUDA ACC solver on a non-uniform grid (`source/cuda/acc_nugrid`),
-and the sub-grid channel model, which exists only on the CPU. In that order:
+evaporation and Green-Ampt on CUDA and Metal. CUDA MWDG2 and HWFV1 now
+apply the same losses. Next: CUDA ACC on a non-uniform grid, then the Metal
+adaptive solvers. The sub-grid channel model remains CPU-only.
 
-### 1. Losses in CUDA MWDG2 and HWFV1
+### Completed: losses in CUDA MWDG2 and HWFV1 (9 October 2026)
 
-What is different from the uniform solvers:
-- `lis::cuda::adaptive::Simulation::run(argc, argv)` parses the `.par` file
-  itself; it does not receive `Fnames`, `States` and `Pars`. Pass them from
-  `lisflood.cpp` (as for the other solvers) or read the loss keywords with the
-  solver's own `read_keyword_*` functions.
-- The solution is an `AssembledSolution` of active cells of a multiresolution
-  mesh (`h0, qx0, qy0`, for MWDG2 also the slopes `h1x, h1y, ...`; `levels`,
-  `act_idcs`, `length`) that changes every step. A cell at level `l` covers
-  `2^(L-l) x 2^(L-l)` cells of the finest grid, which is the DEM padded to
-  `2^L x 2^L`.
-- Its outputs and mass log (`write_cumulative_data`) are its own.
+`Simulation::run` now receives the shared `Fnames`, `States`, `Pars` and
+`Solver`, so loss keywords use the same parsing as the uniform-grid solvers.
+`Losses` retains parameters, compensation residuals and double-precision
+infiltrated depth F in the original finest raster layout. Morton coordinates
+are converted to raster coordinates (including the reversed row order), and
+padding and DEM NoData are excluded.
 
-Plan:
-1. Keep the parameters (rate, `Ks`, `psi`, `dtheta`, soil-depth cap) and the
-   state (`residual`, and `F` in double) on the **finest grid**, so they do
-   not depend on the mesh. Read them with `cuda::Losses`' parser
-   (`host_grid`) into the padded `2^L x 2^L` layout (NoData and padding: 0).
-2. After `fv1_update` / `dg2_update` and before the time step is computed for
-   the next step (`cuda_adaptive_simulate.cu`, after the solver branch), launch
-   one kernel over the active cells: for an active cell, take the mean
-   parameters of its finest children, apply `depth_after_loss` /
-   `depth_after_greenampt` (copy them from `cuda_losses.cu`) to `h0`, scale
-   `qx0, qy0` (FV1 rule) or, for MWDG2, apply the slope rule of
-   `apply_losses_slopes` with face value `sqrt(3)`; then add the same `dF` and
-   residual to every finest child, so that `F` survives when the mesh changes.
-3. Volume removed = depth change x cell area (`dx_finest^2 x 4^(L-l)`); sum it
-   (block sum + `atomicAdd` on a double, as in `cuda_losses.cu`) and report it
-   in the solver's mass log, so that its volume error does not count it.
-4. Tests: run the T012 variants and the Green-Ampt tests of `tests_8.4` with
-   `mwdg2` and `hwfv1` (add the solvers to `make_inputs.py`; with `epsilon` 0
-   the mesh is adapted only at the first step and should stay at the finest
-   level, so the expected depths of `check.py` should apply unchanged; check
-   this first), then with `epsilon` > 0 on a case whose mesh
-   adapts (check the volume balance and that `F` is continuous when cells
-   merge and split). Without the keywords the outputs must be identical to
-   8.3, byte for byte.
+After the full FV1 or two-stage DG2 update, each leaf evaluates the shared
+loss equations for its finest children at the leaf's mean water depth. Their
+depth changes are averaged into the leaf; compensation includes the rounding
+of that average. F remains separate for every child through merges and splits.
+This differs from the original handover's proposal to average soil parameters:
+Green-Ampt is nonlinear, and averaging parameters would mix sealed soil and
+soil with conductivity or finite storage. A one-time refinement flag preserves
+all spatial soil-parameter and validity-mask changes, so a flat surface cannot
+hide a nonuniform soil field by merging the entire basin before losses begin.
+HWFV1 scales discharge; MWDG2 applies the existing DG2 slope and dry-face rules.
+For loss-enabled runs, a cache indexed by tree node preserves the depth of
+leaves that survive adaptation unchanged, including their neighbour copies.
+It includes point-source increments inserted before encoding. This avoids
+repeated h -> eta -> h rounding near high NoData/padding walls; newly merged
+or split leaves still use the multiresolution reconstruction. The cache costs
+one depth and one integer generation counter per tree node.
 
-### 2. Losses in CUDA ACC on a non-uniform grid (`acc_nugrid`)
+The adaptive `.cumu` file contains timings, not a mass balance. Loss-enabled
+runs therefore write a separate `.loss` CSV at `massint`: simulation time,
+double-precision integrated time, cumulative volume removed and current water
+volume. Storage plus losses should be constant in a closed basin, within the
+underlying flow solver's conservation error. This file does not correct for
+boundary flows or rainfall, and no existing output format changes when losses
+are disabled.
+
+Use `max_ref_lvl >= 5`, even for smaller rectangular DEMs. The legacy tree
+traversal uses full CUDA blocks and corrupts memory for smaller padded meshes;
+loss-enabled runs reject them. Tests use short relative filenames because the
+legacy adaptive keyword readers copy unrelated string values into small
+buffers while scanning a parameter file. These legacy routines are unchanged.
+
+Run the standalone GPU checks (new WORK directory required):
+```
+python3 tests_8.4/adaptive.py BIN84 BIN83 WORK
+```
+They cover constant and grid rates, evaporation, drying, Green-Ampt numeric
+versus grid parameters, a finite soil-storage cap, north/south orientation,
+rectangular padding and NoData (HWFV1), changing meshes, repeatability and
+loss-disabled equality with CUDA 8.3. Moving-case volume balance is compared
+with the loss-free solver's drift; the uniform closed basins use a 0.03 %
+relative volume tolerance. The full results, including the remaining
+adaptive-flow conservation error, are in `tests_8.4/ADAPTIVE_RESULTS.md`.
+
+### 1. Next: losses in CUDA ACC on a non-uniform grid (`acc_nugrid`)
 
 Same idea; its cells also have several sizes (`NonUniformNeighbours`,
 `AssembledSolution` in `cuda/acc_nugrid`). ACC changes only the depth.
 
-### 3. MWDG2 and HWFV1 on Metal
+### 2. MWDG2 and HWFV1 on Metal
 
 A large port (the adaptive solver has 56 CUDA kernels, and 11 of its files
 use CUB for sorting, scans and compaction of the Morton-ordered mesh). Suggested
@@ -332,7 +343,7 @@ order: HWFV1 first (finite volume, no slopes), then MWDG2.
   limiter) and the time step, as for FV2 and DG2 here: same boundary and step
   order as CUDA, each face flux computed once, no fast math, deterministic
   reductions (no float atomics in anything that feeds the solution).
-- Losses: reuse `source/metal/losses` with the finest-grid state of step 1.
+- Losses: reuse `source/metal/losses` with the finest-grid state used by CUDA above.
 - Verify as in this file: identical to CUDA on the small cases where possible,
   the rest with the same input files and with the CPU or CUDA spread as
   baseline; every run must repeat bit for bit.

@@ -1,6 +1,9 @@
 //-----------------Custom headers-----------------//
 
 #include "cuda_adaptive_simulate.cuh"
+#include "../cuda_losses.cuh"
+#include "../cuda_dem.cuh"
+#include "../cuda_util.cuh"
 
 // Kernels
 #include "zorder/generate_all_morton_codes.cuh"
@@ -135,12 +138,49 @@
 // =============================================MAIN PROGRAM=============================================== //
 // ======================================================================================================== //
 
+// Encoding eta=h+z and decoding h=eta-z can erase small losses every step
+// near high walls. Preserve h for leaves that survive adaptation unchanged.
+// Point-source increments already inserted into the scale coefficients remain.
+__global__ void cache_loss_depth(AssembledSolution sol, ScaleCoefficients scales,
+	real* depths, int* generations, int generation)
+{
+	int i = blockIdx.x*blockDim.x + threadIdx.x;
+	if (i >= sol.length) return;
+	int node = sol.act_idcs[i];
+	depths[node] = sol.h0[i] + (scales.eta0[node] - (sol.h0[i]+sol.z0[i]));
+	generations[node] = generation;
+}
+
+__device__ void restore_loss_depth(const AssembledSolution& sol, int i,
+	const real* depths, const int* generations, int generation)
+{
+	int node = sol.act_idcs[i];
+	if (node >= 0 && generations[node] == generation) sol.h0[i] = depths[node];
+}
+
+__global__ void restore_loss_depths(AssembledSolution sol, Neighbours neighbours,
+	const real* depths, const int* generations, int generation)
+{
+	int i = blockIdx.x*blockDim.x + threadIdx.x;
+	if (i >= sol.length) return;
+	restore_loss_depth(sol, i, depths, generations, generation);
+	restore_loss_depth(neighbours.north, i, depths, generations, generation);
+	restore_loss_depth(neighbours.east, i, depths, generations, generation);
+	restore_loss_depth(neighbours.south, i, depths, generations, generation);
+	restore_loss_depth(neighbours.west, i, depths, generations, generation);
+}
+
 void lis::cuda::adaptive::Simulation::run
 (
 	int    argc,
-	char **argv
+	char **argv, Fnames& filenames, States& states, Pars& pars,
+	::Solver& solver, int verbose
 )
 {
+	// The adaptive solver has its own parameter and allocation helpers.
+	using ::SolverParams;
+	using ::malloc_device;
+	using ::free_device;
 	// begin timing from the beginning, as input is automated
 	const clock_t start = clock();
 
@@ -183,11 +223,35 @@ void lis::cuda::adaptive::Simulation::run
 	real dy_finest = (test_case != 0) ? (sim_params.ymax - sim_params.ymin) / mesh_dim : read_cell_size(input_filename);
 	real dt        = C(0.001);
 
+	// Use the shared raster parser and layout, independently of Morton ordering.
+	Geometry loss_geometry = {};
+	int loss_pitch = 0, loss_offset = 0;
+	NUMERIC_TYPE* loss_dem = nullptr;
+	NUMERIC_TYPE* device_loss_dem = nullptr;
+	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON || states.calc_evap == ON;
+	if (has_losses)
+	{
+		if (test_case != 0 || solver_params.L < 5 || sim_params.xsz > mesh_dim || sim_params.ysz > mesh_dim)
+		{
+			fprintf(stderr, "ERROR: adaptive losses need raster inputs fitting max_ref_lvl >= 5\n");
+			exit(-1);
+		}
+		loss_dem = Topography::load(filenames.demfilename, loss_geometry, loss_pitch, loss_offset, pars.nodata_elevation, OFF, verbose);
+		device_loss_dem = cuda::GhostRaster::allocate_device(loss_geometry);
+		cuda::GhostRaster::copy(device_loss_dem, loss_dem, loss_geometry);
+	}
+	Losses losses(filenames, states, pars, loss_geometry, loss_pitch, loss_offset, verbose);
+	double integrated_time = 0.0;
+	bool first_loss_output = true;
+
 	int num_finest_elems      = mesh_dim * mesh_dim;
 	int num_blocks_finest     = get_num_blocks(num_finest_elems, THREADS_PER_BLOCK);
 	int num_threads_traversal = num_finest_elems / 4;
 	int num_blocks_traversal  = get_num_blocks(num_threads_traversal, THREADS_PER_BLOCK);
 	int num_all_elems         = get_lvl_idx(solver_params.L + 1);
+	real* loss_depths = has_losses ? (real*)::malloc_device(num_all_elems*sizeof(real)) : nullptr;
+	int* loss_generations = has_losses ? (int*)::malloc_device(num_all_elems*sizeof(int)) : nullptr;
+	if (has_losses) CHECK_CUDA_ERROR(cudaMemset(loss_generations, 0xff, num_all_elems*sizeof(int)));
 	int num_details           = get_lvl_idx(solver_params.L);
 	int num_blocks_details    = get_num_blocks(num_details, THREADS_PER_BLOCK);
 	int num_blocks_sol        = 0;
@@ -256,6 +320,9 @@ void lis::cuda::adaptive::Simulation::run
 		solver_params.L, 
 		test_case
 	);
+
+	if (losses.enabled())
+		losses.preflag_adaptive(d_preflagged_details, solver_params.L, device_loss_dem, pars.nodata_elevation);
 
 	// =========================================================== //
 
@@ -476,6 +543,10 @@ void lis::cuda::adaptive::Simulation::run
 		//CHECK_CUDA_ERROR(peek());
 		//CHECK_CUDA_ERROR(sync());
 
+		if (has_losses && !first_t_step)
+			cache_loss_depth<<<num_blocks_sol, THREADS_PER_BLOCK>>>(d_assem_sol,
+				d_scale_coeffs, loss_depths, loss_generations, steps);
+
 		if (solver_params.epsilon > C(0.0) || first_t_step)
 		{
 		    for_nghbrs = false;
@@ -601,6 +672,10 @@ void lis::cuda::adaptive::Simulation::run
 		//CHECK_CUDA_ERROR(peek());
 		//CHECK_CUDA_ERROR(sync());
 		
+		if (has_losses && !first_t_step)
+			restore_loss_depths<<<num_blocks_sol, THREADS_PER_BLOCK>>>(d_assem_sol,
+				d_neighbours, loss_depths, loss_generations, steps);
+
 		boundaries.update_all_inlets(input_filename, current_time);
 
 		add_ghost_cells<<<num_blocks_sol, THREADS_PER_BLOCK>>>
@@ -795,6 +870,12 @@ void lis::cuda::adaptive::Simulation::run
 			//CHECK_CUDA_ERROR(sync());
 		}
 
+		if (losses.enabled())
+		{
+			losses.apply_adaptive(d_assem_sol, solver_params.L, dt, solver.DepthThresh,
+				current_time, device_loss_dem, pars.nodata_elevation);
+			integrated_time += (double)dt;
+		}
 		dt = get_dt_CFL(d_dt_CFL, d_assem_sol.length);
 
 		solver_end = clock();
@@ -861,6 +942,18 @@ void lis::cuda::adaptive::Simulation::run
 
 		if ( massint.save(current_time) )
 		{
+			if (losses.enabled())
+			{
+				char path[512];
+				snprintf(path, sizeof(path), "%s/%s.loss", plot_params.dirroot, plot_params.resroot);
+				FILE* file = fopen(path, first_loss_output ? "w" : "a");
+				if (!file) { perror(path); exit(-1); }
+				if (first_loss_output) fprintf(file, "time,integrated_time,loss_volume,water_volume\n");
+				fprintf(file, "%.17g,%.17g,%.17g,%.17g\n", (double)current_time,
+					integrated_time, losses.total_volume(), losses.adaptive_water_volume());
+				fclose(file);
+				first_loss_output = false;
+			}
 			if (plot_params.cumulative)
 			{
 			    write_cumulative_data
@@ -954,6 +1047,10 @@ void lis::cuda::adaptive::Simulation::run
 	CHECK_CUDA_ERROR( free_device(d_preflagged_details) );
 	CHECK_CUDA_ERROR( free_device(d_norm_details) );
 	CHECK_CUDA_ERROR( free_device(d_dt_CFL) );
+	if (device_loss_dem) cuda::free_device(device_loss_dem);
+	delete[] loss_dem;
+	if (loss_depths) ::free_device(loss_depths);
+	if (loss_generations) ::free_device(loss_generations);
 	
 	//reset();
 

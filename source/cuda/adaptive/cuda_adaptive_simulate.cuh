@@ -16,7 +16,8 @@ public:
 	void run
 	(
 		int    argc,
-		char** argv
+		char** argv, Fnames& filenames, States& states, Pars& pars,
+		::Solver& solver, int verbose
 	);
 };
 

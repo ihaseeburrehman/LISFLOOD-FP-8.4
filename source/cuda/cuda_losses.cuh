@@ -3,6 +3,8 @@
 #include "../geometry.h"
 #include "cuda_solver.cuh"
 
+struct AssembledSolution;
+
 namespace lis
 {
 namespace cuda
@@ -120,6 +122,14 @@ public:
 		dim3 grid_size
 	);
 
+	/** Adaptive mesh: soil state remains in the original raster layout. */
+	void apply_adaptive(AssembledSolution& solution, int max_level,
+		NUMERIC_TYPE dt, NUMERIC_TYPE threshold, NUMERIC_TYPE t,
+		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
+	double adaptive_water_volume();
+	void preflag_adaptive(bool* details, int max_level,
+		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
+
 	/** volume removed since the previous call (m3) */
 	double take_interval_volume();
 
@@ -154,6 +164,7 @@ private:
 	NUMERIC_TYPE* d_fmax = nullptr;      /**< Green-Ampt: m, or nullptr */
 	::TimeSeries* evap = nullptr;        /**< m/s */
 	double* d_volume = nullptr;          /**< cumulative volume removed, m3 */
+	double* d_water = nullptr;
 	double reported = 0.0;
 };
 

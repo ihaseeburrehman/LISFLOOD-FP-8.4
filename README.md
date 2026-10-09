@@ -38,8 +38,8 @@ from its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`, then
 
 In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
 water by infiltration and evaporation; the GPU solvers read the keywords and
-ignore them. In 8.4 the CUDA and Metal FV1, FV2, DG2 and ACC solvers apply
-them at every time step.
+ignore them. In 8.4 the CUDA and Metal FV1, FV2, DG2 and ACC solvers,
+and the CUDA adaptive MWDG2/HWFV1 solvers, apply them at every time step.
 
 **Constant rate**, as in the CPU solvers: every wet cell (deeper than
 `DepthThresh`, not NoData) loses `(infiltration rate + evaporation rate) x dt`
@@ -79,13 +79,22 @@ Details:
   the depth; FV2 and DG2 lower the average depth, keep the depth slopes and
   scale the discharge with the depth, and make a cell first order where a face
   would become dry.
-- The volume removed is summed on the GPU: in the `.mass` file `Verror` no
+- For uniform-grid solvers the volume removed is summed on the GPU: in the `.mass` file `Verror` no
   longer counts it as an error, and the last column (`Rain-(Inf+Evap)`) shows
   minus the volume removed since the start.
 - Each cell carries the part of its loss that single-precision rounding
   dropped to its next step, so small rates are not lost.
-- The other GPU solvers (`acc_nugrid`, adaptive MWDG2/HWFV1) and the CPU
-  FV1/FV2/DG2 solvers do not apply them and print a warning.
+- CUDA MWDG2/HWFV1 keep soil state at the finest raster resolution when
+  the mesh changes. Soil-parameter changes and NoData boundaries retain
+  refinement. For each active cell, the losses of its finest children are
+  averaged; discharges and MWDG2 slopes follow the FV1/DG2 rules above.
+  Loss-enabled runs write `<resroot>.loss` at `massint`, with CSV columns
+  `time,integrated_time,loss_volume,water_volume` (seconds and m3).
+  `integrated_time` is the double-precision sum of the actual time steps.
+  This diagnostic does not account for boundary fluxes or rainfall; the
+  existing `.cumu` timing file is unchanged. Use raster inputs and
+  `max_ref_lvl >= 5` (a padded mesh of at least 32 x 32 cells).
+- CUDA `acc_nugrid` and CPU FV1/FV2/DG2 do not apply them and print a warning.
 
 ### FV2, DG2 and ACC on Apple Silicon
 

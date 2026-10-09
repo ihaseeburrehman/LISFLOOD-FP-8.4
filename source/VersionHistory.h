@@ -30,8 +30,8 @@ Ver  Date         Details
 ---  ----         -------------------------------------------------------------------------
 8.4  Oct 09 2026  Floodplain infiltration (constant rate, uniform or per-cell grid, or
                   Green-Ampt with soil-property grids and an optional soil depth) and
-                  evaporation for the CUDA and Metal FV1, FV2, DG2 and ACC solvers; Metal
-                  FV2, DG2 and ACC solvers, so every GPU solver runs on Apple Silicon; CUDA
+                  evaporation for CUDA/Metal FV1, FV2, DG2 and ACC and CUDA MWDG2/HWFV1;
+                  finest-grid soil state on adaptive meshes; Metal FV2, DG2 and ACC; CUDA
                   ACC waits for its last snapshot before exiting (HR)
 8.3  Oct 07 2026  CUDA: max-depth grid on the GPU (large grids run), dry NoData cells skip
                   the mass counter, flux kernels synchronised; Metal FV1 back end (HR)

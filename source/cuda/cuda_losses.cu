@@ -3,6 +3,9 @@
 #include "cuda_util.cuh"
 #include "../cuda/ghostraster.h"
 #include "io.h"
+#include "adaptive/classes/AssembledSolution.h"
+#include "adaptive/zorder/compact.cuh"
+#include "adaptive/utilities/get_lvl_idx.cuh"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -36,15 +39,16 @@ __device__ NUMERIC_TYPE depth_after_loss
 (
 	NUMERIC_TYPE h,
 	NUMERIC_TYPE rate,
-	NUMERIC_TYPE& residual
+	NUMERIC_TYPE& residual,
+	NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 )
 {
-	if (h <= cuda::solver_params.DepthThresh || rate <= C(0.0))
+	if (h <= threshold || rate <= C(0.0))
 	{
 		residual = C(0.0);
 		return h;
 	}
-	NUMERIC_TYPE wanted = rate*cuda::dt + residual;
+	NUMERIC_TYPE wanted = rate*step_dt + residual;
 	NUMERIC_TYPE h_new = h - wanted;
 	if (h_new <= C(0.0))
 	{
@@ -63,7 +67,7 @@ __device__ NUMERIC_TYPE depth_after_greenampt
 (
 	const LossParams& p,
 	int idx,
-	NUMERIC_TYPE h
+	NUMERIC_TYPE h, NUMERIC_TYPE step_dt
 )
 {
 	NUMERIC_TYPE& residual = p.residual[idx];
@@ -73,7 +77,7 @@ __device__ NUMERIC_TYPE depth_after_greenampt
 		return h;
 	}
 
-	double dt = cuda::dt;
+	double dt = step_dt;
 	double F = p.F[idx];
 	double ks = p.ks[idx];
 	double dF = 0.0;
@@ -114,13 +118,13 @@ __device__ NUMERIC_TYPE depth_after_losses
 (
 	const LossParams& p,
 	int idx,
-	NUMERIC_TYPE h
+	NUMERIC_TYPE h, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 )
 {
-	if (p.greenampt) return depth_after_greenampt(p, idx, h);
+	if (p.greenampt) return depth_after_greenampt(p, idx, h, step_dt);
 	NUMERIC_TYPE rate = ((p.rate_grid != nullptr) ? p.rate_grid[idx] : p.uniform_rate)
 		+ p.evap_rate;
-	return depth_after_loss(h, rate, p.residual[idx]);
+	return depth_after_loss(h, rate, p.residual[idx], step_dt, threshold);
 }
 
 __global__ void
@@ -147,7 +151,7 @@ apply_losses_fv1
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
 			if (h_new == h) continue;
 
 			H[idx] = h_new;
@@ -195,7 +199,7 @@ apply_losses_slopes
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
 			if (h_new == h) continue;
 
 			H[idx] = h_new;
@@ -252,7 +256,7 @@ apply_losses_acc
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
 			if (h_new == h) continue;
 
 			H[idx] = h_new;
@@ -261,6 +265,106 @@ apply_losses_acc
 	}
 
 	add_block_sum(removed*cuda::geometry.dx*cuda::geometry.dy, volume);
+}
+
+
+/** Preserve refinement wherever the physical mask or soil parameters vary.
+ * Otherwise a flat basin would merge before spatial losses can create detail. */
+__global__ void preflag_loss_details(bool* details, int L, Geometry geom,
+	int pitch, int offset, LossParams p, const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
+{
+	int node = blockIdx.x*blockDim.x + threadIdx.x;
+	if (node >= get_lvl_idx(L)) return;
+	int level = 0;
+	while (level+1 < L && node >= get_lvl_idx(level+1)) ++level;
+	unsigned code = (node-get_lvl_idx(level)) << (2*(L-level));
+	int x0 = compact(code), y0 = compact(code >> 1);
+	int side = 1 << (L-level);
+	int first = y0 < geom.ysz && x0 < geom.xsz ? (geom.ysz-1-y0)*pitch+x0+offset : -1;
+	if (first >= 0 && FABS(dem[first]-nodata) < C(1e-6)) first = -1;
+	for (int y=y0; y<y0+side; ++y)
+	for (int x=x0; x<x0+side; ++x)
+	{
+		int idx = y < geom.ysz && x < geom.xsz ? (geom.ysz-1-y)*pitch+x+offset : -1;
+		if (idx >= 0 && FABS(dem[idx]-nodata) < C(1e-6)) idx = -1;
+		bool different = (idx < 0) != (first < 0);
+		if (idx >= 0 && first >= 0)
+		{
+			if (p.rate_grid) different |= p.rate_grid[idx] != p.rate_grid[first];
+			if (p.greenampt)
+			{
+				different |= p.ks[idx] != p.ks[first] || p.psi[idx] != p.psi[first]
+					|| p.dtheta[idx] != p.dtheta[first];
+				if (p.fmax) different |= p.fmax[idx] != p.fmax[first];
+			}
+		}
+		if (different) { details[node] = true; return; }
+	}
+}
+
+/** Each leaf owns disjoint finest children. Evaluate nonlinear soil losses on
+ * those children, then restrict the depth change to the leaf average. F and
+ * compensation stay attached to raster cells through all mesh changes. */
+__global__ void apply_losses_adaptive(
+	AssembledSolution sol, int L, Geometry geom, int pitch, int offset,
+	LossParams p, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold,
+	const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata, double* volume, double* water)
+{
+	int cell = blockIdx.x * blockDim.x + threadIdx.x;
+	double removed = 0.0, stored = 0.0;
+	if (cell < sol.length)
+	{
+		int level = sol.levels[cell];
+		unsigned code = (sol.act_idcs[cell] - get_lvl_idx(level)) << (2 * (L-level));
+		int x0 = compact(code), y0 = compact(code >> 1);
+		int side = 1 << (L-level);
+		NUMERIC_TYPE h = sol.h0[cell];
+		double loss = 0.0;
+		int valid = 0;
+		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
+		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
+		{
+			// Adaptive coordinates start at the bottom; ASCII rasters at the top.
+			int idx = (geom.ysz-1-y)*pitch + x + offset;
+			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
+			NUMERIC_TYPE child = depth_after_losses(p, idx, h, step_dt, threshold);
+			loss += (double)(h-child);
+			++valid;
+		}
+		// Padding/NoData is excluded from the physical water and soil area.
+		double count = valid;
+		NUMERIC_TYPE next = valid ? (NUMERIC_TYPE)((double)h-loss/count) : h;
+		// Correct the extra rounding introduced by restricting to the leaf.
+		NUMERIC_TYPE correction = valid ? (NUMERIC_TYPE)((loss-count*(double)(h-next))/valid) : C(0.0);
+		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
+		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
+		{
+			int idx = (geom.ysz-1-y)*pitch + x + offset;
+			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
+			p.residual[idx] += correction;
+		}
+		if (next != h)
+		{
+			sol.h0[cell] = next;
+			NUMERIC_TYPE scale = next > threshold ? next/h : C(0.0);
+			sol.qx0[cell] *= scale; sol.qy0[cell] *= scale;
+			if (sol.h1x != nullptr)
+			{
+				const NUMERIC_TYPE face = SQRT(C(3.0));
+				bool dry = next <= threshold || face*FABS(sol.h1x[cell]) >= next
+					|| face*FABS(sol.h1y[cell]) >= next;
+				if (dry) { sol.h1x[cell] = C(0.0); sol.h1y[cell] = C(0.0); }
+				sol.qx1x[cell] *= dry ? C(0.0) : scale;
+				sol.qx1y[cell] *= dry ? C(0.0) : scale;
+				sol.qy1x[cell] *= dry ? C(0.0) : scale;
+				sol.qy1y[cell] *= dry ? C(0.0) : scale;
+			}
+		}
+		removed = (double)(h-next)*count*geom.dx*geom.dy;
+		stored = (double)next*valid*geom.dx*geom.dy;
+	}
+	add_block_sum(removed, volume);
+	add_block_sum(stored, water);
 }
 
 /** true and the value if spec is a number (and nothing else) */
@@ -516,6 +620,33 @@ void lis::cuda::Losses::apply_acc
 	apply_losses_acc<<<grid_size, CUDA_BLOCK_SIZE>>>(H, DEM, params(t), d_volume);
 }
 
+void lis::cuda::Losses::preflag_adaptive(bool* details, int L,
+	const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
+{
+	int nodes = get_lvl_idx(L);
+	preflag_loss_details<<<(nodes+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
+		details, L, geometry, pitch, offset, params(C(0.0)), dem, nodata);
+}
+
+void lis::cuda::Losses::apply_adaptive(
+	AssembledSolution& sol, int max_level, NUMERIC_TYPE step_dt,
+	NUMERIC_TYPE threshold, NUMERIC_TYPE t, const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
+{
+	if (d_water == nullptr) d_water = static_cast<double*>(malloc_device(sizeof(double)));
+	double zero = 0.0;
+	copy(d_water, &zero, sizeof(double));
+	apply_losses_adaptive<<<(sol.length+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
+		sol, max_level, geometry, pitch, offset, params(t), step_dt, threshold,
+		dem, nodata, d_volume, d_water);
+}
+
+double lis::cuda::Losses::adaptive_water_volume()
+{
+	double water = 0.0;
+	if (d_water != nullptr) copy(&water, d_water, sizeof(double));
+	return water;
+}
+
 double lis::cuda::Losses::total_volume()
 {
 	if (d_volume == nullptr) return 0.0;
@@ -542,4 +673,5 @@ lis::cuda::Losses::~Losses()
 	free_device(d_dtheta);
 	free_device(d_fmax);
 	free_device(d_volume);
+	free_device(d_water);
 }

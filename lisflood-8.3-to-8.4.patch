@@ -1,6 +1,6 @@
 diff -ruN a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt	2026-10-07 21:58:02
-+++ b/CMakeLists.txt	2026-10-09 10:16:13
++++ b/CMakeLists.txt	2026-10-08 13:18:13
 @@ -83,6 +83,7 @@
  		cuda/cuda_geometry.cu
  		cuda/cuda_hll.cu
@@ -11,7 +11,7 @@ diff -ruN a/CMakeLists.txt b/CMakeLists.txt
  		cuda/cuda_simulate.cu
 diff -ruN a/VersionHistory.h b/VersionHistory.h
 --- a/VersionHistory.h	2026-10-07 21:58:02
-+++ b/VersionHistory.h	2026-10-09 10:16:13
++++ b/VersionHistory.h	2026-10-09 15:00:17
 @@ -20,7 +20,7 @@
  
  // release name printed at start-up; the numbers above stay as in 8.2
@@ -27,15 +27,15 @@ diff -ruN a/VersionHistory.h b/VersionHistory.h
  ---  ----         -------------------------------------------------------------------------
 +8.4  Oct 09 2026  Floodplain infiltration (constant rate, uniform or per-cell grid, or
 +                  Green-Ampt with soil-property grids and an optional soil depth) and
-+                  evaporation for the CUDA and Metal FV1, FV2, DG2 and ACC solvers; Metal
-+                  FV2, DG2 and ACC solvers, so every GPU solver runs on Apple Silicon; CUDA
++                  evaporation for CUDA/Metal FV1, FV2, DG2 and ACC and CUDA MWDG2/HWFV1;
++                  finest-grid soil state on adaptive meshes; Metal FV2, DG2 and ACC; CUDA
 +                  ACC waits for its last snapshot before exiting (HR)
  8.3  Oct 07 2026  CUDA: max-depth grid on the GPU (large grids run), dry NoData cells skip
                    the mass counter, flux kernels synchronised; Metal FV1 back end (HR)
  8.1  Nov 23 2020  Merged changes from v7.1 (d8subgrid) into v8 (PFU)
 diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
 --- a/cuda/acc/cuda_acc_simulate.cu	2026-10-07 21:58:02
-+++ b/cuda/acc/cuda_acc_simulate.cu	2026-10-09 10:16:13
++++ b/cuda/acc/cuda_acc_simulate.cu	2026-10-09 09:50:08
 @@ -8,6 +8,7 @@
  #include "cuda_rain.cuh"
  #include "cuda_max_field.cuh"
@@ -89,15 +89,206 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  //	max_field.write();
  
  	//output max files
+diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptive_simulate.cu
+--- a/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-07 21:58:02
++++ b/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-09 14:55:18
+@@ -1,6 +1,9 @@
+ //-----------------Custom headers-----------------//
+ 
+ #include "cuda_adaptive_simulate.cuh"
++#include "../cuda_losses.cuh"
++#include "../cuda_dem.cuh"
++#include "../cuda_util.cuh"
+ 
+ // Kernels
+ #include "zorder/generate_all_morton_codes.cuh"
+@@ -135,12 +138,49 @@
+ // =============================================MAIN PROGRAM=============================================== //
+ // ======================================================================================================== //
+ 
++// Encoding eta=h+z and decoding h=eta-z can erase small losses every step
++// near high walls. Preserve h for leaves that survive adaptation unchanged.
++// Point-source increments already inserted into the scale coefficients remain.
++__global__ void cache_loss_depth(AssembledSolution sol, ScaleCoefficients scales,
++	real* depths, int* generations, int generation)
++{
++	int i = blockIdx.x*blockDim.x + threadIdx.x;
++	if (i >= sol.length) return;
++	int node = sol.act_idcs[i];
++	depths[node] = sol.h0[i] + (scales.eta0[node] - (sol.h0[i]+sol.z0[i]));
++	generations[node] = generation;
++}
++
++__device__ void restore_loss_depth(const AssembledSolution& sol, int i,
++	const real* depths, const int* generations, int generation)
++{
++	int node = sol.act_idcs[i];
++	if (node >= 0 && generations[node] == generation) sol.h0[i] = depths[node];
++}
++
++__global__ void restore_loss_depths(AssembledSolution sol, Neighbours neighbours,
++	const real* depths, const int* generations, int generation)
++{
++	int i = blockIdx.x*blockDim.x + threadIdx.x;
++	if (i >= sol.length) return;
++	restore_loss_depth(sol, i, depths, generations, generation);
++	restore_loss_depth(neighbours.north, i, depths, generations, generation);
++	restore_loss_depth(neighbours.east, i, depths, generations, generation);
++	restore_loss_depth(neighbours.south, i, depths, generations, generation);
++	restore_loss_depth(neighbours.west, i, depths, generations, generation);
++}
++
+ void lis::cuda::adaptive::Simulation::run
+ (
+ 	int    argc,
+-	char **argv
++	char **argv, Fnames& filenames, States& states, Pars& pars,
++	::Solver& solver, int verbose
+ )
+ {
++	// The adaptive solver has its own parameter and allocation helpers.
++	using ::SolverParams;
++	using ::malloc_device;
++	using ::free_device;
+ 	// begin timing from the beginning, as input is automated
+ 	const clock_t start = clock();
+ 
+@@ -183,11 +223,35 @@
+ 	real dy_finest = (test_case != 0) ? (sim_params.ymax - sim_params.ymin) / mesh_dim : read_cell_size(input_filename);
+ 	real dt        = C(0.001);
+ 
++	// Use the shared raster parser and layout, independently of Morton ordering.
++	Geometry loss_geometry = {};
++	int loss_pitch = 0, loss_offset = 0;
++	NUMERIC_TYPE* loss_dem = nullptr;
++	NUMERIC_TYPE* device_loss_dem = nullptr;
++	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON || states.calc_evap == ON;
++	if (has_losses)
++	{
++		if (test_case != 0 || solver_params.L < 5 || sim_params.xsz > mesh_dim || sim_params.ysz > mesh_dim)
++		{
++			fprintf(stderr, "ERROR: adaptive losses need raster inputs fitting max_ref_lvl >= 5\n");
++			exit(-1);
++		}
++		loss_dem = Topography::load(filenames.demfilename, loss_geometry, loss_pitch, loss_offset, pars.nodata_elevation, OFF, verbose);
++		device_loss_dem = cuda::GhostRaster::allocate_device(loss_geometry);
++		cuda::GhostRaster::copy(device_loss_dem, loss_dem, loss_geometry);
++	}
++	Losses losses(filenames, states, pars, loss_geometry, loss_pitch, loss_offset, verbose);
++	double integrated_time = 0.0;
++	bool first_loss_output = true;
++
+ 	int num_finest_elems      = mesh_dim * mesh_dim;
+ 	int num_blocks_finest     = get_num_blocks(num_finest_elems, THREADS_PER_BLOCK);
+ 	int num_threads_traversal = num_finest_elems / 4;
+ 	int num_blocks_traversal  = get_num_blocks(num_threads_traversal, THREADS_PER_BLOCK);
+ 	int num_all_elems         = get_lvl_idx(solver_params.L + 1);
++	real* loss_depths = has_losses ? (real*)::malloc_device(num_all_elems*sizeof(real)) : nullptr;
++	int* loss_generations = has_losses ? (int*)::malloc_device(num_all_elems*sizeof(int)) : nullptr;
++	if (has_losses) CHECK_CUDA_ERROR(cudaMemset(loss_generations, 0xff, num_all_elems*sizeof(int)));
+ 	int num_details           = get_lvl_idx(solver_params.L);
+ 	int num_blocks_details    = get_num_blocks(num_details, THREADS_PER_BLOCK);
+ 	int num_blocks_sol        = 0;
+@@ -257,6 +321,9 @@
+ 		test_case
+ 	);
+ 
++	if (losses.enabled())
++		losses.preflag_adaptive(d_preflagged_details, solver_params.L, device_loss_dem, pars.nodata_elevation);
++
+ 	// =========================================================== //
+ 
+ 	// ================ //
+@@ -476,6 +543,10 @@
+ 		//CHECK_CUDA_ERROR(peek());
+ 		//CHECK_CUDA_ERROR(sync());
+ 
++		if (has_losses && !first_t_step)
++			cache_loss_depth<<<num_blocks_sol, THREADS_PER_BLOCK>>>(d_assem_sol,
++				d_scale_coeffs, loss_depths, loss_generations, steps);
++
+ 		if (solver_params.epsilon > C(0.0) || first_t_step)
+ 		{
+ 		    for_nghbrs = false;
+@@ -601,6 +672,10 @@
+ 		//CHECK_CUDA_ERROR(peek());
+ 		//CHECK_CUDA_ERROR(sync());
+ 		
++		if (has_losses && !first_t_step)
++			restore_loss_depths<<<num_blocks_sol, THREADS_PER_BLOCK>>>(d_assem_sol,
++				d_neighbours, loss_depths, loss_generations, steps);
++
+ 		boundaries.update_all_inlets(input_filename, current_time);
+ 
+ 		add_ghost_cells<<<num_blocks_sol, THREADS_PER_BLOCK>>>
+@@ -795,6 +870,12 @@
+ 			//CHECK_CUDA_ERROR(sync());
+ 		}
+ 
++		if (losses.enabled())
++		{
++			losses.apply_adaptive(d_assem_sol, solver_params.L, dt, solver.DepthThresh,
++				current_time, device_loss_dem, pars.nodata_elevation);
++			integrated_time += (double)dt;
++		}
+ 		dt = get_dt_CFL(d_dt_CFL, d_assem_sol.length);
+ 
+ 		solver_end = clock();
+@@ -861,6 +942,18 @@
+ 
+ 		if ( massint.save(current_time) )
+ 		{
++			if (losses.enabled())
++			{
++				char path[512];
++				snprintf(path, sizeof(path), "%s/%s.loss", plot_params.dirroot, plot_params.resroot);
++				FILE* file = fopen(path, first_loss_output ? "w" : "a");
++				if (!file) { perror(path); exit(-1); }
++				if (first_loss_output) fprintf(file, "time,integrated_time,loss_volume,water_volume\n");
++				fprintf(file, "%.17g,%.17g,%.17g,%.17g\n", (double)current_time,
++					integrated_time, losses.total_volume(), losses.adaptive_water_volume());
++				fclose(file);
++				first_loss_output = false;
++			}
+ 			if (plot_params.cumulative)
+ 			{
+ 			    write_cumulative_data
+@@ -954,6 +1047,10 @@
+ 	CHECK_CUDA_ERROR( free_device(d_preflagged_details) );
+ 	CHECK_CUDA_ERROR( free_device(d_norm_details) );
+ 	CHECK_CUDA_ERROR( free_device(d_dt_CFL) );
++	if (device_loss_dem) cuda::free_device(device_loss_dem);
++	delete[] loss_dem;
++	if (loss_depths) ::free_device(loss_depths);
++	if (loss_generations) ::free_device(loss_generations);
+ 	
+ 	//reset();
+ 
+diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cuh b/cuda/adaptive/cuda_adaptive_simulate.cuh
+--- a/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-07 21:58:02
++++ b/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-09 14:33:51
+@@ -16,7 +16,8 @@
+ 	void run
+ 	(
+ 		int    argc,
+-		char** argv
++		char** argv, Fnames& filenames, States& states, Pars& pars,
++		::Solver& solver, int verbose
+ 	);
+ };
+ 
 diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 --- a/cuda/cuda_losses.cu	1970-01-01 01:00:00
-+++ b/cuda/cuda_losses.cu	2026-10-09 10:16:13
-@@ -0,0 +1,545 @@
++++ b/cuda/cuda_losses.cu	2026-10-09 14:44:56
+@@ -0,0 +1,677 @@
 +#include "cuda_losses.cuh"
 +#include "cuda_geometry.cuh"
 +#include "cuda_util.cuh"
 +#include "../cuda/ghostraster.h"
 +#include "io.h"
++#include "adaptive/classes/AssembledSolution.h"
++#include "adaptive/zorder/compact.cuh"
++#include "adaptive/utilities/get_lvl_idx.cuh"
 +#include <cmath>
 +#include <cstdlib>
 +#include <cstring>
@@ -131,15 +322,16 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +(
 +	NUMERIC_TYPE h,
 +	NUMERIC_TYPE rate,
-+	NUMERIC_TYPE& residual
++	NUMERIC_TYPE& residual,
++	NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 +)
 +{
-+	if (h <= cuda::solver_params.DepthThresh || rate <= C(0.0))
++	if (h <= threshold || rate <= C(0.0))
 +	{
 +		residual = C(0.0);
 +		return h;
 +	}
-+	NUMERIC_TYPE wanted = rate*cuda::dt + residual;
++	NUMERIC_TYPE wanted = rate*step_dt + residual;
 +	NUMERIC_TYPE h_new = h - wanted;
 +	if (h_new <= C(0.0))
 +	{
@@ -158,7 +350,7 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +(
 +	const LossParams& p,
 +	int idx,
-+	NUMERIC_TYPE h
++	NUMERIC_TYPE h, NUMERIC_TYPE step_dt
 +)
 +{
 +	NUMERIC_TYPE& residual = p.residual[idx];
@@ -168,7 +360,7 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +		return h;
 +	}
 +
-+	double dt = cuda::dt;
++	double dt = step_dt;
 +	double F = p.F[idx];
 +	double ks = p.ks[idx];
 +	double dF = 0.0;
@@ -209,13 +401,13 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +(
 +	const LossParams& p,
 +	int idx,
-+	NUMERIC_TYPE h
++	NUMERIC_TYPE h, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 +)
 +{
-+	if (p.greenampt) return depth_after_greenampt(p, idx, h);
++	if (p.greenampt) return depth_after_greenampt(p, idx, h, step_dt);
 +	NUMERIC_TYPE rate = ((p.rate_grid != nullptr) ? p.rate_grid[idx] : p.uniform_rate)
 +		+ p.evap_rate;
-+	return depth_after_loss(h, rate, p.residual[idx]);
++	return depth_after_loss(h, rate, p.residual[idx], step_dt, threshold);
 +}
 +
 +__global__ void
@@ -242,7 +434,7 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 +
 +			NUMERIC_TYPE h = H[idx];
-+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
++			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
 +			if (h_new == h) continue;
 +
 +			H[idx] = h_new;
@@ -290,7 +482,7 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 +
 +			NUMERIC_TYPE h = H[idx];
-+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
++			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
 +			if (h_new == h) continue;
 +
 +			H[idx] = h_new;
@@ -347,7 +539,7 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 +
 +			NUMERIC_TYPE h = H[idx];
-+			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h);
++			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
 +			if (h_new == h) continue;
 +
 +			H[idx] = h_new;
@@ -356,6 +548,106 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +	}
 +
 +	add_block_sum(removed*cuda::geometry.dx*cuda::geometry.dy, volume);
++}
++
++
++/** Preserve refinement wherever the physical mask or soil parameters vary.
++ * Otherwise a flat basin would merge before spatial losses can create detail. */
++__global__ void preflag_loss_details(bool* details, int L, Geometry geom,
++	int pitch, int offset, LossParams p, const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
++{
++	int node = blockIdx.x*blockDim.x + threadIdx.x;
++	if (node >= get_lvl_idx(L)) return;
++	int level = 0;
++	while (level+1 < L && node >= get_lvl_idx(level+1)) ++level;
++	unsigned code = (node-get_lvl_idx(level)) << (2*(L-level));
++	int x0 = compact(code), y0 = compact(code >> 1);
++	int side = 1 << (L-level);
++	int first = y0 < geom.ysz && x0 < geom.xsz ? (geom.ysz-1-y0)*pitch+x0+offset : -1;
++	if (first >= 0 && FABS(dem[first]-nodata) < C(1e-6)) first = -1;
++	for (int y=y0; y<y0+side; ++y)
++	for (int x=x0; x<x0+side; ++x)
++	{
++		int idx = y < geom.ysz && x < geom.xsz ? (geom.ysz-1-y)*pitch+x+offset : -1;
++		if (idx >= 0 && FABS(dem[idx]-nodata) < C(1e-6)) idx = -1;
++		bool different = (idx < 0) != (first < 0);
++		if (idx >= 0 && first >= 0)
++		{
++			if (p.rate_grid) different |= p.rate_grid[idx] != p.rate_grid[first];
++			if (p.greenampt)
++			{
++				different |= p.ks[idx] != p.ks[first] || p.psi[idx] != p.psi[first]
++					|| p.dtheta[idx] != p.dtheta[first];
++				if (p.fmax) different |= p.fmax[idx] != p.fmax[first];
++			}
++		}
++		if (different) { details[node] = true; return; }
++	}
++}
++
++/** Each leaf owns disjoint finest children. Evaluate nonlinear soil losses on
++ * those children, then restrict the depth change to the leaf average. F and
++ * compensation stay attached to raster cells through all mesh changes. */
++__global__ void apply_losses_adaptive(
++	AssembledSolution sol, int L, Geometry geom, int pitch, int offset,
++	LossParams p, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold,
++	const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata, double* volume, double* water)
++{
++	int cell = blockIdx.x * blockDim.x + threadIdx.x;
++	double removed = 0.0, stored = 0.0;
++	if (cell < sol.length)
++	{
++		int level = sol.levels[cell];
++		unsigned code = (sol.act_idcs[cell] - get_lvl_idx(level)) << (2 * (L-level));
++		int x0 = compact(code), y0 = compact(code >> 1);
++		int side = 1 << (L-level);
++		NUMERIC_TYPE h = sol.h0[cell];
++		double loss = 0.0;
++		int valid = 0;
++		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
++		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
++		{
++			// Adaptive coordinates start at the bottom; ASCII rasters at the top.
++			int idx = (geom.ysz-1-y)*pitch + x + offset;
++			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
++			NUMERIC_TYPE child = depth_after_losses(p, idx, h, step_dt, threshold);
++			loss += (double)(h-child);
++			++valid;
++		}
++		// Padding/NoData is excluded from the physical water and soil area.
++		double count = valid;
++		NUMERIC_TYPE next = valid ? (NUMERIC_TYPE)((double)h-loss/count) : h;
++		// Correct the extra rounding introduced by restricting to the leaf.
++		NUMERIC_TYPE correction = valid ? (NUMERIC_TYPE)((loss-count*(double)(h-next))/valid) : C(0.0);
++		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
++		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
++		{
++			int idx = (geom.ysz-1-y)*pitch + x + offset;
++			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
++			p.residual[idx] += correction;
++		}
++		if (next != h)
++		{
++			sol.h0[cell] = next;
++			NUMERIC_TYPE scale = next > threshold ? next/h : C(0.0);
++			sol.qx0[cell] *= scale; sol.qy0[cell] *= scale;
++			if (sol.h1x != nullptr)
++			{
++				const NUMERIC_TYPE face = SQRT(C(3.0));
++				bool dry = next <= threshold || face*FABS(sol.h1x[cell]) >= next
++					|| face*FABS(sol.h1y[cell]) >= next;
++				if (dry) { sol.h1x[cell] = C(0.0); sol.h1y[cell] = C(0.0); }
++				sol.qx1x[cell] *= dry ? C(0.0) : scale;
++				sol.qx1y[cell] *= dry ? C(0.0) : scale;
++				sol.qy1x[cell] *= dry ? C(0.0) : scale;
++				sol.qy1y[cell] *= dry ? C(0.0) : scale;
++			}
++		}
++		removed = (double)(h-next)*count*geom.dx*geom.dy;
++		stored = (double)next*valid*geom.dx*geom.dy;
++	}
++	add_block_sum(removed, volume);
++	add_block_sum(stored, water);
 +}
 +
 +/** true and the value if spec is a number (and nothing else) */
@@ -611,6 +903,33 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +	apply_losses_acc<<<grid_size, CUDA_BLOCK_SIZE>>>(H, DEM, params(t), d_volume);
 +}
 +
++void lis::cuda::Losses::preflag_adaptive(bool* details, int L,
++	const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
++{
++	int nodes = get_lvl_idx(L);
++	preflag_loss_details<<<(nodes+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
++		details, L, geometry, pitch, offset, params(C(0.0)), dem, nodata);
++}
++
++void lis::cuda::Losses::apply_adaptive(
++	AssembledSolution& sol, int max_level, NUMERIC_TYPE step_dt,
++	NUMERIC_TYPE threshold, NUMERIC_TYPE t, const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
++{
++	if (d_water == nullptr) d_water = static_cast<double*>(malloc_device(sizeof(double)));
++	double zero = 0.0;
++	copy(d_water, &zero, sizeof(double));
++	apply_losses_adaptive<<<(sol.length+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
++		sol, max_level, geometry, pitch, offset, params(t), step_dt, threshold,
++		dem, nodata, d_volume, d_water);
++}
++
++double lis::cuda::Losses::adaptive_water_volume()
++{
++	double water = 0.0;
++	if (d_water != nullptr) copy(&water, d_water, sizeof(double));
++	return water;
++}
++
 +double lis::cuda::Losses::total_volume()
 +{
 +	if (d_volume == nullptr) return 0.0;
@@ -637,15 +956,18 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +	free_device(d_dtheta);
 +	free_device(d_fmax);
 +	free_device(d_volume);
++	free_device(d_water);
 +}
 diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 --- a/cuda/cuda_losses.cuh	1970-01-01 01:00:00
-+++ b/cuda/cuda_losses.cuh	2026-10-09 10:16:13
-@@ -0,0 +1,161 @@
++++ b/cuda/cuda_losses.cuh	2026-10-09 14:44:56
+@@ -0,0 +1,172 @@
 +#pragma once
 +#include "../lisflood.h"
 +#include "../geometry.h"
 +#include "cuda_solver.cuh"
++
++struct AssembledSolution;
 +
 +namespace lis
 +{
@@ -764,6 +1086,14 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +		dim3 grid_size
 +	);
 +
++	/** Adaptive mesh: soil state remains in the original raster layout. */
++	void apply_adaptive(AssembledSolution& solution, int max_level,
++		NUMERIC_TYPE dt, NUMERIC_TYPE threshold, NUMERIC_TYPE t,
++		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
++	double adaptive_water_volume();
++	void preflag_adaptive(bool* details, int max_level,
++		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
++
 +	/** volume removed since the previous call (m3) */
 +	double take_interval_volume();
 +
@@ -798,6 +1128,7 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +	NUMERIC_TYPE* d_fmax = nullptr;      /**< Green-Ampt: m, or nullptr */
 +	::TimeSeries* evap = nullptr;        /**< m/s */
 +	double* d_volume = nullptr;          /**< cumulative volume removed, m3 */
++	double* d_water = nullptr;
 +	double reported = 0.0;
 +};
 +
@@ -805,7 +1136,7 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +}
 diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
 --- a/cuda/cuda_stats.cu	2026-10-07 21:58:02
-+++ b/cuda/cuda_stats.cu	2026-10-09 10:16:13
++++ b/cuda/cuda_stats.cu	2026-10-08 13:18:22
 @@ -106,6 +106,12 @@
  
  	zero_cumulative_mass();
@@ -833,7 +1164,7 @@ diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
  
 diff -ruN a/cuda/cuda_stats.cuh b/cuda/cuda_stats.cuh
 --- a/cuda/cuda_stats.cuh	2026-10-07 21:58:02
-+++ b/cuda/cuda_stats.cuh	2026-10-09 10:16:13
++++ b/cuda/cuda_stats.cuh	2026-10-08 13:18:22
 @@ -35,6 +35,10 @@
  	NUMERIC_TYPE previous_volume = C(0.0);
  	MassStats* d_instantaneous_mass; /**< through BCs/PSs during timestep*/
@@ -847,7 +1178,7 @@ diff -ruN a/cuda/cuda_stats.cuh b/cuda/cuda_stats.cuh
  	(
 diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
 --- a/cuda/dg2/cuda_dg2_simulate.cu	2026-10-07 21:58:02
-+++ b/cuda/dg2/cuda_dg2_simulate.cu	2026-10-09 10:16:13
++++ b/cuda/dg2/cuda_dg2_simulate.cu	2026-10-08 15:01:10
 @@ -11,6 +11,7 @@
  #include "cuda_max_field.cuh"
  #include "cuda_rain.cuh"
@@ -890,7 +1221,7 @@ diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
  		}
 diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
 --- a/cuda/fv1/cuda_fv1_simulate.cu	2026-10-07 21:58:02
-+++ b/cuda/fv1/cuda_fv1_simulate.cu	2026-10-09 10:16:13
++++ b/cuda/fv1/cuda_fv1_simulate.cu	2026-10-08 13:18:22
 @@ -8,6 +8,7 @@
  #include "cuda_rain.cuh"
  #include "cuda_max_field.cuh"
@@ -932,7 +1263,7 @@ diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
  		}
 diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
 --- a/cuda/fv2/cuda_fv2_simulate.cu	2026-10-07 21:58:02
-+++ b/cuda/fv2/cuda_fv2_simulate.cu	2026-10-09 10:16:13
++++ b/cuda/fv2/cuda_fv2_simulate.cu	2026-10-08 15:01:10
 @@ -11,6 +11,7 @@
  #include "cuda_max_field.cuh"
  #include "cuda_rain.cuh"
@@ -975,7 +1306,7 @@ diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
  		}
 diff -ruN a/cuda/stats.cpp b/cuda/stats.cpp
 --- a/cuda/stats.cpp	2026-10-07 21:58:02
-+++ b/cuda/stats.cpp	2026-10-09 10:16:13
++++ b/cuda/stats.cpp	2026-10-08 13:18:22
 @@ -71,7 +71,9 @@
  		entry.mass.out,
  		entry.discharge_error,
@@ -989,7 +1320,7 @@ diff -ruN a/cuda/stats.cpp b/cuda/stats.cpp
  
 diff -ruN a/cuda/stats.h b/cuda/stats.h
 --- a/cuda/stats.h	2026-10-07 21:58:02
-+++ b/cuda/stats.h	2026-10-09 10:16:13
++++ b/cuda/stats.h	2026-10-08 13:18:22
 @@ -22,6 +22,7 @@
  	MassStats mass;
  	NUMERIC_TYPE volume_error;
@@ -1000,7 +1331,7 @@ diff -ruN a/cuda/stats.h b/cuda/stats.h
  class Stats
 diff -ruN a/lisflood.cpp b/lisflood.cpp
 --- a/lisflood.cpp	2026-10-07 21:58:02
-+++ b/lisflood.cpp	2026-10-09 10:16:13
++++ b/lisflood.cpp	2026-10-09 14:41:06
 @@ -213,6 +213,7 @@
  	SimStates.save_Qs = OFF;
  	SimStates.calc_infiltration = OFF;
@@ -1014,12 +1345,12 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	LoadDEM(Fnameptr, Statesptr, Parptr, Arrptr, verbosemode);
  	
 +	// infiltration and evaporation: CPU classic and sub-grid solvers, and
-+	// (from 8.4) the CUDA and Metal FV1, FV2, DG2 and ACC solvers; the others
-+	// ignore them
++	// (from 8.4) the CUDA and Metal FV1, FV2, DG2 and ACC solvers,
++	// and CUDA MWDG2/HWFV1; the others ignore them
 +#if defined(CUDA)
 +	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 +		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
-+		 Statesptr->acceleration == ON));
++		 Statesptr->acceleration == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON));
 +#elif defined(METAL_ENABLED)
 +	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
 +		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
@@ -1033,10 +1364,10 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 +	{
 +		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-+			"(they are, by the CUDA and Metal FV1, FV2, DG2 and ACC solvers)\n");
++			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA MWDG2/HWFV1)\n");
 +	}
 +	// Green-Ampt is a separate choice from the constant rate, and only the
-+	// CUDA FV1, FV2, DG2 and ACC solvers apply it
++	// GPU solvers identified above apply it
 +	if (Statesptr->calc_greenampt == ON && Statesptr->calc_infiltration == ON)
 +	{
 +		fprintf(stderr, "ERROR: choose one infiltration model: either 'infiltration <rate>' "
@@ -1046,12 +1377,21 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 +	{
 +		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-+			"(it is, by the CUDA and Metal FV1, FV2, DG2 and ACC solvers)\n");
++			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA MWDG2/HWFV1)\n");
 +	}
 +
  #ifdef CUDA
  	if (Statesptr->cuda == ON)
  	{
+@@ -447,7 +484,7 @@
+ 		else if (Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON)
+ 		{
+ 			lis::cuda::adaptive::Simulation simulation;
+-			simulation.run(argc, argv);
++			simulation.run(argc, argv, ParFp, SimStates, Params, ParSolver, verbosemode);
+ 		}
+ 		else
+ 		{
 @@ -787,6 +824,20 @@
  		fv1::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
  				Stageptr, Arrptr, verbosemode);
@@ -1090,7 +1430,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	time(&ParSolver.time_finish);
 diff -ruN a/lisflood.h b/lisflood.h
 --- a/lisflood.h	2026-10-07 21:58:02
-+++ b/lisflood.h	2026-10-09 10:16:13
++++ b/lisflood.h	2026-10-08 22:12:36
 @@ -417,6 +417,12 @@
  	char LinkListfilename[256]; // JCN
  	char SGCdirnfilename[256];  // PFU
@@ -1114,7 +1454,7 @@ diff -ruN a/lisflood.h b/lisflood.h
  	int checkpoint;
 diff -ruN a/metal/CMakeLists.txt b/metal/CMakeLists.txt
 --- a/metal/CMakeLists.txt	2026-10-07 21:58:02
-+++ b/metal/CMakeLists.txt	2026-10-09 10:16:13
++++ b/metal/CMakeLists.txt	2026-10-09 08:31:40
 @@ -1,4 +1,4 @@
 -# Metal GPU back end for the FV1 solver (Apple Silicon)
 +# Metal GPU back end for the FV1, FV2, DG2 and ACC solvers (Apple Silicon)
@@ -1184,7 +1524,7 @@ diff -ruN a/metal/CMakeLists.txt b/metal/CMakeLists.txt
      target_link_libraries(lisflood-metal PUBLIC ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} lisflood-base)
 diff -ruN a/metal/acc/metal_acc_kernels.metal b/metal/acc/metal_acc_kernels.metal
 --- a/metal/acc/metal_acc_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/acc/metal_acc_kernels.metal	2026-10-09 10:16:13
++++ b/metal/acc/metal_acc_kernels.metal	2026-10-08 22:39:48
 @@ -0,0 +1,850 @@
 +//
 +// LISFLOOD-FP Metal ACC Solver Kernels
@@ -2038,7 +2378,7 @@ diff -ruN a/metal/acc/metal_acc_kernels.metal b/metal/acc/metal_acc_kernels.meta
 +}
 diff -ruN a/metal/acc/metal_acc_simulate.h b/metal/acc/metal_acc_simulate.h
 --- a/metal/acc/metal_acc_simulate.h	1970-01-01 01:00:00
-+++ b/metal/acc/metal_acc_simulate.h	2026-10-09 10:16:13
++++ b/metal/acc/metal_acc_simulate.h	2026-10-08 22:39:48
 @@ -0,0 +1,57 @@
 +//
 +// LISFLOOD-FP Metal ACC Solver - Header
@@ -2099,7 +2439,7 @@ diff -ruN a/metal/acc/metal_acc_simulate.h b/metal/acc/metal_acc_simulate.h
 +#endif // __APPLE__
 diff -ruN a/metal/acc/metal_acc_simulate.mm b/metal/acc/metal_acc_simulate.mm
 --- a/metal/acc/metal_acc_simulate.mm	1970-01-01 01:00:00
-+++ b/metal/acc/metal_acc_simulate.mm	2026-10-09 10:16:13
++++ b/metal/acc/metal_acc_simulate.mm	2026-10-09 08:34:11
 @@ -0,0 +1,944 @@
 +//
 +// LISFLOOD-FP Metal ACC Solver - Implementation
@@ -3047,7 +3387,7 @@ diff -ruN a/metal/acc/metal_acc_simulate.mm b/metal/acc/metal_acc_simulate.mm
 +#endif // __APPLE__
 diff -ruN a/metal/dg2/metal_dg2_kernels.metal b/metal/dg2/metal_dg2_kernels.metal
 --- a/metal/dg2/metal_dg2_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/dg2/metal_dg2_kernels.metal	2026-10-09 10:16:13
++++ b/metal/dg2/metal_dg2_kernels.metal	2026-10-08 23:08:35
 @@ -0,0 +1,2063 @@
 +//
 +// LISFLOOD-FP Metal DG2 Solver Kernels
@@ -5114,7 +5454,7 @@ diff -ruN a/metal/dg2/metal_dg2_kernels.metal b/metal/dg2/metal_dg2_kernels.meta
 +}
 diff -ruN a/metal/dg2/metal_dg2_simulate.h b/metal/dg2/metal_dg2_simulate.h
 --- a/metal/dg2/metal_dg2_simulate.h	1970-01-01 01:00:00
-+++ b/metal/dg2/metal_dg2_simulate.h	2026-10-09 10:16:13
++++ b/metal/dg2/metal_dg2_simulate.h	2026-10-08 23:11:13
 @@ -0,0 +1,78 @@
 +//
 +// LISFLOOD-FP Metal DG2 Solver - Header
@@ -5196,7 +5536,7 @@ diff -ruN a/metal/dg2/metal_dg2_simulate.h b/metal/dg2/metal_dg2_simulate.h
 +#endif // __APPLE__
 diff -ruN a/metal/dg2/metal_dg2_simulate.mm b/metal/dg2/metal_dg2_simulate.mm
 --- a/metal/dg2/metal_dg2_simulate.mm	1970-01-01 01:00:00
-+++ b/metal/dg2/metal_dg2_simulate.mm	2026-10-09 10:16:13
++++ b/metal/dg2/metal_dg2_simulate.mm	2026-10-09 08:34:11
 @@ -0,0 +1,1317 @@
 +//
 +// LISFLOOD-FP Metal DG2 Solver - Implementation
@@ -6517,7 +6857,7 @@ diff -ruN a/metal/dg2/metal_dg2_simulate.mm b/metal/dg2/metal_dg2_simulate.mm
 +#endif // __APPLE__
 diff -ruN a/metal/fv1/metal_fv1_simulate.mm b/metal/fv1/metal_fv1_simulate.mm
 --- a/metal/fv1/metal_fv1_simulate.mm	2026-10-07 21:58:02
-+++ b/metal/fv1/metal_fv1_simulate.mm	2026-10-09 10:16:13
++++ b/metal/fv1/metal_fv1_simulate.mm	2026-10-09 08:34:11
 @@ -1,1493 +1,1517 @@
 -//
 -// LISFLOOD-FP Metal FV1 Solver - Implementation
@@ -9531,7 +9871,7 @@ diff -ruN a/metal/fv1/metal_fv1_simulate.mm b/metal/fv1/metal_fv1_simulate.mm
 +#endif // __APPLE__
 diff -ruN a/metal/fv2/metal_fv2_kernels.metal b/metal/fv2/metal_fv2_kernels.metal
 --- a/metal/fv2/metal_fv2_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/fv2/metal_fv2_kernels.metal	2026-10-09 10:16:13
++++ b/metal/fv2/metal_fv2_kernels.metal	2026-10-08 22:58:27
 @@ -0,0 +1,1432 @@
 +//
 +// LISFLOOD-FP Metal FV2 Solver Kernels
@@ -10967,7 +11307,7 @@ diff -ruN a/metal/fv2/metal_fv2_kernels.metal b/metal/fv2/metal_fv2_kernels.meta
 +}
 diff -ruN a/metal/fv2/metal_fv2_simulate.h b/metal/fv2/metal_fv2_simulate.h
 --- a/metal/fv2/metal_fv2_simulate.h	1970-01-01 01:00:00
-+++ b/metal/fv2/metal_fv2_simulate.h	2026-10-09 10:16:13
++++ b/metal/fv2/metal_fv2_simulate.h	2026-10-08 22:48:18
 @@ -0,0 +1,78 @@
 +//
 +// LISFLOOD-FP Metal FV2 Solver - Header
@@ -11049,7 +11389,7 @@ diff -ruN a/metal/fv2/metal_fv2_simulate.h b/metal/fv2/metal_fv2_simulate.h
 +#endif // __APPLE__
 diff -ruN a/metal/fv2/metal_fv2_simulate.mm b/metal/fv2/metal_fv2_simulate.mm
 --- a/metal/fv2/metal_fv2_simulate.mm	1970-01-01 01:00:00
-+++ b/metal/fv2/metal_fv2_simulate.mm	2026-10-09 10:16:13
++++ b/metal/fv2/metal_fv2_simulate.mm	2026-10-09 08:34:11
 @@ -0,0 +1,1565 @@
 +//
 +// LISFLOOD-FP Metal FV2 Solver - Implementation
@@ -12618,7 +12958,7 @@ diff -ruN a/metal/fv2/metal_fv2_simulate.mm b/metal/fv2/metal_fv2_simulate.mm
 +#endif // __APPLE__
 diff -ruN a/metal/losses/metal_losses.h b/metal/losses/metal_losses.h
 --- a/metal/losses/metal_losses.h	1970-01-01 01:00:00
-+++ b/metal/losses/metal_losses.h	2026-10-09 10:16:13
++++ b/metal/losses/metal_losses.h	2026-10-09 08:30:23
 @@ -0,0 +1,59 @@
 +// LISFLOOD-FP Metal: floodplain infiltration and evaporation (8.4)
 +// Shared by the Metal FV1, FV2, DG2 and ACC solvers; the rules of
@@ -12681,7 +13021,7 @@ diff -ruN a/metal/losses/metal_losses.h b/metal/losses/metal_losses.h
 +#endif
 diff -ruN a/metal/losses/metal_losses.mm b/metal/losses/metal_losses.mm
 --- a/metal/losses/metal_losses.mm	1970-01-01 01:00:00
-+++ b/metal/losses/metal_losses.mm	2026-10-09 10:16:13
++++ b/metal/losses/metal_losses.mm	2026-10-09 08:30:23
 @@ -0,0 +1,253 @@
 +// LISFLOOD-FP Metal: floodplain infiltration and evaporation (8.4)
 +#ifdef __APPLE__
@@ -12938,7 +13278,7 @@ diff -ruN a/metal/losses/metal_losses.mm b/metal/losses/metal_losses.mm
 +#endif
 diff -ruN a/metal/losses/metal_losses_kernels.metal b/metal/losses/metal_losses_kernels.metal
 --- a/metal/losses/metal_losses_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/losses/metal_losses_kernels.metal	2026-10-09 10:16:13
++++ b/metal/losses/metal_losses_kernels.metal	2026-10-09 08:29:38
 @@ -0,0 +1,185 @@
 +//
 +// LISFLOOD-FP Metal: floodplain infiltration and evaporation (8.4)
@@ -13127,7 +13467,7 @@ diff -ruN a/metal/losses/metal_losses_kernels.metal b/metal/losses/metal_losses_
 +}
 diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
 --- a/metal/metal_integrate.cpp	2026-10-07 21:58:02
-+++ b/metal/metal_integrate.cpp	2026-10-09 10:16:13
++++ b/metal/metal_integrate.cpp	2026-10-08 23:11:37
 @@ -1,6 +1,10 @@
  // LISFLOOD-FP Metal GPU back end: entry points called from lisflood.cpp
  #include "metal_integrate.h"
@@ -13178,7 +13518,7 @@ diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
  }
 diff -ruN a/metal/metal_integrate.h b/metal/metal_integrate.h
 --- a/metal/metal_integrate.h	2026-10-07 21:58:02
-+++ b/metal/metal_integrate.h	2026-10-09 10:16:13
++++ b/metal/metal_integrate.h	2026-10-08 23:11:37
 @@ -9,3 +9,18 @@
  void run_metal_fv1(Fnames &filenames, Files *files, States &states, Pars &pars,
                     Solver &solver, BoundCs &boundCs, Stage &stage,
@@ -13200,7 +13540,7 @@ diff -ruN a/metal/metal_integrate.h b/metal/metal_integrate.h
 +                   Arrays &arrays, int verbose);
 diff -ruN a/pars.cpp b/pars.cpp
 --- a/pars.cpp	2026-10-07 21:58:02
-+++ b/pars.cpp	2026-10-09 10:16:13
++++ b/pars.cpp	2026-10-08 22:12:36
 @@ -483,6 +483,26 @@
  		Statesptr->gsection = ON;
  		return;
