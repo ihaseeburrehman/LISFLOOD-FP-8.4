@@ -5,7 +5,10 @@
 #include <cstdio>  // for fprintf
 #include <cstdlib> // for exit(error)
 
-// macro to check for CUDA errors
+// Shared by the adaptive and acc_nugrid CUDA headers.
+#ifndef LISFLOOD_CUDA_ASSERT_DEFINED
+#define LISFLOOD_CUDA_ASSERT_DEFINED
+
 #define CHECK_CUDA_ERROR(ans) { CUDAAssert( (ans), __FILE__, __LINE__); }
 
 inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort = true)
@@ -17,3 +20,5 @@ inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort
 		if (abort) exit(error);
 	}
 }
+
+#endif

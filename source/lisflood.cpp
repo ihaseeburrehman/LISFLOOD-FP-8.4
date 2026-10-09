@@ -423,7 +423,8 @@ int main(int argc, char *argv[])
 #if defined(CUDA)
 	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
-		 Statesptr->acceleration == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON));
+		 Statesptr->acceleration == ON || Statesptr->acc_nugrid == ON ||
+		 Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON));
 #elif defined(METAL_ENABLED)
 	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
@@ -437,7 +438,7 @@ int main(int argc, char *argv[])
 		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 	{
 		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA MWDG2/HWFV1)\n");
+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
 	}
 	// Green-Ampt is a separate choice from the constant rate, and only the
 	// GPU solvers identified above apply it
@@ -450,7 +451,7 @@ int main(int argc, char *argv[])
 	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 	{
 		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA MWDG2/HWFV1)\n");
+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
 	}
 
 #ifdef CUDA

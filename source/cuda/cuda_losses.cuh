@@ -10,6 +10,8 @@ namespace lis
 namespace cuda
 {
 
+namespace acc_nugrid { struct AssembledSolution; }
+
 /**
  * What the loss kernels need for one time step (passed by value).
  *
@@ -124,6 +126,10 @@ public:
 
 	/** Adaptive mesh: soil state remains in the original raster layout. */
 	void apply_adaptive(AssembledSolution& solution, int max_level,
+		NUMERIC_TYPE dt, NUMERIC_TYPE threshold, NUMERIC_TYPE t,
+		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
+	/** Static non-uniform ACC mesh; evaluates losses on finest raster children. */
+	void apply_acc_nugrid(acc_nugrid::AssembledSolution& solution, int max_level,
 		NUMERIC_TYPE dt, NUMERIC_TYPE threshold, NUMERIC_TYPE t,
 		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
 	double adaptive_water_volume();

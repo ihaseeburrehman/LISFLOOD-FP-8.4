@@ -84,17 +84,20 @@ Details:
   minus the volume removed since the start.
 - Each cell carries the part of its loss that single-precision rounding
   dropped to its next step, so small rates are not lost.
-- CUDA MWDG2/HWFV1 keep soil state at the finest raster resolution when
-  the mesh changes. Soil-parameter changes and NoData boundaries retain
-  refinement. For each active cell, the losses of its finest children are
-  averaged; discharges and MWDG2 slopes follow the FV1/DG2 rules above.
+- CUDA MWDG2/HWFV1 keep soil state at the finest raster resolution when the
+  mesh changes; `acc_nugrid` uses the same approach on its static mixed-size
+  mesh. Soil-parameter changes and NoData boundaries retain refinement. For
+  each active cell, the losses of its finest children are averaged. Adaptive
+  discharges and MWDG2 slopes follow the FV1/DG2 rules above; `acc_nugrid`
+  changes depth only.
   Loss-enabled runs write `<resroot>.loss` at `massint`, with CSV columns
   `time,integrated_time,loss_volume,water_volume` (seconds and m3).
   `integrated_time` is the double-precision sum of the actual time steps.
   This diagnostic does not account for boundary fluxes or rainfall; the
-  existing `.cumu` timing file is unchanged. Use raster inputs and
-  `max_ref_lvl >= 5` (a padded mesh of at least 32 x 32 cells).
-- CUDA `acc_nugrid` and CPU FV1/FV2/DG2 do not apply them and print a warning.
+  existing `.cumu` timing file is unchanged. Use raster inputs and a padded
+  mesh of at least 32 x 32 cells: `max_ref_lvl >= 5` for MWDG2/HWFV1 and
+  `L >= 5` for `acc_nugrid`.
+- CPU FV1/FV2/DG2 do not apply them and print a warning.
 
 ### FV2, DG2 and ACC on Apple Silicon
 

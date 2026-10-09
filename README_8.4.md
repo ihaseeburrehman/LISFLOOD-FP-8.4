@@ -266,8 +266,9 @@ Kept here so that whoever extends 8.4 does not meet them again.
 
 The four uniform-grid GPU solvers (FV1, FV2, DG2, ACC) apply infiltration,
 evaporation and Green-Ampt on CUDA and Metal. CUDA MWDG2 and HWFV1 now
-apply the same losses. Next: CUDA ACC on a non-uniform grid, then the Metal
-adaptive solvers. The sub-grid channel model remains CPU-only.
+apply the same losses, as does CUDA ACC on its static non-uniform grid. The
+next large step is to port MWDG2 and HWFV1 themselves to Metal. The sub-grid
+channel model remains CPU-only.
 
 ### Completed: losses in CUDA MWDG2 and HWFV1 (9 October 2026)
 
@@ -321,12 +322,34 @@ with the loss-free solver's drift; the uniform closed basins use a 0.03 %
 relative volume tolerance. The full results, including the remaining
 adaptive-flow conservation error, are in `tests_8.4/ADAPTIVE_RESULTS.md`.
 
-### 1. Next: losses in CUDA ACC on a non-uniform grid (`acc_nugrid`)
+### CUDA ACC on a non-uniform grid (`acc_nugrid`)
 
-Same idea; its cells also have several sizes (`NonUniformNeighbours`,
-`AssembledSolution` in `cuda/acc_nugrid`). ACC changes only the depth.
+Constant-rate infiltration, evaporation and Green-Ampt are also applied by
+CUDA `acc_nugrid`. Its static mesh has cells at several sizes. Soil state and
+rounding compensation remain on the finest input raster; each active leaf
+stores the average loss of its valid finest children. Soil-parameter changes,
+NoData boundaries and rectangular padding are preflagged before the mesh is
+built. ACC changes depth only.
 
-### 2. MWDG2 and HWFV1 on Metal
+The solver writes the same `.loss` CSV as MWDG2/HWFV1 and puts cumulative
+infiltration plus evaporation in the final `.mass` column. Use `L >= 5` for
+this legacy solver (`max_ref_lvl` is the MWDG2/HWFV1 keyword). Its existing
+input path also requires a `stagefile`. A pre-existing double close of the
+stage file was fixed; valid loss-disabled runs retain their 8.3 numerical
+outputs.
+
+Run the standalone checks on a GPU node:
+```
+python3 tests_8.4/acc_nugrid.py BIN84 BIN83 WORK
+```
+They cover constant and raster rates, evaporation, Green-Ampt numeric and
+grid parameters, a finite soil-storage cap, raster orientation, compressed
+mixed-size cells, rectangular padding, NoData, drying, repeatability, the
+small-tree guard and loss-disabled equality with CUDA 8.3. The final clean
+A100 run passed all 106 checks; details and remaining limits are in
+`tests_8.4/ACC_NUGRID_RESULTS.md`.
+
+### Next: MWDG2 and HWFV1 on Metal
 
 A large port (the adaptive solver has 56 CUDA kernels, and 11 of its files
 use CUB for sorting, scans and compaction of the Morton-ordered mesh). Suggested
@@ -387,6 +410,9 @@ this source and out of the release. In general:
    from evapotranspiration).
 3. Done: FV2, DG2 and ACC on Metal, and infiltration, evaporation and
    Green-Ampt in the four Metal solvers. Possibly later: gridded evaporation.
+4. Done: infiltration, evaporation and Green-Ampt in CUDA MWDG2, HWFV1 and
+   non-uniform-grid ACC. Next: port MWDG2 and HWFV1 to Metal, then reuse the
+   existing Metal loss kernel on their finest-grid soil state.
 
 Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
 not drain; infiltration is a constant rate (step 2 addresses this).

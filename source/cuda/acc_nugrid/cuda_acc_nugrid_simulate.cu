@@ -69,6 +69,13 @@
 #include "write_chkpnt.cuh"
 #include "read_chkpnt.cuh"
 
+// Shared loss support is included after the legacy acc_nugrid headers because
+// both modules have a different type named Solver.
+#include "../cuda_losses.cuh"
+#include "../cuda_dem.cuh"
+#include "../cuda_util.cuh"
+#include "../ghostraster.h"
+
 void lis::cuda::acc_nugrid::Simulation::run
 (
 	Fnames& filenames,
@@ -151,12 +158,34 @@ void lis::cuda::acc_nugrid::Simulation::run
 	MortonCode* d_indices = (MortonCode*)malloc_device(bytes_morton);
 	MortonCode* d_reverse_z_order = (MortonCode*)malloc_device(bytes_morton);
 	NUMERIC_TYPE* d_eta_temp = (NUMERIC_TYPE*)malloc_device(bytes_soln); //TOREMOVE
-	bool* d_sig_details = preflag_details(boundaries, point_sources, gauge_points, num_details, solver.L); 
+	bool* d_sig_details = preflag_details(boundaries, point_sources, gauge_points, num_details, solver.L);
 	NUMERIC_TYPE* d_dt_CFL = (NUMERIC_TYPE*)malloc_device(bytes_soln);
 	NUMERIC_TYPE* maxH = (NUMERIC_TYPE*)malloc_device(bytes_soln);
 	NUMERIC_TYPE* totalHtm = (NUMERIC_TYPE*)malloc_device(bytes_soln);
 	NUMERIC_TYPE* maxHtm = (NUMERIC_TYPE*)malloc_device(bytes_soln);
 	NUMERIC_TYPE* initHtm = (NUMERIC_TYPE*)malloc_device(bytes_soln);
+
+	Geometry loss_geometry = {};
+	int loss_pitch = 0, loss_offset = 0;
+	NUMERIC_TYPE* loss_dem = nullptr;
+	NUMERIC_TYPE* device_loss_dem = nullptr;
+	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON
+		|| states.calc_evap == ON;
+	if (has_losses)
+	{
+		if (solver.L < 5 || pars.xsz > mesh_dim || pars.ysz > mesh_dim)
+		{
+			fprintf(stderr, "ERROR: acc_nugrid losses need raster inputs fitting L >= 5\n");
+			exit(-1);
+		}
+		loss_dem = Topography::load(filenames.demfilename, loss_geometry, loss_pitch,
+			loss_offset, pars.nodata_elevation, OFF, verbose);
+		device_loss_dem = cuda::GhostRaster::allocate_device(loss_geometry);
+		cuda::GhostRaster::copy(device_loss_dem, loss_dem, loss_geometry);
+	}
+	Losses losses(filenames, states, pars, loss_geometry, loss_pitch, loss_offset, verbose);
+	double integrated_loss_time = 0.0;
+	bool first_loss_output = true;
 
 	// =========================================================== //
 
@@ -225,6 +254,9 @@ void lis::cuda::acc_nugrid::Simulation::run
 		non_uniform_n,
         states.startfile
 	);
+
+	if (losses.enabled())
+		losses.preflag_adaptive(d_sig_details, solver.L, device_loss_dem, pars.nodata_elevation);
 
 	// ================================ //
 
@@ -419,9 +451,9 @@ void lis::cuda::acc_nugrid::Simulation::run
             if (verbose == ON) printf("Unable to open stage output file: %s", fp);
             states.save_stages = OFF;
         }
-    }
 
-    fclose(fp);
+		if (fp != NULL) fclose(fp);
+    }
 
     //velocity output file
     if (states.save_stages == ON && states.voutput_stage == ON) {
@@ -448,9 +480,9 @@ void lis::cuda::acc_nugrid::Simulation::run
             if (verbose == ON) printf("Unable to open stage output file: %s", fp);
             states.save_stages = OFF;
         }
-    }
 
-    fclose(fp);
+		if (fp != NULL) fclose(fp);
+    }
 
 
     if (states.save_stages == ON)
@@ -605,7 +637,7 @@ void lis::cuda::acc_nugrid::Simulation::run
             non_uniform_n
     	);
 
-    	update_h << <num_blocks_sol, THREADS_PER_BLOCK_MRA >> >
+	    update_h << <num_blocks_sol, THREADS_PER_BLOCK_MRA >> >
     	(
     		d_assem_sol,
     		d_non_uniform_nghbrs,
@@ -614,7 +646,14 @@ void lis::cuda::acc_nugrid::Simulation::run
     		solver,
     		boundaries,
     		point_sources
-    	);
+	    );
+
+		if (losses.enabled())
+		{
+			losses.apply_acc_nugrid(d_assem_sol, solver.L, solver.Tstep,
+				solver.DepthThresh, solver.t, device_loss_dem, pars.nodata_elevation);
+			integrated_loss_time += (double)solver.Tstep;
+		}
 
     	// Update t with final Tstep calculated
     	if (solver.t > C(0.0)) solver.MinTstep = getmin(solver.MinTstep, solver.Tstep);
@@ -638,9 +677,23 @@ void lis::cuda::acc_nugrid::Simulation::run
     			C(0.0),
     			C(0.0),
     			C(0.0),
-    			C(0.0),
-    			C(0.0)
-    		);
+				(NUMERIC_TYPE)losses.total_volume(),
+				C(0.0)
+			);
+
+			if (losses.enabled())
+			{
+				char loss_path[512];
+				snprintf(loss_path, sizeof(loss_path), "%s.loss", filenames.resrootname);
+				FILE* loss_file = fopen(loss_path, first_loss_output ? "w" : "a");
+				if (!loss_file) { perror(loss_path); exit(-1); }
+				if (first_loss_output)
+					fprintf(loss_file, "time,integrated_time,loss_volume,water_volume\n");
+				fprintf(loss_file, "%.17g,%.17g,%.17g,%.17g\n", (double)solver.t,
+					integrated_loss_time, losses.total_volume(), losses.adaptive_water_volume());
+				fclose(loss_file);
+				first_loss_output = false;
+			}
 
             pars.MassTotal += pars.MassInt;
     
@@ -801,6 +854,9 @@ void lis::cuda::acc_nugrid::Simulation::run
     	initHtm,
     	pars.output_precision
     );
+
+	if (device_loss_dem) cuda::free_device(device_loss_dem);
+	delete[] loss_dem;
     
  //   time(&solver.time_finish);
     if (verbose == ON) printf("Finished.\n\n");

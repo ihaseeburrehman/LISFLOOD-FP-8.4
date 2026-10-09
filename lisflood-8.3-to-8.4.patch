@@ -1,5 +1,5 @@
 diff -ruN a/CMakeLists.txt b/CMakeLists.txt
---- a/CMakeLists.txt	2026-10-07 21:58:02
+--- a/CMakeLists.txt	2026-10-08 21:46:12
 +++ b/CMakeLists.txt	2026-10-08 13:18:13
 @@ -83,6 +83,7 @@
  		cuda/cuda_geometry.cu
@@ -10,7 +10,7 @@ diff -ruN a/CMakeLists.txt b/CMakeLists.txt
  		cuda/cuda_sample.cu
  		cuda/cuda_simulate.cu
 diff -ruN a/VersionHistory.h b/VersionHistory.h
---- a/VersionHistory.h	2026-10-07 21:58:02
+--- a/VersionHistory.h	2026-10-08 21:46:13
 +++ b/VersionHistory.h	2026-10-09 15:00:17
 @@ -20,7 +20,7 @@
  
@@ -34,7 +34,7 @@ diff -ruN a/VersionHistory.h b/VersionHistory.h
                    the mass counter, flux kernels synchronised; Metal FV1 back end (HR)
  8.1  Nov 23 2020  Merged changes from v7.1 (d8subgrid) into v8 (PFU)
 diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
---- a/cuda/acc/cuda_acc_simulate.cu	2026-10-07 21:58:02
+--- a/cuda/acc/cuda_acc_simulate.cu	2026-10-08 21:46:13
 +++ b/cuda/acc/cuda_acc_simulate.cu	2026-10-09 09:50:08
 @@ -8,6 +8,7 @@
  #include "cuda_rain.cuh"
@@ -89,8 +89,187 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  //	max_field.write();
  
  	//output max files
+diff -ruN a/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh b/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh
+--- a/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh	2026-10-08 21:46:12
++++ b/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh	2026-10-09 15:47:06
+@@ -5,7 +5,10 @@
+ #include <stdio.h>  // for fprintf
+ #include <stdlib.h> // for exit(error)
+ 
+-// macro to check for CUDA errors
++// Shared by the adaptive and acc_nugrid CUDA headers.
++#ifndef LISFLOOD_CUDA_ASSERT_DEFINED
++#define LISFLOOD_CUDA_ASSERT_DEFINED
++
+ #define CHECK_CUDA_ERROR(ans) { CUDAAssert( (ans), __FILE__, __LINE__); }
+ 
+ inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort = true)
+@@ -16,4 +19,6 @@
+ 
+ 		if (abort) exit(error);
+ 	}
+-}
+\ No newline at end of file
++}
++
++#endif
+diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu
+--- a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu	2026-10-08 21:46:12
++++ b/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu	2026-10-09 15:47:06
+@@ -69,6 +69,13 @@
+ #include "write_chkpnt.cuh"
+ #include "read_chkpnt.cuh"
+ 
++// Shared loss support is included after the legacy acc_nugrid headers because
++// both modules have a different type named Solver.
++#include "../cuda_losses.cuh"
++#include "../cuda_dem.cuh"
++#include "../cuda_util.cuh"
++#include "../ghostraster.h"
++
+ void lis::cuda::acc_nugrid::Simulation::run
+ (
+ 	Fnames& filenames,
+@@ -151,13 +158,35 @@
+ 	MortonCode* d_indices = (MortonCode*)malloc_device(bytes_morton);
+ 	MortonCode* d_reverse_z_order = (MortonCode*)malloc_device(bytes_morton);
+ 	NUMERIC_TYPE* d_eta_temp = (NUMERIC_TYPE*)malloc_device(bytes_soln); //TOREMOVE
+-	bool* d_sig_details = preflag_details(boundaries, point_sources, gauge_points, num_details, solver.L); 
++	bool* d_sig_details = preflag_details(boundaries, point_sources, gauge_points, num_details, solver.L);
+ 	NUMERIC_TYPE* d_dt_CFL = (NUMERIC_TYPE*)malloc_device(bytes_soln);
+ 	NUMERIC_TYPE* maxH = (NUMERIC_TYPE*)malloc_device(bytes_soln);
+ 	NUMERIC_TYPE* totalHtm = (NUMERIC_TYPE*)malloc_device(bytes_soln);
+ 	NUMERIC_TYPE* maxHtm = (NUMERIC_TYPE*)malloc_device(bytes_soln);
+ 	NUMERIC_TYPE* initHtm = (NUMERIC_TYPE*)malloc_device(bytes_soln);
+ 
++	Geometry loss_geometry = {};
++	int loss_pitch = 0, loss_offset = 0;
++	NUMERIC_TYPE* loss_dem = nullptr;
++	NUMERIC_TYPE* device_loss_dem = nullptr;
++	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON
++		|| states.calc_evap == ON;
++	if (has_losses)
++	{
++		if (solver.L < 5 || pars.xsz > mesh_dim || pars.ysz > mesh_dim)
++		{
++			fprintf(stderr, "ERROR: acc_nugrid losses need raster inputs fitting L >= 5\n");
++			exit(-1);
++		}
++		loss_dem = Topography::load(filenames.demfilename, loss_geometry, loss_pitch,
++			loss_offset, pars.nodata_elevation, OFF, verbose);
++		device_loss_dem = cuda::GhostRaster::allocate_device(loss_geometry);
++		cuda::GhostRaster::copy(device_loss_dem, loss_dem, loss_geometry);
++	}
++	Losses losses(filenames, states, pars, loss_geometry, loss_pitch, loss_offset, verbose);
++	double integrated_loss_time = 0.0;
++	bool first_loss_output = true;
++
+ 	// =========================================================== //
+ 
+ 	::DynamicRain<UnifiedAllocator<NUMERIC_TYPE>> rain(
+@@ -226,6 +255,9 @@
+         states.startfile
+ 	);
+ 
++	if (losses.enabled())
++		losses.preflag_adaptive(d_sig_details, solver.L, device_loss_dem, pars.nodata_elevation);
++
+ 	// ================================ //
+ 
+     get_reg_tree
+@@ -419,10 +451,10 @@
+             if (verbose == ON) printf("Unable to open stage output file: %s", fp);
+             states.save_stages = OFF;
+         }
++
++		if (fp != NULL) fclose(fp);
+     }
+ 
+-    fclose(fp);
+-
+     //velocity output file
+     if (states.save_stages == ON && states.voutput_stage == ON) {
+ 
+@@ -448,11 +480,11 @@
+             if (verbose == ON) printf("Unable to open stage output file: %s", fp);
+             states.save_stages = OFF;
+         }
++
++		if (fp != NULL) fclose(fp);
+     }
+ 
+-    fclose(fp);
+ 
+-
+     if (states.save_stages == ON)
+     {
+         d_plot_assem_sol = project_assem_sol
+@@ -605,7 +637,7 @@
+             non_uniform_n
+     	);
+ 
+-    	update_h << <num_blocks_sol, THREADS_PER_BLOCK_MRA >> >
++	    update_h << <num_blocks_sol, THREADS_PER_BLOCK_MRA >> >
+     	(
+     		d_assem_sol,
+     		d_non_uniform_nghbrs,
+@@ -614,8 +646,15 @@
+     		solver,
+     		boundaries,
+     		point_sources
+-    	);
++	    );
+ 
++		if (losses.enabled())
++		{
++			losses.apply_acc_nugrid(d_assem_sol, solver.L, solver.Tstep,
++				solver.DepthThresh, solver.t, device_loss_dem, pars.nodata_elevation);
++			integrated_loss_time += (double)solver.Tstep;
++		}
++
+     	// Update t with final Tstep calculated
+     	if (solver.t > C(0.0)) solver.MinTstep = getmin(solver.MinTstep, solver.Tstep);
+     	solver.t += solver.Tstep;
+@@ -638,10 +677,24 @@
+     			C(0.0),
+     			C(0.0),
+     			C(0.0),
+-    			C(0.0),
+-    			C(0.0)
+-    		);
++				(NUMERIC_TYPE)losses.total_volume(),
++				C(0.0)
++			);
+ 
++			if (losses.enabled())
++			{
++				char loss_path[512];
++				snprintf(loss_path, sizeof(loss_path), "%s.loss", filenames.resrootname);
++				FILE* loss_file = fopen(loss_path, first_loss_output ? "w" : "a");
++				if (!loss_file) { perror(loss_path); exit(-1); }
++				if (first_loss_output)
++					fprintf(loss_file, "time,integrated_time,loss_volume,water_volume\n");
++				fprintf(loss_file, "%.17g,%.17g,%.17g,%.17g\n", (double)solver.t,
++					integrated_loss_time, losses.total_volume(), losses.adaptive_water_volume());
++				fclose(loss_file);
++				first_loss_output = false;
++			}
++
+             pars.MassTotal += pars.MassInt;
+     
+     		d_plot_assem_sol = project_assem_sol
+@@ -801,6 +854,9 @@
+     	initHtm,
+     	pars.output_precision
+     );
++
++	if (device_loss_dem) cuda::free_device(device_loss_dem);
++	delete[] loss_dem;
+     
+  //   time(&solver.time_finish);
+     if (verbose == ON) printf("Finished.\n\n");
 diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptive_simulate.cu
---- a/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-07 21:58:02
+--- a/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-08 21:46:13
 +++ b/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-09 14:55:18
 @@ -1,6 +1,9 @@
  //-----------------Custom headers-----------------//
@@ -265,7 +444,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  	//reset();
  
 diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cuh b/cuda/adaptive/cuda_adaptive_simulate.cuh
---- a/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-07 21:58:02
+--- a/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-08 21:46:13
 +++ b/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-09 14:33:51
 @@ -16,7 +16,8 @@
  	void run
@@ -277,16 +456,41 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cuh b/cuda/adaptive/cuda_adapti
  	);
  };
  
+diff -ruN a/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh b/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh
+--- a/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh	2026-10-08 21:46:13
++++ b/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh	2026-10-09 15:47:06
+@@ -5,7 +5,10 @@
+ #include <cstdio>  // for fprintf
+ #include <cstdlib> // for exit(error)
+ 
+-// macro to check for CUDA errors
++// Shared by the adaptive and acc_nugrid CUDA headers.
++#ifndef LISFLOOD_CUDA_ASSERT_DEFINED
++#define LISFLOOD_CUDA_ASSERT_DEFINED
++
+ #define CHECK_CUDA_ERROR(ans) { CUDAAssert( (ans), __FILE__, __LINE__); }
+ 
+ inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort = true)
+@@ -16,4 +19,6 @@
+ 
+ 		if (abort) exit(error);
+ 	}
+-}
+\ No newline at end of file
++}
++
++#endif
 diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 --- a/cuda/cuda_losses.cu	1970-01-01 01:00:00
-+++ b/cuda/cuda_losses.cu	2026-10-09 14:44:56
-@@ -0,0 +1,677 @@
++++ b/cuda/cuda_losses.cu	2026-10-09 15:47:06
+@@ -0,0 +1,737 @@
 +#include "cuda_losses.cuh"
 +#include "cuda_geometry.cuh"
 +#include "cuda_util.cuh"
 +#include "../cuda/ghostraster.h"
 +#include "io.h"
 +#include "adaptive/classes/AssembledSolution.h"
++#include "acc_nugrid/AssembledSolution.h"
 +#include "adaptive/zorder/compact.cuh"
 +#include "adaptive/utilities/get_lvl_idx.cuh"
 +#include <cmath>
@@ -650,6 +854,53 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +	add_block_sum(stored, water);
 +}
 +
++/** Apply raster-scale losses to the static non-uniform ACC leaves. The soil
++ * state stays at finest-grid resolution, while the leaf stores their average
++ * depth. */
++__global__ void apply_losses_acc_nugrid(
++	acc_nugrid::AssembledSolution sol, int L, Geometry geom, int pitch, int offset,
++	LossParams p, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold,
++	const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata, double* volume, double* water)
++{
++	int cell = blockIdx.x * blockDim.x + threadIdx.x;
++	double removed = 0.0, stored = 0.0;
++	if (cell < sol.length)
++	{
++		int level = sol.levels[cell];
++		unsigned code = (sol.act_idcs[cell] - get_lvl_idx(level)) << (2 * (L-level));
++		int x0 = compact(code), y0 = compact(code >> 1);
++		int side = 1 << (L-level);
++		NUMERIC_TYPE h = sol.h[cell];
++		double loss = 0.0;
++		int valid = 0;
++		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
++		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
++		{
++			int idx = (geom.ysz-1-y)*pitch + x + offset;
++			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
++			NUMERIC_TYPE child = depth_after_losses(p, idx, h, step_dt, threshold);
++			loss += (double)(h-child);
++			++valid;
++		}
++		double count = valid;
++		NUMERIC_TYPE next = valid ? (NUMERIC_TYPE)((double)h-loss/count) : h;
++		NUMERIC_TYPE correction = valid
++			? (NUMERIC_TYPE)((loss-count*(double)(h-next))/valid) : C(0.0);
++		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
++		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
++		{
++			int idx = (geom.ysz-1-y)*pitch + x + offset;
++			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
++			p.residual[idx] += correction;
++		}
++		if (next != h) sol.h[cell] = next;
++		removed = (double)(h-next)*count*geom.dx*geom.dy;
++		stored = (double)next*count*geom.dx*geom.dy;
++	}
++	add_block_sum(removed, volume);
++	add_block_sum(stored, water);
++}
++
 +/** true and the value if spec is a number (and nothing else) */
 +static bool parse_number(const char* spec, double& value)
 +{
@@ -923,6 +1174,18 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +		dem, nodata, d_volume, d_water);
 +}
 +
++void lis::cuda::Losses::apply_acc_nugrid(
++	acc_nugrid::AssembledSolution& sol, int max_level, NUMERIC_TYPE step_dt,
++	NUMERIC_TYPE threshold, NUMERIC_TYPE t, const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
++{
++	if (d_water == nullptr) d_water = static_cast<double*>(malloc_device(sizeof(double)));
++	double zero = 0.0;
++	copy(d_water, &zero, sizeof(double));
++	apply_losses_acc_nugrid<<<(sol.length+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
++		sol, max_level, geometry, pitch, offset, params(t), step_dt, threshold,
++		dem, nodata, d_volume, d_water);
++}
++
 +double lis::cuda::Losses::adaptive_water_volume()
 +{
 +	double water = 0.0;
@@ -960,8 +1223,8 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +}
 diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 --- a/cuda/cuda_losses.cuh	1970-01-01 01:00:00
-+++ b/cuda/cuda_losses.cuh	2026-10-09 14:44:56
-@@ -0,0 +1,172 @@
++++ b/cuda/cuda_losses.cuh	2026-10-09 15:47:06
+@@ -0,0 +1,178 @@
 +#pragma once
 +#include "../lisflood.h"
 +#include "../geometry.h"
@@ -973,6 +1236,8 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +{
 +namespace cuda
 +{
++
++namespace acc_nugrid { struct AssembledSolution; }
 +
 +/**
 + * What the loss kernels need for one time step (passed by value).
@@ -1090,6 +1355,10 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +	void apply_adaptive(AssembledSolution& solution, int max_level,
 +		NUMERIC_TYPE dt, NUMERIC_TYPE threshold, NUMERIC_TYPE t,
 +		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
++	/** Static non-uniform ACC mesh; evaluates losses on finest raster children. */
++	void apply_acc_nugrid(acc_nugrid::AssembledSolution& solution, int max_level,
++		NUMERIC_TYPE dt, NUMERIC_TYPE threshold, NUMERIC_TYPE t,
++		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
 +	double adaptive_water_volume();
 +	void preflag_adaptive(bool* details, int max_level,
 +		const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata);
@@ -1135,7 +1404,7 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +}
 +}
 diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
---- a/cuda/cuda_stats.cu	2026-10-07 21:58:02
+--- a/cuda/cuda_stats.cu	2026-10-08 21:46:12
 +++ b/cuda/cuda_stats.cu	2026-10-08 13:18:22
 @@ -106,6 +106,12 @@
  
@@ -1163,7 +1432,7 @@ diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
  }
  
 diff -ruN a/cuda/cuda_stats.cuh b/cuda/cuda_stats.cuh
---- a/cuda/cuda_stats.cuh	2026-10-07 21:58:02
+--- a/cuda/cuda_stats.cuh	2026-10-08 21:46:12
 +++ b/cuda/cuda_stats.cuh	2026-10-08 13:18:22
 @@ -35,6 +35,10 @@
  	NUMERIC_TYPE previous_volume = C(0.0);
@@ -1177,7 +1446,7 @@ diff -ruN a/cuda/cuda_stats.cuh b/cuda/cuda_stats.cuh
  	NUMERIC_TYPE area
  	(
 diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
---- a/cuda/dg2/cuda_dg2_simulate.cu	2026-10-07 21:58:02
+--- a/cuda/dg2/cuda_dg2_simulate.cu	2026-10-08 21:46:12
 +++ b/cuda/dg2/cuda_dg2_simulate.cu	2026-10-08 15:01:10
 @@ -11,6 +11,7 @@
  #include "cuda_max_field.cuh"
@@ -1220,7 +1489,7 @@ diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
  			sampler.write_if_buffer_full();
  		}
 diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
---- a/cuda/fv1/cuda_fv1_simulate.cu	2026-10-07 21:58:02
+--- a/cuda/fv1/cuda_fv1_simulate.cu	2026-10-08 21:46:12
 +++ b/cuda/fv1/cuda_fv1_simulate.cu	2026-10-08 13:18:22
 @@ -8,6 +8,7 @@
  #include "cuda_rain.cuh"
@@ -1262,7 +1531,7 @@ diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
  			sampler.write_if_buffer_full();
  		}
 diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
---- a/cuda/fv2/cuda_fv2_simulate.cu	2026-10-07 21:58:02
+--- a/cuda/fv2/cuda_fv2_simulate.cu	2026-10-08 21:46:12
 +++ b/cuda/fv2/cuda_fv2_simulate.cu	2026-10-08 15:01:10
 @@ -11,6 +11,7 @@
  #include "cuda_max_field.cuh"
@@ -1305,7 +1574,7 @@ diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
  			sampler.write_if_buffer_full();
  		}
 diff -ruN a/cuda/stats.cpp b/cuda/stats.cpp
---- a/cuda/stats.cpp	2026-10-07 21:58:02
+--- a/cuda/stats.cpp	2026-10-08 21:46:12
 +++ b/cuda/stats.cpp	2026-10-08 13:18:22
 @@ -71,7 +71,9 @@
  		entry.mass.out,
@@ -1319,7 +1588,7 @@ diff -ruN a/cuda/stats.cpp b/cuda/stats.cpp
  	fflush(file);
  
 diff -ruN a/cuda/stats.h b/cuda/stats.h
---- a/cuda/stats.h	2026-10-07 21:58:02
+--- a/cuda/stats.h	2026-10-08 21:46:12
 +++ b/cuda/stats.h	2026-10-08 13:18:22
 @@ -22,6 +22,7 @@
  	MassStats mass;
@@ -1330,8 +1599,8 @@ diff -ruN a/cuda/stats.h b/cuda/stats.h
  
  class Stats
 diff -ruN a/lisflood.cpp b/lisflood.cpp
---- a/lisflood.cpp	2026-10-07 21:58:02
-+++ b/lisflood.cpp	2026-10-09 14:41:06
+--- a/lisflood.cpp	2026-10-08 21:46:13
++++ b/lisflood.cpp	2026-10-09 15:47:06
 @@ -213,6 +213,7 @@
  	SimStates.save_Qs = OFF;
  	SimStates.calc_infiltration = OFF;
@@ -1340,7 +1609,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	SimStates.call_gzip = OFF;
  	SimStates.alt_ascheader = OFF;
  	SimStates.checkpoint = OFF;
-@@ -416,6 +417,42 @@
+@@ -416,6 +417,43 @@
  
  	LoadDEM(Fnameptr, Statesptr, Parptr, Arrptr, verbosemode);
  	
@@ -1350,7 +1619,8 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +#if defined(CUDA)
 +	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 +		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
-+		 Statesptr->acceleration == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON));
++		 Statesptr->acceleration == ON || Statesptr->acc_nugrid == ON ||
++		 Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON));
 +#elif defined(METAL_ENABLED)
 +	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
 +		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
@@ -1364,7 +1634,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 +	{
 +		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA MWDG2/HWFV1)\n");
++			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
 +	}
 +	// Green-Ampt is a separate choice from the constant rate, and only the
 +	// GPU solvers identified above apply it
@@ -1377,13 +1647,13 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 +	{
 +		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA MWDG2/HWFV1)\n");
++			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
 +	}
 +
  #ifdef CUDA
  	if (Statesptr->cuda == ON)
  	{
-@@ -447,7 +484,7 @@
+@@ -447,7 +485,7 @@
  		else if (Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON)
  		{
  			lis::cuda::adaptive::Simulation simulation;
@@ -1392,7 +1662,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  		}
  		else
  		{
-@@ -787,6 +824,20 @@
+@@ -787,6 +825,20 @@
  		fv1::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
  				Stageptr, Arrptr, verbosemode);
  	}
@@ -1413,7 +1683,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	else if (Statesptr->dg2 == ON)
  	{
  		dg2::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
-@@ -802,6 +853,14 @@
+@@ -802,6 +854,14 @@
  	}
  	else
  	{
@@ -1429,7 +1699,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	}
  	time(&ParSolver.time_finish);
 diff -ruN a/lisflood.h b/lisflood.h
---- a/lisflood.h	2026-10-07 21:58:02
+--- a/lisflood.h	2026-10-08 21:46:13
 +++ b/lisflood.h	2026-10-08 22:12:36
 @@ -417,6 +417,12 @@
  	char LinkListfilename[256]; // JCN
@@ -1453,7 +1723,7 @@ diff -ruN a/lisflood.h b/lisflood.h
  	int alt_ascheader;
  	int checkpoint;
 diff -ruN a/metal/CMakeLists.txt b/metal/CMakeLists.txt
---- a/metal/CMakeLists.txt	2026-10-07 21:58:02
+--- a/metal/CMakeLists.txt	2026-10-08 21:46:12
 +++ b/metal/CMakeLists.txt	2026-10-09 08:31:40
 @@ -1,4 +1,4 @@
 -# Metal GPU back end for the FV1 solver (Apple Silicon)
@@ -6856,7 +7126,7 @@ diff -ruN a/metal/dg2/metal_dg2_simulate.mm b/metal/dg2/metal_dg2_simulate.mm
 +
 +#endif // __APPLE__
 diff -ruN a/metal/fv1/metal_fv1_simulate.mm b/metal/fv1/metal_fv1_simulate.mm
---- a/metal/fv1/metal_fv1_simulate.mm	2026-10-07 21:58:02
+--- a/metal/fv1/metal_fv1_simulate.mm	2026-10-08 21:46:12
 +++ b/metal/fv1/metal_fv1_simulate.mm	2026-10-09 08:34:11
 @@ -1,1493 +1,1517 @@
 -//
@@ -13466,7 +13736,7 @@ diff -ruN a/metal/losses/metal_losses_kernels.metal b/metal/losses/metal_losses_
 +    }
 +}
 diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
---- a/metal/metal_integrate.cpp	2026-10-07 21:58:02
+--- a/metal/metal_integrate.cpp	2026-10-08 21:46:12
 +++ b/metal/metal_integrate.cpp	2026-10-08 23:11:37
 @@ -1,6 +1,10 @@
  // LISFLOOD-FP Metal GPU back end: entry points called from lisflood.cpp
@@ -13517,7 +13787,7 @@ diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
                              stage, arrays, verbose);
  }
 diff -ruN a/metal/metal_integrate.h b/metal/metal_integrate.h
---- a/metal/metal_integrate.h	2026-10-07 21:58:02
+--- a/metal/metal_integrate.h	2026-10-08 21:46:12
 +++ b/metal/metal_integrate.h	2026-10-08 23:11:37
 @@ -9,3 +9,18 @@
  void run_metal_fv1(Fnames &filenames, Files *files, States &states, Pars &pars,
@@ -13539,7 +13809,7 @@ diff -ruN a/metal/metal_integrate.h b/metal/metal_integrate.h
 +                   Solver &solver, BoundCs &boundCs, Stage &stage,
 +                   Arrays &arrays, int verbose);
 diff -ruN a/pars.cpp b/pars.cpp
---- a/pars.cpp	2026-10-07 21:58:02
+--- a/pars.cpp	2026-10-08 21:46:12
 +++ b/pars.cpp	2026-10-08 22:12:36
 @@ -483,6 +483,26 @@
  		Statesptr->gsection = ON;

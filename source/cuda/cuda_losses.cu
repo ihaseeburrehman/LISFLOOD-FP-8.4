@@ -4,6 +4,7 @@
 #include "../cuda/ghostraster.h"
 #include "io.h"
 #include "adaptive/classes/AssembledSolution.h"
+#include "acc_nugrid/AssembledSolution.h"
 #include "adaptive/zorder/compact.cuh"
 #include "adaptive/utilities/get_lvl_idx.cuh"
 #include <cmath>
@@ -367,6 +368,53 @@ __global__ void apply_losses_adaptive(
 	add_block_sum(stored, water);
 }
 
+/** Apply raster-scale losses to the static non-uniform ACC leaves. The soil
+ * state stays at finest-grid resolution, while the leaf stores their average
+ * depth. */
+__global__ void apply_losses_acc_nugrid(
+	acc_nugrid::AssembledSolution sol, int L, Geometry geom, int pitch, int offset,
+	LossParams p, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold,
+	const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata, double* volume, double* water)
+{
+	int cell = blockIdx.x * blockDim.x + threadIdx.x;
+	double removed = 0.0, stored = 0.0;
+	if (cell < sol.length)
+	{
+		int level = sol.levels[cell];
+		unsigned code = (sol.act_idcs[cell] - get_lvl_idx(level)) << (2 * (L-level));
+		int x0 = compact(code), y0 = compact(code >> 1);
+		int side = 1 << (L-level);
+		NUMERIC_TYPE h = sol.h[cell];
+		double loss = 0.0;
+		int valid = 0;
+		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
+		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
+		{
+			int idx = (geom.ysz-1-y)*pitch + x + offset;
+			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
+			NUMERIC_TYPE child = depth_after_losses(p, idx, h, step_dt, threshold);
+			loss += (double)(h-child);
+			++valid;
+		}
+		double count = valid;
+		NUMERIC_TYPE next = valid ? (NUMERIC_TYPE)((double)h-loss/count) : h;
+		NUMERIC_TYPE correction = valid
+			? (NUMERIC_TYPE)((loss-count*(double)(h-next))/valid) : C(0.0);
+		for (int y=y0; y<y0+side && y<geom.ysz; ++y)
+		for (int x=x0; x<x0+side && x<geom.xsz; ++x)
+		{
+			int idx = (geom.ysz-1-y)*pitch + x + offset;
+			if (FABS(dem[idx]-nodata) < C(1e-6)) continue;
+			p.residual[idx] += correction;
+		}
+		if (next != h) sol.h[cell] = next;
+		removed = (double)(h-next)*count*geom.dx*geom.dy;
+		stored = (double)next*count*geom.dx*geom.dy;
+	}
+	add_block_sum(removed, volume);
+	add_block_sum(stored, water);
+}
+
 /** true and the value if spec is a number (and nothing else) */
 static bool parse_number(const char* spec, double& value)
 {
@@ -636,6 +684,18 @@ void lis::cuda::Losses::apply_adaptive(
 	double zero = 0.0;
 	copy(d_water, &zero, sizeof(double));
 	apply_losses_adaptive<<<(sol.length+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
+		sol, max_level, geometry, pitch, offset, params(t), step_dt, threshold,
+		dem, nodata, d_volume, d_water);
+}
+
+void lis::cuda::Losses::apply_acc_nugrid(
+	acc_nugrid::AssembledSolution& sol, int max_level, NUMERIC_TYPE step_dt,
+	NUMERIC_TYPE threshold, NUMERIC_TYPE t, const NUMERIC_TYPE* dem, NUMERIC_TYPE nodata)
+{
+	if (d_water == nullptr) d_water = static_cast<double*>(malloc_device(sizeof(double)));
+	double zero = 0.0;
+	copy(d_water, &zero, sizeof(double));
+	apply_losses_acc_nugrid<<<(sol.length+CUDA_BLOCK_SIZE-1)/CUDA_BLOCK_SIZE, CUDA_BLOCK_SIZE>>>(
 		sol, max_level, geometry, pitch, offset, params(t), step_dt, threshold,
 		dem, nodata, d_volume, d_water);
 }
