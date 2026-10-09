@@ -10,6 +10,7 @@
 
 #include <string>
 #include "metal_acc_simulate.h"
+#include "../losses/metal_losses.h"
 #include "../../rain/rain.h"
 #include "../../rain/rain.tpp"
 #include "../../swe/output.h"
@@ -78,6 +79,8 @@ struct SimulatorImpl {
   size_t n_cells = 0, n_q = 0;
   bool has_manning = false;
   bool use_friction = false;
+  Losses losses;                // infiltration and evaporation (8.4)
+  Fnames *fnames = nullptr;
   int verbose = 0;
   NUMERIC_TYPE time = 0;
   double last_rain_upload = -1.0;
@@ -131,6 +134,7 @@ struct SimulatorImpl {
 
   bool init(Fnames &filenames, Pars &p, ::Solver &s, int verb) {
     verbose = verb;
+    fnames = &filenames;
     manning_file = filenames.nfilename;
     dynamic_rain = new ::DynamicRain<std::allocator<NUMERIC_TYPE>>(
         filenames.dynamicrainfilename, verbose);
@@ -313,6 +317,9 @@ struct SimulatorImpl {
       dM[k] = h_M ? (float)h_M[k] : phys.manning;
     }
     use_friction = has_manning || phys.manning > 0.0f;
+    if (fnames)
+      losses.setup(device, *fnames, *states, *pars, arrays, geom.xsz, geom.ysz,
+                   geom.xsz, 0, 0, n_cells, verbose);
 
     // CUDA-compatible mode: cuda/cuda_simulate.cu initialise_manning() reads the
     // Manning raster as it is, NoData values included (-9999 becomes n), where
@@ -628,6 +635,9 @@ struct SimulatorImpl {
         [enc setBuffer:geomBuf offset:0 atIndex:3];
         dispatch2D(enc, geom.xsz + 1, geom.ysz + 1);
       }
+      // infiltration and evaporation (8.4), where iterateq.cpp applies them
+      losses.encode(enc, H, nil, nil, false, 0, 0, 0.0f, DEM, solv.nodata_elev,
+                    solv.depth_thresh, dt, time);
       if (uni) encUniformRain(enc);
       if (dyn) encDynRain(enc);
       encPointSources(enc, 0);
@@ -637,6 +647,7 @@ struct SimulatorImpl {
       encStoreQoldAndMax(enc);
     });
     collectStats(dt, dyn, uni, drain);
+    losses.collect();
     time += dt;
     return dt;
   }
@@ -683,7 +694,11 @@ struct SimulatorImpl {
       encUpdateH(enc, drycheck);
       encPointSources(enc, 1);
       encStoreQoldAndMax(enc);
+      // infiltration and evaporation (8.4), after the step as in cuda/acc
+      losses.encode(enc, H, nil, nil, false, 0, 0, 0.0f, DEM, solv.nodata_elev,
+                    solv.depth_thresh, dt, time + dt);
     });
+    losses.collect();
     acc_rain += rain_dyn;
     collectStats(dt, false, uni, drain);
     prev_dt = dt;
@@ -742,6 +757,10 @@ struct SimulatorImpl {
     if (boundCs) {
       boundCs->VolInMT += (NUMERIC_TYPE)(acc_vol_in + acc_rain);
       boundCs->VolOutMT += (NUMERIC_TYPE)(acc_vol_out + acc_drain);
+      // infiltration and evaporation leave the domain (8.4)
+      const double lost = losses.take_interval_volume();
+      boundCs->VolOutMT += (NUMERIC_TYPE)lost;
+      pars->InfilTotalLoss += (NUMERIC_TYPE)lost;
       pars->RainTotalLoss += (NUMERIC_TYPE)acc_rain;
       if (elapsed > 0.0) {
         boundCs->Qin = (NUMERIC_TYPE)(acc_vol_in / elapsed);
@@ -880,13 +899,12 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       break;
     }
     if (solver.t > 0) solver.MinTstep = std::min(solver.MinTstep, dt);
+    const NUMERIC_TYPE t_start = solver.t;
     solver.t += dt;
     solver.itCount++;
 
-    if (verbose && solver.itCount % 500 == 0) {
-      printf("t=%.2f\tdt=%.6f\n", solver.t, dt);
-      fflush(stdout);
-    }
+    // one line per step, as the CUDA solvers print (the 8.4 tests read it)
+    if (verbose) printf("t=%f\tdt=%f\n", t_start, dt);
 
     if (solver.t >= pars.MassTotal) {
       sim.copy_to_host(arrays.H, arrays.Qx, arrays.Qy);

@@ -48,12 +48,20 @@ TOL = 2e-6       # m: two units of the last written digit (output_precision 6)
 THRESH = 0.001   # m: DepthThresh; shallower cells lose nothing (CPU rule)
 
 
+# CUDA FV2 and DG2 hold the bed elevation in single precision as it is (20 m
+# here, where one unit of the last digit is 1.9 um, about one step's loss), so
+# the per-cell rounding of the loss makes small false water-surface slopes and
+# some water moves: up to 0.2 % of the loss (README_8.4.md). With the same DEM
+# lowered to 0 m they remove exactly rate x dt, as FV1 and ACC do; the Metal
+# solvers shift the DEM to its lowest cell and are exact.
+FV2_DG2_REL = 3e-3
+
+
 def tol_for(run, h0, expected):
-    """FV1 and ACC remove exactly rate x dt; FV2 and DG2 remove it too, but
-    their closed walls let about 0.1 % of it back in while the level falls
-    (README_8.4.md), so they are checked to 0.2 % of the expected loss"""
+    """depth tolerance: two units of the last written digit; CUDA FV2 and DG2:
+    0.3 % of the expected loss (see FV2_DG2_REL)"""
     if "fv2" in run or "dg2" in run:
-        return max(TOL, 2e-3 * (h0 - expected))
+        return max(TOL, FV2_DG2_REL * (h0 - expected))
     return TOL
 
 
@@ -139,7 +147,8 @@ def check_mass(run, label, start_file, verror=True):
         return
     lost, gone = -m[-1][11], v0 - v2
     verr = max(abs(r[10]) for r in m[1:])
-    ok = abs(lost - gone) <= 1e-3 * gone and (not verror or verr <= 1e-3 * gone)
+    rel = FV2_DG2_REL if ("fv2" in run or "dg2" in run) else 1e-3
+    ok = abs(lost - gone) <= rel * gone and (not verror or verr <= 1e-3 * gone)
     report(ok, f"{run}: {label}volume removed {lost:.1f} m3, depth grids lost {gone:.1f} m3, "
                f"largest |Verror| after the first row {verr:.3g} m3"
                + ("" if verror else " (not checked: FV1 .mass volume includes ghost cells)"))

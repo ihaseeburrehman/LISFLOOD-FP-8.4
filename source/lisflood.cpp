@@ -418,13 +418,18 @@ int main(int argc, char *argv[])
 	LoadDEM(Fnameptr, Statesptr, Parptr, Arrptr, verbosemode);
 	
 	// infiltration and evaporation: CPU classic and sub-grid solvers, and
-	// (from 8.4) the CUDA FV1, FV2, DG2 and ACC solvers; the others ignore them
-#ifdef CUDA
+	// (from 8.4) the CUDA and Metal FV1, FV2, DG2 and ACC solvers; the others
+	// ignore them
+#if defined(CUDA)
 	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
 		 Statesptr->acceleration == ON));
+#elif defined(METAL_ENABLED)
+	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
+		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
+		 Statesptr->acceleration == ON));
 #else
-	const bool losses_on_gpu = false; // e.g. Metal FV1 does not apply them
+	const bool losses_on_gpu = false;
 #endif
 	if ((Statesptr->calc_infiltration == ON || Statesptr->calc_evap == ON) &&
 		!losses_on_gpu &&
@@ -432,7 +437,7 @@ int main(int argc, char *argv[])
 		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 	{
 		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-			"(they are, by the CUDA FV1, FV2, DG2 and ACC solvers)\n");
+			"(they are, by the CUDA and Metal FV1, FV2, DG2 and ACC solvers)\n");
 	}
 	// Green-Ampt is a separate choice from the constant rate, and only the
 	// CUDA FV1, FV2, DG2 and ACC solvers apply it
@@ -442,18 +447,10 @@ int main(int argc, char *argv[])
 			"or 'infilfile <file>' (constant rate), or 'infiltration greenampt'\n");
 		return -1;
 	}
-#ifdef METAL_ENABLED
-	if ((Statesptr->calc_infiltration == ON || Statesptr->calc_evap == ON) &&
-		Statesptr->acceleration == ON && Statesptr->cuda == ON && metal_is_available())
-	{
-		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by the "
-			"Metal ACC solver (they are, by the CPU and CUDA ACC solvers)\n");
-	}
-#endif
 	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 	{
 		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-			"(it is, by the CUDA FV1, FV2, DG2 and ACC solvers)\n");
+			"(it is, by the CUDA and Metal FV1, FV2, DG2 and ACC solvers)\n");
 	}
 
 #ifdef CUDA

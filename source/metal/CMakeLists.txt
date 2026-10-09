@@ -49,14 +49,26 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
                 -o ${METALLIB_DG2}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dg2/metal_dg2_kernels.metal
         COMMENT "Compiling Metal DG2 kernels")
-    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2})
+    # infiltration and evaporation, shared by the four solvers
+    set(METALLIB_LOSSES ${CMAKE_BINARY_DIR}/metal_losses_kernels.metallib)
+    add_custom_command(
+        OUTPUT ${METALLIB_LOSSES}
+        COMMAND xcrun -sdk macosx metal -fno-fast-math
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/losses/metal_losses_kernels.metal
+                -o ${CMAKE_BINARY_DIR}/metal_losses_kernels.air
+        COMMAND xcrun -sdk macosx metallib ${CMAKE_BINARY_DIR}/metal_losses_kernels.air
+                -o ${METALLIB_LOSSES}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/losses/metal_losses_kernels.metal
+        COMMENT "Compiling Metal loss kernels")
+    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2} ${METALLIB_LOSSES})
 
     add_library(lisflood-metal STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/metal_integrate.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/fv1/metal_fv1_simulate.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/acc/metal_acc_simulate.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/fv2/metal_fv2_simulate.mm
-        ${CMAKE_CURRENT_SOURCE_DIR}/dg2/metal_dg2_simulate.mm)
+        ${CMAKE_CURRENT_SOURCE_DIR}/dg2/metal_dg2_simulate.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/losses/metal_losses.mm)
     add_dependencies(lisflood-metal metal_shaders)
     target_include_directories(lisflood-metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
     target_link_libraries(lisflood-metal PUBLIC ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} lisflood-base)

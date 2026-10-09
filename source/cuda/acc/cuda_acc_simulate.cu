@@ -335,7 +335,10 @@ void lis::cuda::acc::Simulation::run
 	printf("loop time %lf\n", seconds);  
 
 //	sampler.write();
-//	snapshot.wait();
+	// the last snapshot is written asynchronously: wait for it before the
+	// host arrays it reads are freed (8.4; without this the last output file
+	// was occasionally cut short and the run ended with a segmentation fault)
+	snapshot.wait();
 //	max_field.write();
 
 	//output max files

@@ -9,6 +9,7 @@
 #ifdef __APPLE__
 
 #include "metal_dg2_simulate.h"
+#include "../losses/metal_losses.h"
 #include "../../rain/rain.h"
 #include "../../rain/rain.tpp"
 #include "../../swe/fv1.h"              // CPU FV1 solver functions
@@ -158,6 +159,8 @@ struct SimulatorImpl {
   float gpu_nodata;
   bool has_manning_map;
   bool is_first_step;
+  Losses losses;                // infiltration and evaporation (8.4)
+  Fnames *fnames = nullptr;
   std::string filenames_dem, filenames_start;
   int verbose;
   id<MTLBuffer> volOutBuffer; // Buffer for tracking outflow volume
@@ -199,6 +202,7 @@ struct SimulatorImpl {
 
   bool init(Fnames &filenames, Pars &pars, ::Solver &solver, int verb) {
     verbose = verb;
+    fnames = &filenames;
 
     // Initialize Dynamic Rain
     // Note: DynamicRain constructor reads file header.
@@ -592,6 +596,9 @@ struct SimulatorImpl {
       }
     }
     has_manning_map = (h_Mann != nullptr);
+    if (fnames)
+      losses.setup(device, *fnames, *states, *pars, arrays, geom.xsz, geom.ysz,
+                   geom.pitch, 1, 1, num_cells, verbose);
 
     // cuda dg2 Topography: zero_perimeter_slopes, then clamp_boundary_values
     for (int j = 1; j <= geom.ysz; j++) {
@@ -660,6 +667,10 @@ struct SimulatorImpl {
       }
       if (boundCs) {
         boundCs->VolOutMT += (NUMERIC_TYPE)out;
+        // infiltration and evaporation leave the domain (8.4)
+        const double lost = losses.take_interval_volume();
+        boundCs->VolOutMT += (NUMERIC_TYPE)lost;
+        pars->InfilTotalLoss += (NUMERIC_TYPE)lost;
         boundCs->VolInMT += (NUMERIC_TYPE)(in + uniform_rain);
         pars->RainTotalLoss += (NUMERIC_TYPE)uniform_rain;
         if (elapsed > 0.0) {
@@ -1080,6 +1091,11 @@ struct SimulatorImpl {
         [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
       }
 
+      // floodplain infiltration and evaporation (8.4; as cuda, after the step)
+      losses.encode(encoder, Uold, nil, nil, false, 1, (int)N, 1.7320508075688772f,
+                    DEM, gpu_nodata, solverParams.depth_thresh, adaptive_dt,
+                    time + adaptive_dt);
+
       // running maximum depth (once per step, as the other solvers)
       [encoder setComputePipelineState:updateMaxFieldPipeline];
       [encoder setBuffer:Uold offset:0 atIndex:0];
@@ -1092,6 +1108,7 @@ struct SimulatorImpl {
       [commandBuffer waitUntilCompleted];
     }
 
+    losses.collect();
     time += (NUMERIC_TYPE)adaptive_dt;
     return (NUMERIC_TYPE)adaptive_dt;
   }
@@ -1210,14 +1227,12 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
     if (solver.t > 0) {
       solver.MinTstep = std::min(solver.MinTstep, dt);
     }
+    const NUMERIC_TYPE t_start = solver.t;
     solver.t += dt;
     solver.itCount += 1;
 
-    // Progress output
-    if (verbose && solver.itCount % 100 == 0) {
-      printf("t=%.2f\tdt=%.6f\n", solver.t, dt);
-      fflush(stdout);
-    }
+    // one line per step, as the CUDA solvers print (the 8.4 tests read it)
+    if (verbose) printf("t=%f\tdt=%f\n", t_start, dt);
 
     // Mass balance output
     if (solver.t >= pars.MassTotal) {

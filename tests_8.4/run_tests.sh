@@ -1,9 +1,10 @@
 #!/bin/sh
-# Run the 8.4 tests on a machine with an NVIDIA GPU.
+# Run the 8.4 tests on a machine with an NVIDIA GPU, or on a Mac with Apple
+# Silicon (the .par files say `cuda`, which runs the Metal solvers there).
 #
 #   tests_8.4/run_tests.sh BIN84 BIN83 WORK [ALZETTE_PAR]
 #
-#   BIN84        lisflood built from this folder (CUDA)
+#   BIN84        lisflood built from this folder
 #   BIN83        lisflood 8.3 (CUDA), for the "feature off = 8.3" checks
 #   WORK         output folder
 #   ALZETTE_PAR  .par of the paper's Alzette 24 h run (absolute input paths);

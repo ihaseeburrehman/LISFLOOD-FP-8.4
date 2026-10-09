@@ -1,33 +1,105 @@
-# LISFLOOD-FP 8.3
+# LISFLOOD-FP 8.4
 
-LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA hardware and a
-new GPU back end for Apple computers. The numerical method of 8.2 is unchanged.
+LISFLOOD-FP 8.3 with floodplain infiltration and evaporation on the GPU
+(constant rate or Green-Ampt) and every GPU solver on Apple computers.
+8.3 is LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA
+hardware and a Metal back end for FV1. Without the new keywords, 8.4 computes
+exactly what 8.3 computes.
 
-The version number 8.3 is a working name until agreed with the LISFLOOD-FP
+The version number 8.4 is a working name until agreed with the LISFLOOD-FP
 developers.
 
 ## Contents
 
 ```
 README.md                    this file
+README_8.4.md                how 8.4 was built and tested, with the results
 LICENSE                      GNU General Public License v3.0
 source/                      the complete source, ready to compile
-lisflood-8.2-to-8.3.patch    the same changes as one patch to the official 8.2
+lisflood-8.2-to-8.3.patch    the 8.3 changes as one patch to the official 8.2
+lisflood-8.3-to-8.4.patch    the 8.4 changes as one patch to 8.3
 config.float.cmake           build settings: single precision, as the GPU solvers use
-tests/                       LISFLOOD-FP's own test cases: quick check, full suite, 8.2-vs-8.3 comparison
-paper/                       the cases of the paper and the script that runs them
+tests/                       LISFLOOD-FP's own test cases: quick check, full suite, comparison of two builds
+tests_8.4/                   the infiltration and evaporation tests of 8.4
+paper/                       the cases of the 8.3 paper and the script that runs them
 ```
 
 `source/` is the official LISFLOOD-FP 8.2
 ([Zenodo 10.5281/zenodo.13121102](https://doi.org/10.5281/zenodo.13121102))
 without the files the CMake build does not use (Windows and Intel library
 bundles, the old makefiles, prebuilt binaries, manuals, test data and its git
-history), plus the 8.3 changes. To apply the changes to a full 8.2 instead, from
-its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`. This folder
-is also a git repository whose two commits are the 8.2 source and the 8.3
-changes, so `git show` displays exactly what changed.
+history), plus the 8.3 and 8.4 changes. To apply them to a full 8.2 instead,
+from its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`, then
+`patch -p1 -E --binary < lisflood-8.3-to-8.4.patch`.
 
-## What changes
+## What is new in 8.4
+
+### Infiltration and evaporation on the GPU
+
+In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
+water by infiltration and evaporation; the GPU solvers read the keywords and
+ignore them. In 8.4 the CUDA and Metal FV1, FV2, DG2 and ACC solvers apply
+them at every time step.
+
+**Constant rate**, as in the CPU solvers: every wet cell (deeper than
+`DepthThresh`, not NoData) loses `(infiltration rate + evaporation rate) x dt`
+of depth, never below zero.
+
+| `.par` keyword | meaning |
+|---|---|
+| `infiltration <rate>` | uniform infiltration rate, m/s |
+| `infilfile <grid>` | infiltration rate per cell, ESRI ASCII grid in mm/h, same size as the DEM (like `manningfile`); NoData and negative values count as 0; used instead of `infiltration` |
+| `evaporation <file>` | evaporation time series in mm/day, uniform in space (the CPU's file and loader) |
+
+**Green-Ampt**, a separate choice (`infiltration greenampt` instead of a rate;
+both in one file stop with an error). Each parameter is a number for the whole
+domain or a grid file like the Manning file:
+
+| `.par` keyword | meaning |
+|---|---|
+| `infiltration greenampt` | use Green-Ampt |
+| `greenampt_ks` | saturated hydraulic conductivity, mm/h |
+| `greenampt_psi` | wetting-front suction head, mm |
+| `greenampt_porosity` | saturated moisture content, m3/m3 |
+| `greenampt_theta_init` | initial moisture content, m3/m3 (e.g. from soil-moisture data) |
+| `greenampt_soil_depth` | optional: soil depth, m; infiltration stops when it is full |
+
+Every cell with water infiltrates at `f = Ks (1 + (psi + h) dtheta / F)`
+(`dtheta` = porosity - initial moisture, `h` the ponded depth, `F` the depth
+infiltrated so far), stepped with implicit Euler from `F = 0`; never more than
+the water present, and not beyond `soil depth x dtheta`. Evaporation works
+with either model. The soil does not recover between rain events.
+Rivers, lakes and sealed surfaces should get `Ks = 0`, and soils already
+flooded at the start an initial moisture close to saturation; otherwise they
+infiltrate as if dry.
+
+Details:
+
+- FV1 scales its discharges with the depth (velocity kept); ACC changes only
+  the depth; FV2 and DG2 lower the average depth, keep the depth slopes and
+  scale the discharge with the depth, and make a cell first order where a face
+  would become dry.
+- The volume removed is summed on the GPU: in the `.mass` file `Verror` no
+  longer counts it as an error, and the last column (`Rain-(Inf+Evap)`) shows
+  minus the volume removed since the start.
+- Each cell carries the part of its loss that single-precision rounding
+  dropped to its next step, so small rates are not lost.
+- The other GPU solvers (`acc_nugrid`, adaptive MWDG2/HWFV1) and the CPU
+  FV1/FV2/DG2 solvers do not apply them and print a warning.
+
+### FV2, DG2 and ACC on Apple Silicon
+
+With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2 and ACC run on the
+Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and Metal ACC the CPU ACC
+solver. Every Metal run repeats bit for bit. On LISFLOOD-FP's test cases,
+Metal FV2 and DG2 match CUDA bit for bit on most small cases and to within 1
+cm on 99.6 % or more of the wet cells of the large ones (`README_8.4.md`).
+
+Start-up line: `LISFLOOD-FP 8.4`.
+
+## Earlier changes
+
+### 8.3 (changes from 8.2)
 
 | | in 8.2 | in 8.3 | solvers |
 |---|---|---|---|
@@ -40,7 +112,7 @@ changes, so `git show` displays exactly what changed.
 | | `generateDG2DEM` and `generateDG2start` use an uninitialised NoData value | initialised as in `lisflood` | DG2 input tools |
 | | prints its internal version number, 8.1.0 | prints `LISFLOOD-FP 8.3` | start-up |
 
-What we checked (details in the paper):
+What was checked for 8.3 (details in the 8.3 paper):
 
 - On the test cases that come with LISFLOOD-FP, wherever 8.2 runs, 8.3 writes
   the same output files, byte for byte, for FV1, FV2, DG2 and ACC (except the
@@ -113,8 +185,10 @@ cmake -S source -B build -DCMAKE_BUILD_TYPE=Release -D_CONFIG=$PWD/config.float.
 cmake --build build -j 8 --target lisflood generateDG2DEM generateDG2start
 ```
 
-The build writes `metal_fv1_kernels.metallib` next to `build/lisflood`; keep
-the two together.
+The build writes five Metal libraries next to `build/lisflood`
+(`metal_fv1_kernels`, `metal_fv2_kernels`, `metal_dg2_kernels`,
+`metal_acc_kernels` and `metal_losses_kernels`, each `.metallib`); keep them
+together with the executable.
 
 ## Check
 
@@ -122,21 +196,22 @@ the two together.
 build/lisflood -version
 ```
 
-prints `LISFLOOD-FP 8.3` among its start-up lines. Then:
+prints `LISFLOOD-FP 8.4` among its start-up lines. Then:
 
 ```bash
 tests/quick_test.sh build/lisflood
 ```
 
 on an NVIDIA GPU, or `GPU=metal tests/quick_test.sh build/lisflood` on a Mac,
-ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite and
-`paper/README.md` to run the cases of the paper.
+ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite,
+`tests_8.4/run_tests.sh` for the infiltration and evaporation tests and
+`paper/README.md` to run the cases of the 8.3 paper.
 
 ## Use
 
 As 8.2. Put `cuda` in the `.par` file, or pass `-cuda`, to run on the GPU; on a
-Mac `metal` / `-metal` means the same. On a Mac, FV1 runs on the Apple GPU and
-the other solvers on the CPU.
+Mac `metal` / `-metal` means the same, and FV1, FV2, DG2 and ACC run on the
+Apple GPU. Add the keywords above for infiltration and evaporation.
 
 ## Licence
 

@@ -1,11 +1,12 @@
-# LISFLOOD-FP 8.4 (in development): infiltration and evaporation on the GPU, and every GPU solver on Apple Metal
+# LISFLOOD-FP 8.4: how it was built and tested
 
-This folder is a working copy of LISFLOOD-FP 8.3 (`README.md` describes 8.3).
-**8.4 adds two things:** floodplain infiltration and evaporation for the CUDA
-FV1, FV2, DG2 and ACC solvers, and Metal (Apple Silicon) versions of the FV2,
-DG2 and ACC solvers, so that every solver 8.3 runs on an NVIDIA GPU also runs
-on a Mac (see "Metal back end" below). Nothing else changes. It is developed in parallel
-with the 8.3 paper and will be released only if every test below passes.
+`README.md` describes 8.4 and how to build and use it; this file records how
+8.4 was developed and tested, and the results.
+**8.4 adds two things to 8.3:** floodplain infiltration and evaporation for the
+CUDA and Metal FV1, FV2, DG2 and ACC solvers, and Metal (Apple Silicon)
+versions of the FV2, DG2 and ACC solvers, so that every solver 8.3 runs on an
+NVIDIA GPU also runs on a Mac (see "Metal back end" below). Nothing else
+changes.
 
 ## Why
 
@@ -17,7 +18,7 @@ cannot be represented on the GPU at all.
 
 ## What 8.4 does
 
-The CUDA FV1, FV2, DG2 and ACC solvers apply the CPU rules at every time step: every wet
+The CUDA and Metal FV1, FV2, DG2 and ACC solvers apply the CPU rules at every time step: every wet
 cell (deeper than `DepthThresh`, not NoData) loses
 `(infiltration rate + evaporation rate) x dt` of depth, never below zero.
 
@@ -66,7 +67,7 @@ Otherwise they infiltrate as if dry soil (see the Alzette test below).
   removed since the start (rain is not counted in this column).
 - **Without these keywords** 8.4 computes exactly what 8.3 computes; outputs,
   `.mass` file included, are identical byte for byte.
-- Solvers that do not apply them (CUDA ACC-nugrid and adaptive; Metal FV1; CPU
+- Solvers that do not apply them (CUDA ACC-nugrid and adaptive; CPU
   FV1/FV2/DG2) now print a warning instead of ignoring them silently.
 - Start-up line: `LISFLOOD-FP 8.4`.
 
@@ -88,7 +89,7 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 | Alzette 10 m, 6 h, uniform `infiltration` vs `infilfile` with the same rate in every basin cell | identical results (checks the grid loader on a real grid) |
 | Alzette 10 m, 6 h, with infiltration and evaporation | runs, less water than without, mass balance closes |
 
-## Results (8 October 2026, NVIDIA A100, CUDA 12.6)
+## Results (8-9 October 2026, NVIDIA A100, CUDA 12.6)
 
 | test | result |
 |---|---|
@@ -108,10 +109,18 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 | Alzette FV1, 6 h: none / constant 2 mm/h / Green-Ampt (Ks 10 mm/h, theta_init 0.30 everywhere) | stored water after 6 h 27.4 / 24.4 / 12.6 million m3; removed 0 / 3.2 / 16.0 million m3; time step, maximum depth unchanged, no cell deeper. Of the 14.8 million m3 less water than without infiltration, 12.5 million are in cells already under water at the start (5.7 in rivers and the lake deeper than 0.5 m, 6.8 on floodplain flooded 1 cm to 0.5 m by the previous day), which were given the same dry initial moisture as everywhere else; only 2.3 million in cells dry at the start |
 | cost | about 11-20 % more run time (Green-Ampt: none measurable on Alzette) |
 
-FV1 and ACC remove exactly rate x dt. FV2 and DG2 remove it too, but their
-results differ from the exact answer by about +-0.1-0.2 % of the loss (in
-either direction, not proportional to the rate): their closed walls exchange a
-little water while the water level changes. This is accepted and documented.
+FV1 and ACC remove exactly rate x dt. CUDA FV2 and DG2 remove it too, but
+their results differ from the exact answer by about +-0.1-0.2 % of the loss (in
+either direction, not proportional to the rate). The cause is the precision of
+the bed elevation, not the losses: CUDA FV2 and DG2 keep it in single precision
+as it is (20 m in T012, where one unit of the last digit is 1.9 um, about one
+step's loss), so the per-cell rounding of the loss turns into small false
+water-surface slopes and a little water moves. With the same DEM lowered to
+0 m (9 October), CUDA FV2 and DG2 are exact (0.0002 mm, volume removed = depth
+lost); the Metal solvers, which shift the DEM to its lowest cell, are exact on
+the original test. Changing CUDA FV2 and DG2 would change their results
+without the keywords, so 8.4 leaves them as in 8.3 and the tests allow 0.3 %
+for them.
 
 Found on the way (fixed in 8.4): depth is single precision, so small losses
 per step were rounded the same way every step (3.7 mm off after 50 days in
@@ -134,6 +143,20 @@ Found on the way, already in 8.2/8.3 and not changed here:
 - CUDA ACC on Alzette: stable with a uniform Manning's n of 0.05, unstable with
   the land-use map (446 000 cells at n = 0.016); ACC is known to become
   unstable at low friction on fine grids.
+
+### Final checks of the release (9 October 2026)
+
+| check | result |
+|---|---|
+| `tests_8.4`, CUDA (A100): T012 constant rate and Green-Ampt, FV1, FV2, DG2, ACC and the CPU ACC solver | all 78 checks pass (CUDA FV2 and DG2 to 0.3 % of the loss, see above) |
+| `tests_8.4`, Metal (M1 Max): the same tests on the Metal FV1, FV2, DG2 and ACC solvers | all 77 checks pass; depths within 0.0004 mm of the expected values, volume removed = depth lost |
+| 8.4 without the keywords against 8.3, CUDA, cases fv1, T01, T02, T03, T030, T031, T05, every solver, two runs of 8.4 | 27 runs each: identical to 8.3 (14 of the 54 comparisons differ only in the last digit of the `.mass` log, as between any two runs) |
+
+Found and fixed in these checks: CUDA ACC wrote its last snapshot in the
+background and did not wait for it before freeing the arrays it reads
+(`snapshot.wait()` was commented out in 8.2), so occasionally (once in these tests, T03)
+the last output file was cut short and the run ended with a segmentation
+fault. It now waits; results are unchanged.
 
 ## Metal back end: FV2, DG2 and ACC (Apple Silicon)
 
@@ -159,8 +182,15 @@ metallib per solver (`source/metal/{fv1,fv2,dg2,acc}`).
 - As for FV1, each face flux is computed once and shared by the two cells
   (overlapping threadgroup tiles), and the kernels are compiled with
   `-fno-fast-math`, so every run repeats bit for bit.
-- Infiltration, evaporation and Green-Ampt are applied only by the CUDA
-  solvers; the Metal solvers warn and ignore them.
+- Infiltration, evaporation and Green-Ampt: the same rules as CUDA, in
+  `source/metal/losses` (one kernel for the four solvers). Metal GPUs have no
+  double precision, which CUDA uses for the Green-Ampt depth F; Metal keeps F
+  as a pair of floats (exact two-sum) and computes each step's increment in a
+  form without cancellation. ACC applies the losses where the CPU ACC solver
+  does (after the dry check, before the depth update); FV1, FV2 and DG2 after
+  the step, as CUDA.
+- With `-v` the Metal solvers print one `t= dt=` line per time step, as the
+  CUDA solvers do (the 8.4 tests rebuild the expected depths from it).
 
 Lessons from the port (they apply to any new back end):
 - Copying a host from another solver copies its boundary rules too. Metal
@@ -221,8 +251,8 @@ Found in the original solvers while porting (to report, not changed in 8.4):
    grids from the soil map and soil moisture (Geoportal or WRF `SMOIS`).
    Possible later: recovery between rain events (SWMM-style, drying rate
    from evapotranspiration).
-3. Done: FV2, DG2 and ACC on Metal. Possibly later: infiltration and
-   evaporation in the Metal solvers; gridded evaporation.
+3. Done: FV2, DG2 and ACC on Metal, and infiltration, evaporation and
+   Green-Ampt in the four Metal solvers. Possibly later: gridded evaporation.
 
 Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
 not drain; infiltration is a constant rate (step 2 addresses this).
