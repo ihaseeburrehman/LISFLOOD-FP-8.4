@@ -1,7 +1,681 @@
-diff -ruN a/CMakeLists.txt b/CMakeLists.txt
---- a/CMakeLists.txt	2026-10-08 21:46:12
-+++ b/CMakeLists.txt	2026-10-08 13:18:13
-@@ -83,6 +83,7 @@
+diff --git a/.gitignore b/.gitignore
+index ad21855..2602329 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -10,3 +10,4 @@ paper/cases/alzette/*.asc
+ paper/cases/alzette/*.ascii
+ paper/cases/alzette/*.nc
+ paper/cases/alzette/*.wd
++HANDOVER_LOCAL.md
+diff --git a/README.md b/README.md
+index bb118b1..16937ca 100644
+--- a/README.md
++++ b/README.md
+@@ -1,33 +1,128 @@
+-# LISFLOOD-FP 8.3
++# LISFLOOD-FP 8.4
+ 
+-LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA hardware and a
+-new GPU back end for Apple computers. The numerical method of 8.2 is unchanged.
++LISFLOOD-FP 8.3 with floodplain infiltration and evaporation on the GPU
++(constant rate or Green-Ampt) and every GPU solver on Apple computers.
++8.3 is LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA
++hardware and a Metal back end for FV1. Without the new keywords, 8.4 computes
++exactly what 8.3 computes.
+ 
+-The version number 8.3 is a working name until agreed with the LISFLOOD-FP
++The version number 8.4 is a working name until agreed with the LISFLOOD-FP
+ developers.
+ 
+ ## Contents
+ 
+ ```
+ README.md                    this file
++README_8.4.md                how 8.4 was built and tested, with the results
+ LICENSE                      GNU General Public License v3.0
+ source/                      the complete source, ready to compile
+-lisflood-8.2-to-8.3.patch    the same changes as one patch to the official 8.2
++lisflood-8.2-to-8.3.patch    the 8.3 changes as one patch to the official 8.2
++lisflood-8.3-to-8.4.patch    the 8.4 changes as one patch to 8.3
+ config.float.cmake           build settings: single precision, as the GPU solvers use
+-tests/                       LISFLOOD-FP's own test cases: quick check, full suite, 8.2-vs-8.3 comparison
+-paper/                       the cases of the paper and the script that runs them
++tests/                       LISFLOOD-FP's own test cases: quick check, full suite, comparison of two builds
++tests_8.4/                   the infiltration and evaporation tests of 8.4
++paper/                       the cases of the 8.3 paper and the script that runs them
+ ```
+ 
+ `source/` is the official LISFLOOD-FP 8.2
+ ([Zenodo 10.5281/zenodo.13121102](https://doi.org/10.5281/zenodo.13121102))
+ without the files the CMake build does not use (Windows and Intel library
+ bundles, the old makefiles, prebuilt binaries, manuals, test data and its git
+-history), plus the 8.3 changes. To apply the changes to a full 8.2 instead, from
+-its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`. This folder
+-is also a git repository whose two commits are the 8.2 source and the 8.3
+-changes, so `git show` displays exactly what changed.
+-
+-## What changes
++history), plus the 8.3 and 8.4 changes. To apply them to a full 8.2 instead,
++from its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`, then
++`patch -p1 -E --binary < lisflood-8.3-to-8.4.patch`.
++
++## What is new in 8.4
++
++### Infiltration and evaporation on the GPU
++
++In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
++water by infiltration and evaporation; the GPU solvers read the keywords and
++ignore them. In 8.4 the CUDA and Metal FV1, FV2, DG2 and ACC solvers,
++and the CUDA adaptive MWDG2/HWFV1 solvers, apply them at every time step.
++
++**Constant rate**, as in the CPU solvers: every wet cell (deeper than
++`DepthThresh`, not NoData) loses `(infiltration rate + evaporation rate) x dt`
++of depth, never below zero.
++
++| `.par` keyword | meaning |
++|---|---|
++| `infiltration <rate>` | uniform infiltration rate, m/s |
++| `infilfile <grid>` | infiltration rate per cell, ESRI ASCII grid in mm/h, same size as the DEM (like `manningfile`); NoData and negative values count as 0; used instead of `infiltration` |
++| `evaporation <file>` | evaporation time series in mm/day, uniform in space (the CPU's file and loader) |
++
++**Green-Ampt**, a separate choice (`infiltration greenampt` instead of a rate;
++both in one file stop with an error). Each parameter is a number for the whole
++domain or a grid file like the Manning file:
++
++| `.par` keyword | meaning |
++|---|---|
++| `infiltration greenampt` | use Green-Ampt |
++| `greenampt_ks` | saturated hydraulic conductivity, mm/h |
++| `greenampt_psi` | wetting-front suction head, mm |
++| `greenampt_porosity` | saturated moisture content, m3/m3 |
++| `greenampt_theta_init` | initial moisture content, m3/m3 (e.g. from soil-moisture data) |
++| `greenampt_soil_depth` | optional: soil depth, m; infiltration stops when it is full |
++
++Every cell with water infiltrates at `f = Ks (1 + (psi + h) dtheta / F)`
++(`dtheta` = porosity - initial moisture, `h` the ponded depth, `F` the depth
++infiltrated so far), stepped with implicit Euler from `F = 0`; never more than
++the water present, and not beyond `soil depth x dtheta`. Evaporation works
++with either model. The soil does not recover between rain events.
++Rivers, lakes and sealed surfaces should get `Ks = 0`, and soils already
++flooded at the start an initial moisture close to saturation; otherwise they
++infiltrate as if dry.
++
++Details:
++
++- FV1 scales its discharges with the depth (velocity kept); ACC changes only
++  the depth; FV2 and DG2 lower the average depth, keep the depth slopes and
++  scale the discharge with the depth, and make a cell first order where a face
++  would become dry.
++- For uniform-grid solvers the volume removed is summed on the GPU: in the `.mass` file `Verror` no
++  longer counts it as an error, and the last column (`Rain-(Inf+Evap)`) shows
++  minus the volume removed since the start.
++- Each cell carries the part of its loss that single-precision rounding
++  dropped to its next step, so small rates are not lost.
++- CUDA MWDG2/HWFV1 keep soil state at the finest raster resolution when the
++  mesh changes; `acc_nugrid` uses the same approach on its static mixed-size
++  mesh. Soil-parameter changes and NoData boundaries retain refinement. For
++  each active cell, the losses of its finest children are averaged. Adaptive
++  discharges and MWDG2 slopes follow the FV1/DG2 rules above; `acc_nugrid`
++  changes depth only.
++  Loss-enabled runs write `<resroot>.loss` at `massint`, with CSV columns
++  `time,integrated_time,loss_volume,water_volume` (seconds and m3).
++  `integrated_time` is the double-precision sum of the actual time steps.
++  This diagnostic does not account for boundary fluxes or rainfall; the
++  existing `.cumu` timing file is unchanged. Use raster inputs and a padded
++  mesh of at least 32 x 32 cells: `max_ref_lvl >= 5` for MWDG2/HWFV1 and
++  `L >= 5` for `acc_nugrid`.
++- CPU FV1/FV2/DG2 do not apply them and print a warning.
++
++### GPU solvers on Apple Silicon
++
++With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2, ACC, HWFV1 and
++MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and
++Metal ACC follows the CPU ACC solver. HWFV1 and MWDG2 use their corresponding
++Metal FV1 and DG2 update operators on the complete finest-level DEM grid. This
++overcomes Metal's lack of the CUB sort/scan primitives used to build the CUDA
++adaptive tree, but it does not compress the mesh: `epsilon`, `grading` and
++`refine_wall` do not change the Metal mesh. A notice is printed at startup so
++this limitation cannot be mistaken for a native adaptive run.
++Outputs follow the uniform Metal path; the adaptive-only `.cumu` and `.loss`
++files are not produced because the mesh does not change.
++
++MWDG2 accepts ordinary adaptive DEM and start rasters. If DG2 modal `1x`/`1y`
++files are absent, it uses the conservative piecewise-constant projection
++(zero initial unresolved slopes); the RKDG2 kernel then evolves all modes.
++Infiltration, evaporation and Green-Ampt use the same Metal loss kernels as
++FV1/DG2. See `README_8.4.md` for implementation details and validation scope.
++
++Start-up line: `LISFLOOD-FP 8.4`.
++
++## Earlier changes
++
++### 8.3 (changes from 8.2)
+ 
+ | | in 8.2 | in 8.3 | solvers |
+ |---|---|---|---|
+@@ -40,7 +135,7 @@ changes, so `git show` displays exactly what changed.
+ | | `generateDG2DEM` and `generateDG2start` use an uninitialised NoData value | initialised as in `lisflood` | DG2 input tools |
+ | | prints its internal version number, 8.1.0 | prints `LISFLOOD-FP 8.3` | start-up |
+ 
+-What we checked (details in the paper):
++What was checked for 8.3 (details in the 8.3 paper):
+ 
+ - On the test cases that come with LISFLOOD-FP, wherever 8.2 runs, 8.3 writes
+   the same output files, byte for byte, for FV1, FV2, DG2 and ACC (except the
+@@ -113,8 +208,10 @@ cmake -S source -B build -DCMAKE_BUILD_TYPE=Release -D_CONFIG=$PWD/config.float.
+ cmake --build build -j 8 --target lisflood generateDG2DEM generateDG2start
+ ```
+ 
+-The build writes `metal_fv1_kernels.metallib` next to `build/lisflood`; keep
+-the two together.
++The build writes five Metal libraries next to `build/lisflood`
++(`metal_fv1_kernels`, `metal_fv2_kernels`, `metal_dg2_kernels`,
++`metal_acc_kernels` and `metal_losses_kernels`, each `.metallib`); keep them
++together with the executable.
+ 
+ ## Check
+ 
+@@ -122,21 +219,23 @@ the two together.
+ build/lisflood -version
+ ```
+ 
+-prints `LISFLOOD-FP 8.3` among its start-up lines. Then:
++prints `LISFLOOD-FP 8.4` among its start-up lines. Then:
+ 
+ ```bash
+ tests/quick_test.sh build/lisflood
+ ```
+ 
+ on an NVIDIA GPU, or `GPU=metal tests/quick_test.sh build/lisflood` on a Mac,
+-ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite and
+-`paper/README.md` to run the cases of the paper.
++ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite,
++`tests_8.4/run_tests.sh` for the infiltration and evaporation tests and
++`paper/README.md` to run the cases of the 8.3 paper.
+ 
+ ## Use
+ 
+ As 8.2. Put `cuda` in the `.par` file, or pass `-cuda`, to run on the GPU; on a
+-Mac `metal` / `-metal` means the same. On a Mac, FV1 runs on the Apple GPU and
+-the other solvers on the CPU.
++Mac `metal` / `-metal` means the same, and FV1, FV2, DG2, ACC, HWFV1 and
++MWDG2 run on the Apple GPU. HWFV1/MWDG2 currently use the dense finest-level
++mode described above. Add the keywords above for infiltration and evaporation.
+ 
+ ## Licence
+ 
+diff --git a/README_8.4.md b/README_8.4.md
+new file mode 100644
+index 0000000..e60bdf4
+--- /dev/null
++++ b/README_8.4.md
+@@ -0,0 +1,461 @@
++# LISFLOOD-FP 8.4: how it was built and tested
++
++`README.md` describes 8.4 and how to build and use it; this file records how
++8.4 was developed and tested, and the results.
++**8.4 adds two things to 8.3:** floodplain infiltration and evaporation for the
++CUDA and Metal FV1, FV2, DG2 and ACC solvers and CUDA MWDG2/HWFV1;
++and Metal (Apple Silicon) versions of FV2, DG2 and ACC, covering the four
++uniform-grid GPU solvers on a Mac (see "Metal back end" below).
++
++## Why
++
++In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
++water by infiltration and evaporation (`infevap.cpp`). All GPU solvers, and the
++CPU FV1/FV2/DG2 solvers, read the keywords and silently ignore them. For a
++flood such as the July 2021 Alzette event, water that soaks into the ground
++cannot be represented on the GPU at all.
++
++## What 8.4 does
++
++The CUDA and Metal FV1, FV2, DG2 and ACC solvers apply the CPU rules at every time step: every wet
++cell (deeper than `DepthThresh`, not NoData) loses
++`(infiltration rate + evaporation rate) x dt` of depth, never below zero.
++
++| `.par` keyword | meaning | as in the CPU solvers |
++|---|---|---|
++| `infiltration <rate>` | uniform infiltration rate, m/s | yes |
++| `infilfile <grid>` | infiltration rate per cell, ESRI ASCII grid in mm/h, same size as the DEM (like `manningfile`); NoData and negative values count as 0; used instead of `infiltration` | same file format (the CPU uses it only in the sub-grid solver) |
++| `evaporation <file>` | evaporation time series in mm/day, uniform in space | yes, same file and loader (`LoadEvap`) |
++
++**Green-Ampt infiltration**, a separate choice (`infiltration greenampt`
++instead of a rate; using both stops with an error). Each parameter is a number
++for the whole domain or a grid file like the Manning file:
++
++| `.par` keyword | meaning |
++|---|---|
++| `infiltration greenampt` | use Green-Ampt |
++| `greenampt_ks` | saturated hydraulic conductivity, mm/h |
++| `greenampt_psi` | wetting-front suction head, mm |
++| `greenampt_porosity` | saturated moisture content, m3/m3 |
++| `greenampt_theta_init` | initial moisture content, m3/m3 (e.g. from soil-moisture data) |
++| `greenampt_soil_depth` | optional: soil depth, m; infiltration stops when it is full |
++
++Every cell with water infiltrates at `f = Ks (1 + (psi + h) dtheta / F)`
++(`dtheta` = porosity - initial moisture, `h` the ponded depth, `F` the depth
++infiltrated so far, kept per cell in double precision), stepped with implicit
++Euler, which has a closed form per step and starts from `F = 0`; never more
++than the water present, and not beyond `soil depth x dtheta`. Evaporation
++works with either model. The soil does not recover between rain events.
++**Cells under water at the start need care:** rivers and lakes should get
++`Ks = 0`, and soils already flooded at the start should get an initial moisture
++close to saturation (`theta_init` = `porosity`); sealed surfaces `Ks = 0`.
++Otherwise they infiltrate as if dry soil (see the Alzette test below).
++
++- **FV1** stores discharge, so when a cell loses depth its discharges are
++  scaled with it (velocity kept), and set to zero when the cell becomes dry.
++- **ACC** stores discharges on the cell faces; only the depth changes.
++- **FV2 and DG2** store slopes besides the cell averages. The loss lowers the
++  average depth and keeps the depth slopes (a flat water surface over sloping
++  ground stays flat); discharge average and slopes are scaled with the depth.
++  If a face would become dry (a cell on a wet/dry edge), the cell is made first
++  order (all slopes zero): a face with discharge but no depth stopped DG2's
++  time step in the first version.
++- **Mass balance:** the volume removed is summed on the GPU. In the `.mass`
++  file, `Verror` no longer counts it as an error, and the last column
++  (`Rain-(Inf+Evap)`, always 0 on the GPU before) shows minus the volume
++  removed since the start (rain is not counted in this column).
++- **Without these keywords** 8.4 computes exactly what 8.3 computes; outputs,
++  `.mass` file included, are identical byte for byte.
++- Solvers that do not apply them (CUDA ACC-nugrid; CPU
++  FV1/FV2/DG2) now print a warning instead of ignoring them silently.
++- Start-up line: `LISFLOOD-FP 8.4`.
++
++Code: `source/cuda/cuda_losses.cu` (new), calls in
++`source/cuda/fv1/cuda_fv1_simulate.cu` and `source/cuda/acc/cuda_acc_simulate.cu`,
++mass balance in `source/cuda/cuda_stats.cu` and `source/cuda/stats.cpp`,
++warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
++
++## How it is tested (`tests_8.4/`)
++
++| test | what must hold |
++|---|---|
++| T012 (LISFLOOD-FP's own evaporation and infiltration test: flat basin, 0.4464 m of water, 3.6 mm/day evaporation + 1e-8 m/s infiltration, 100 days) | depth falls linearly and reaches 0 at 100 days, on CUDA FV1, CUDA ACC and the CPU ACC solver |
++| T012 without the keywords | depth stays 0.4464 m |
++| T012 with evaporation rising linearly from 0 to 7.2 mm/day | depth after 50 and 100 days as the integral of the rate (90 and 360 mm lost) |
++| T012 with a wall in the middle and `infilfile` giving 0.3 mm/h on the left half only | left half falls at 0.3 mm/h, right half unchanged |
++| mass balance | volume lost (last `.mass` column) = depth lost x area; `Verror` about 0 |
++| Alzette 10 m, 6 h, FV1 and ACC, without the keywords | identical to 8.3, byte for byte |
++| Alzette 10 m, 6 h, uniform `infiltration` vs `infilfile` with the same rate in every basin cell | identical results (checks the grid loader on a real grid) |
++| Alzette 10 m, 6 h, with infiltration and evaporation | runs, less water than without, mass balance closes |
++
++## Results (8-9 October 2026, NVIDIA A100, CUDA 12.6)
++
++| test | result |
++|---|---|
++| T012, CUDA FV1 and ACC: depth against the sum of rate x dt over the steps taken | within 0.0004 mm (the last written digit); all checks pass |
++| T012 with the wall: left half drains, right half unchanged | yes, to 0.0000 mm on the right |
++| T012 and Alzette (6 h, FV1 and ACC) without the keywords: 8.4 vs 8.3 | output grids identical byte for byte |
++| Alzette FV1, uniform 2 mm/h vs `infilfile` 2 mm/h | identical (grid loader checked on 10.6 M cells) |
++| Alzette FV1 with infiltration (and evaporation) | 3.25 (3.44) million m3 removed in 6 h; no cell deeper than without |
++| CUDA ACC, Carlisle (6 h) and EA test 5 (6 h), 5 mm/h, against the CPU ACC solver | water removed by infiltration agrees within 1.9 % and 0.7 %; time step and maximum depth unchanged |
++| T012, CUDA FV2 and DG2 (base, ramp, wall, half rate) | within 0.07-0.21 % of the loss, either sign (0.15-0.76 mm of 223-360 mm); without the keywords identical to 8.3 |
++| CUDA FV2 and DG2, EA test 5 (6 h), 5 mm/h | stored water falls by the volume removed within 0.1 % (FV2) and 0.5 % (DG2); without the keywords identical to 8.3 |
++| Green-Ampt, flat basin with 0.1 m of water (Ks 10 mm/h, psi 110 mm, dtheta 0.23), 1 day, FV1, FV2, DG2, ACC | depth matches Green-Ampt as stepped within 0.0009 mm and the continuous Green-Ampt solution within 0.47 mm (the implicit-Euler error of the 60 s test steps; 0.01 mm at 1 s); volume removed = depth lost (364 500 m3) |
++| Green-Ampt parameters as grid files vs numbers | identical output |
++| Green-Ampt with soil depth 0.2 m | infiltration stops at 46 mm (0.054 m of water left) |
++| Green-Ampt with Ks on the left half only (wall in between) | right half unchanged |
++| `infiltration greenampt` and a rate in one file | stops with an error |
++| Alzette FV1, 6 h: none / constant 2 mm/h / Green-Ampt (Ks 10 mm/h, theta_init 0.30 everywhere) | stored water after 6 h 27.4 / 24.4 / 12.6 million m3; removed 0 / 3.2 / 16.0 million m3; time step, maximum depth unchanged, no cell deeper. Of the 14.8 million m3 less water than without infiltration, 12.5 million are in cells already under water at the start (5.7 in rivers and the lake deeper than 0.5 m, 6.8 on floodplain flooded 1 cm to 0.5 m by the previous day), which were given the same dry initial moisture as everywhere else; only 2.3 million in cells dry at the start |
++| cost | about 11-20 % more run time (Green-Ampt: none measurable on Alzette) |
++
++FV1 and ACC remove exactly rate x dt. CUDA FV2 and DG2 remove it too, but
++their results differ from the exact answer by about +-0.1-0.2 % of the loss (in
++either direction, not proportional to the rate). The cause is the precision of
++the bed elevation, not the losses: CUDA FV2 and DG2 keep it in single precision
++as it is (20 m in T012, where one unit of the last digit is 1.9 um, about one
++step's loss), so the per-cell rounding of the loss turns into small false
++water-surface slopes and a little water moves. With the same DEM lowered to
++0 m (9 October), CUDA FV2 and DG2 are exact (0.0002 mm, volume removed = depth
++lost); the Metal solvers, which shift the DEM to its lowest cell, are exact on
++the original test. Changing CUDA FV2 and DG2 would change their results
++without the keywords, so 8.4 leaves them as in 8.3 and the tests allow 0.3 %
++for them.
++
++Found on the way (fixed in 8.4): depth is single precision, so small losses
++per step were rounded the same way every step (3.7 mm off after 50 days in
++T012; in a 5 m deep cell the loss per step was 1.8 times too large); 8.4 keeps
++the rounding remainder per cell (compensated subtraction).
++
++Found on the way, already in 8.2/8.3 and not changed here:
++
++- The GPU clock (`solver.t`) is single precision and falls behind the sum of
++  the time steps on long runs (22 min after 50 days in T012).
++- CUDA ACC is unstable on the Alzette 10 m set-up even without losses (depths
++  of 270 m); possibly the land-use Manning values are too low for ACC there.
++- The CPU solvers' infiltration and evaporation totals in `.mass` stop growing
++  (single-precision accumulator: stuck at 2048 and 512 m3 in the tests above),
++  although the water is removed correctly.
++- The CUDA `.mass` file: FV1 volume includes the ghost cells; the first row
++  always shows the whole volume as `Verror`.
++- CUDA DG2 writes negative depths on EA test 5 even without losses (down to
++  -0.86 m in 27 000 cells after 6 h; total volume still conserved).
++- CUDA ACC on Alzette: stable with a uniform Manning's n of 0.05, unstable with
++  the land-use map (446 000 cells at n = 0.016); ACC is known to become
++  unstable at low friction on fine grids.
++
++### Final checks of the release (9 October 2026)
++
++| check | result |
++|---|---|
++| `tests_8.4`, CUDA (A100): T012 constant rate and Green-Ampt, FV1, FV2, DG2, ACC and the CPU ACC solver | all 78 checks pass (CUDA FV2 and DG2 to 0.3 % of the loss, see above) |
++| `tests_8.4`, Metal (M1 Max): the same tests on the Metal FV1, FV2, DG2 and ACC solvers | all 77 checks pass; depths within 0.0004 mm of the expected values, volume removed = depth lost |
++| 8.4 without the keywords against 8.3, CUDA, cases fv1, T01, T02, T03, T030, T031, T05, every solver, two runs of 8.4 | 27 runs each: identical to 8.3 (14 of the 54 comparisons differ only in the last digit of the `.mass` log, as between any two runs) |
++
++Found and fixed in these checks: CUDA ACC wrote its last snapshot in the
++background and did not wait for it before freeing the arrays it reads
++(`snapshot.wait()` was commented out in 8.2), so occasionally (once in these tests, T03)
++the last output file was cut short and the run ended with a segmentation
++fault. It now waits; results are unchanged.
++
++## Metal back end: FV2, DG2, ACC, HWFV1 and MWDG2 (Apple Silicon)
++
++8.3 ran only FV1 on Metal. 8.4 adds FV2, DG2 and ACC plus dense finest-level
++paths for HWFV1 and MWDG2. A `.par` file with `cuda` (or `metal`) and one of
++these solvers runs on the Mac's GPU when LISFLOOD-FP is built on macOS; the
++build compiles one metallib per uniform operator
++(`source/metal/{fv1,fv2,dg2,acc}`).
++
++- **FV2** (`source/metal/fv2`) follows `cuda/fv2`: the same reconstruction,
++  limiter, bed source and two Runge-Kutta stages, and CUDA's boundary
++  treatment (ghost cells hold the outside state of each boundary face) and
++  step order (rain and point sources with the previous dt, then ghost cells,
++  then the time step over every cell including the ghost cells).
++- **DG2** (`source/metal/dg2`) is a line-by-line port of `cuda/dg2` (nine
++  coefficients per cell, friction at the Gauss points, Krivodonova limiter,
++  DEM and start-file slopes from `generateDG2DEM`/`generateDG2start`). One
++  deliberate difference: CUDA limits the slopes in place, so a cell may see a
++  neighbour's slope before or after it is limited; Metal limits into a
++  separate buffer, which makes the result independent of thread timing.
++- **ACC** (`source/metal/acc`) follows the CPU ACC solver, with a conservative
++  dry-cell limiter that keeps each face flux shared by its two cells (CUDA ACC
++  does not).
++- As for FV1, each face flux is computed once and shared by the two cells
++  (overlapping threadgroup tiles), and the kernels are compiled with
++  `-fno-fast-math`, so every run repeats bit for bit.
++- Infiltration, evaporation and Green-Ampt: the same rules as CUDA, in
++  `source/metal/losses` (one kernel for the four solvers). Metal GPUs have no
++  double precision, which CUDA uses for the Green-Ampt depth F; Metal keeps F
++  as a pair of floats (exact two-sum) and computes each step's increment in a
++  form without cancellation. ACC applies the losses where the CPU ACC solver
++  does (after the dry check, before the depth update); FV1, FV2 and DG2 after
++  the step, as CUDA.
++- With `-v` the Metal solvers print one `t= dt=` line per time step, as the
++  CUDA solvers do (the 8.4 tests rebuild the expected depths from it).
++
++### HWFV1 and MWDG2 dense compatibility mode
++
++The `hwfv1` and `mwdg2` keywords now dispatch to Metal on macOS. HWFV1 uses
++the tested Metal hydrostatic FV1/HLL operator; MWDG2 uses the tested Metal
++nine-mode RKDG2 operator, friction, limiter, boundaries, sources and loss
++kernels. Both hold every DEM cell at the finest level. Therefore this mode
++computes the requested flow equations on the Apple GPU but does not yet give
++the memory or speed reduction of CUDA's multiwavelet tree. `epsilon`,
++`grading`, `refine_wall` and `ref_thickness` are accepted for input
++compatibility but do not alter the Metal mesh. Every run prints a notice to
++that effect, including non-verbose runs.
++
++Output follows the uniform Metal driver: depth/discharge rasters, `.mass` and
++maximum-depth output are available, and loss volume is included in `.mass`.
++The CUDA adaptive-only `.cumu` mesh-reduction log and `.loss` diagnostic are
++not emitted because there is no changing tree in this mode.
++
++This dense design was chosen because the adaptive CUDA implementation depends
++on CUB radix sort, exclusive scans and compaction in 11 files. Metal has no
++CUB equivalent. Reusing the already validated FV1/DG2 operators avoids a
++partial GPU tree implementation whose neighbour topology could silently
++change the solution. The host allocates H/HU/HV buffers for the two adaptive
++keywords only in Metal builds, so CUDA adaptive memory use and execution are
++unchanged.
++
++CUDA MWDG2 constructs modal coefficients directly from the input rasters.
++Ordinary Metal DG2 instead expects `generateDG2DEM` and `generateDG2start`
++outputs. For MWDG2 only, missing `1x`/`1y` files now select a conservative
++piecewise-constant projection: the mean comes from the raster and unresolved
++slopes start at zero. Supplied modal files are still used. This removed the
++preprocessing failure without changing the existing `dg2` path.
++
++Validation on the Apple M1 Max used
++`python3 tests_8.4/metal_adaptive.py build/macos/lisflood`. Both solvers built,
++ran a 16 x 16 moving-water case with infiltration for 120 s, wrote all three
++expected depth rasters, and kept every depth finite and nonnegative (HWFV1
++range 0.100--0.133 m; MWDG2 0.099--0.144 m). This is a dispatch and numerical
++sanity check. It is not evidence of equality with the compressed CUDA
++MWDG2/HWFV1 solution when `epsilon > 0`; a native adaptive Metal port still
++needs the tree work below.
++
++Lessons from the port (they apply to any new back end):
++- Copying a host from another solver copies its boundary rules too. Metal
++  FV2 first kept FV1's boundary handling and lost water at a fixed-discharge
++  inflow (T031): its first steps ignored the inflow's speed and were 30 times
++  too long. Taking the ghost-cell states and the time-step order from CUDA
++  fixed this and made five of six small cases bit-identical.
++- Compare with the reference on the same input files. `generateDG2DEM` and
++  `generateDG2start` built on macOS and on Linux write slightly different
++  DEMs and start files; the first T05 comparisons differed for that reason
++  alone (and for every solver, FV1 included).
++
++### Metal results (9 October 2026, Apple M1 Max, against CUDA 8.3 on an A100)
++
++Inputs as used on the HPC. "Identical" counts wet cells with the same depth to
++the output precision (1 mm).
++
++| case | FV2 | DG2 |
++|---|---|---|
++| T01, T031 | identical, same number of steps | identical, same number of steps |
++| T030 (dynamic rain) | 87.5 % identical, max 1 mm | identical |
++| T02 | identical | 99.99 % identical, max 1 mm |
++| T03 | identical (max 1 mm) | identical for 4 outputs, then 54 % (CPU DG2 vs CUDA: 45 %) |
++| T05 (dam break, 0.32 M cells) | 99.99 %, max 4 mm, same steps (4733) | 86 % (CPU DG2 vs CUDA: 85 %), volume within 0.002 % |
++| T07s (Carlisle, 6 h) | all outputs within 1 mm, volume within 0.0003 % | 99.6-99.9 % within 1 cm up to 4 h; then CUDA and Metal both blow up (below) |
++| T06 (EA test 5, 1.7 M cells, 30 h) | 99.95 % within 1 cm, volume within 0.016 %, steps 230 266 vs 230 264 | 99.85 % within 1 cm, volume within 0.003 %, steps 262 559 vs 262 584 |
++
++ACC (against the CPU ACC solver, as Metal ACC follows the CPU): T01, T02,
++T030 and T031 bit-identical; T07s 99.5 % identical, max 1 mm; T05 71 % and T06
++75 % (CUDA ACC against the CPU on the same cases: 13 %, unstable, and 42 %).
++
++Every Metal run repeats bit for bit (FV2 and DG2 checked on T02, T03, T031 and
++on the 2853 x 1833 grid T07x3).
++
++Where Metal and CUDA DG2 differ (T03, T05), the difference starts at rounding
++level (the first steps agree to 4-5 digits) and grows in these sensitive
++cases, as it does between the CPU and CUDA DG2 solvers.
++
++Found in the original solvers while porting (to report, not changed in 8.4):
++- CUDA DG2 on Carlisle (T07s) blows up after about 4 h (volume from 1.4 M m3
++  to 1e10-1e11 m3), preceded by negative depths down to -0.15 m; Metal DG2
++  does the same.
++- CUDA DG2 and Metal DG2 both write depths down to -0.86 m on EA test 5 (T06).
++- CPU DG2 differs strongly from CUDA DG2 on T031 (fixed-discharge inflow with
++  NoData cells): 40 % identical, volume 29 % apart, 1283 against 219 steps.
++- CUDA FV2 slope limiter: r = (local - forward) / (local - backward), which
++  gives non-zero slopes only at local extrema; ported unchanged.
++- CUDA applies dynamic rain and point sources with the previous step's dt
++  (zero before the first step); ported unchanged.
++
++## Problems met while building 8.4, and how each was solved
++
++Kept here so that whoever extends 8.4 does not meet them again.
++
++| # | problem | how it showed | solution |
++|---|---|---|---|
++| 1 | Most source files have CRLF line endings; editing them with tools that write LF silently converts whole files | diffs of thousands of lines | read and write with the line endings preserved; check with `file` before committing |
++| 2 | The loss per step is often close to the resolution of a single-precision depth (a few um on metres of water), so it is rounded away | depths fell too slowly; small rates did nothing | compensated subtraction: each cell keeps the part of its loss that rounding dropped (`residual`) and adds it to its next step |
++| 3 | The GPU model clock (single precision) falls behind the sum of the time steps on long runs | expected depth `h0 - rate t` wrong by more than the tolerance | tests compute the expected depth from the steps the model logged (`-v` prints one `t= dt=` line per step; the Metal solvers now do too) |
++| 4 | DG2: a cell on a wet/dry edge whose loss makes a face dry, with discharge but no depth there | the time step collapsed to zero | if a face would become dry, the cell is made first order (all slopes zero) |
++| 5 | Apple GPUs have no double precision, which CUDA uses for the Green-Ampt depth F; `F_new - F` in float cancels | Green-Ampt wrong by percent in float | F kept as a pair of floats (exact two-sum), and the increment written without cancellation (`metal_losses_kernels.metal`, `greenampt_step`) |
++| 6 | Metal FV2 started from the FV1 host, whose boundary handling differs from CUDA FV2 | water lost at a fixed-discharge inflow (T031): the first steps ignored the inflow speed and were about 30 times too long | port CUDA's ghost-cell states and step order exactly (ghost cells, then the time step over every cell including them). Lesson: copying a host copies its boundary rules |
++| 7 | Metal allows 31 buffer arguments per kernel; a DG2 stage reads three sets of 9 coefficients and writes one | does not fit | one buffer of 9 planes per coefficient set |
++| 8 | CUDA DG2 limits slopes in place: a cell may read a neighbour's slope before or after it is limited | results could depend on thread timing | Metal limits into a separate buffer and copies back |
++| 9 | `generateDG2DEM`/`generateDG2start` built on macOS and Linux write slightly different files | every solver, FV1 included, differed from CUDA on T05 | compare back ends only on the same input files (copy the HPC's `work/data`) |
++| 10 | Metal writes output 0 after the first step, CUDA before it | output 0 always differs | comparisons skip output 0 |
++| 11 | CUDA FV2 and DG2 keep the bed elevation in single precision as given (20 m in T012) | losses 0.1-0.2 % off, water created or destroyed | proven with the DEM lowered to 0 m (exact); left as in 8.3 (changing it would change results without the keywords); tests allow 0.3 % for them; Metal shifts the DEM to its lowest cell and is exact |
++| 12 | CUDA ACC wrote its last snapshot in the background and freed the arrays without waiting (`snapshot.wait()` commented out in 8.2) | once: segmentation fault, last output cut short | `snapshot.wait()` restored |
++| 13 | Test-checker mistakes: a pattern for T012 also matched the Green-Ampt runs; FV1's `.mass` volume includes the ghost cells; the GPU's first `.mass` row holds the whole volume; ACC writes output 0 after its first step | false failures | fixed in `tests_8.4/check.py` (Verror not checked where the volume includes ghost cells) |
++| 14 | Long runs on a laptop stop when it sleeps | runs stalled overnight | run with `caffeinate -i` |
++| 15 | On the ECMWF HPC, `sbatch` drops empty arguments, and scratch is purged when unused | jobs got wrong arguments; data at risk | pass `all`, never `""`; archive results to `$PERM` |
++
++## Handover: what to do next
++
++The four uniform-grid GPU solvers (FV1, FV2, DG2, ACC) apply infiltration,
++evaporation and Green-Ampt on CUDA and Metal. CUDA MWDG2 and HWFV1 now
++apply the same losses, as does CUDA ACC on its static non-uniform grid. The
++next large step is to port MWDG2 and HWFV1 themselves to Metal. The sub-grid
++channel model remains CPU-only.
++
++### Completed: losses in CUDA MWDG2 and HWFV1 (9 October 2026)
++
++`Simulation::run` now receives the shared `Fnames`, `States`, `Pars` and
++`Solver`, so loss keywords use the same parsing as the uniform-grid solvers.
++`Losses` retains parameters, compensation residuals and double-precision
++infiltrated depth F in the original finest raster layout. Morton coordinates
++are converted to raster coordinates (including the reversed row order), and
++padding and DEM NoData are excluded.
++
++After the full FV1 or two-stage DG2 update, each leaf evaluates the shared
++loss equations for its finest children at the leaf's mean water depth. Their
++depth changes are averaged into the leaf; compensation includes the rounding
++of that average. F remains separate for every child through merges and splits.
++This differs from the original handover's proposal to average soil parameters:
++Green-Ampt is nonlinear, and averaging parameters would mix sealed soil and
++soil with conductivity or finite storage. A one-time refinement flag preserves
++all spatial soil-parameter and validity-mask changes, so a flat surface cannot
++hide a nonuniform soil field by merging the entire basin before losses begin.
++HWFV1 scales discharge; MWDG2 applies the existing DG2 slope and dry-face rules.
++For loss-enabled runs, a cache indexed by tree node preserves the depth of
++leaves that survive adaptation unchanged, including their neighbour copies.
++It includes point-source increments inserted before encoding. This avoids
++repeated h -> eta -> h rounding near high NoData/padding walls; newly merged
++or split leaves still use the multiresolution reconstruction. The cache costs
++one depth and one integer generation counter per tree node.
++
++The adaptive `.cumu` file contains timings, not a mass balance. Loss-enabled
++runs therefore write a separate `.loss` CSV at `massint`: simulation time,
++double-precision integrated time, cumulative volume removed and current water
++volume. Storage plus losses should be constant in a closed basin, within the
++underlying flow solver's conservation error. This file does not correct for
++boundary flows or rainfall, and no existing output format changes when losses
++are disabled.
++
++Use `max_ref_lvl >= 5`, even for smaller rectangular DEMs. The legacy tree
++traversal uses full CUDA blocks and corrupts memory for smaller padded meshes;
++loss-enabled runs reject them. Tests use short relative filenames because the
++legacy adaptive keyword readers copy unrelated string values into small
++buffers while scanning a parameter file. These legacy routines are unchanged.
++
++Run the standalone GPU checks (new WORK directory required):
++```
++python3 tests_8.4/adaptive.py BIN84 BIN83 WORK
++```
++They cover constant and grid rates, evaporation, drying, Green-Ampt numeric
++versus grid parameters, a finite soil-storage cap, north/south orientation,
++rectangular padding and NoData (HWFV1), changing meshes, repeatability and
++loss-disabled equality with CUDA 8.3. Moving-case volume balance is compared
++with the loss-free solver's drift; the uniform closed basins use a 0.03 %
++relative volume tolerance. The full results, including the remaining
++adaptive-flow conservation error, are in `tests_8.4/ADAPTIVE_RESULTS.md`.
++
++### CUDA ACC on a non-uniform grid (`acc_nugrid`)
++
++Constant-rate infiltration, evaporation and Green-Ampt are also applied by
++CUDA `acc_nugrid`. Its static mesh has cells at several sizes. Soil state and
++rounding compensation remain on the finest input raster; each active leaf
++stores the average loss of its valid finest children. Soil-parameter changes,
++NoData boundaries and rectangular padding are preflagged before the mesh is
++built. ACC changes depth only.
++
++The solver writes the same `.loss` CSV as MWDG2/HWFV1 and puts cumulative
++infiltration plus evaporation in the final `.mass` column. Use `L >= 5` for
++this legacy solver (`max_ref_lvl` is the MWDG2/HWFV1 keyword). Its existing
++input path also requires a `stagefile`. A pre-existing double close of the
++stage file was fixed; valid loss-disabled runs retain their 8.3 numerical
++outputs.
++
++Run the standalone checks on a GPU node:
++```
++python3 tests_8.4/acc_nugrid.py BIN84 BIN83 WORK
++```
++They cover constant and raster rates, evaporation, Green-Ampt numeric and
++grid parameters, a finite soil-storage cap, raster orientation, compressed
++mixed-size cells, rectangular padding, NoData, drying, repeatability, the
++small-tree guard and loss-disabled equality with CUDA 8.3. The final clean
++A100 run passed all 106 checks; details and remaining limits are in
++`tests_8.4/ACC_NUGRID_RESULTS.md`.
++
++### Remaining work: native adaptive MWDG2 and HWFV1 on Metal
++
++A native compressed-mesh port remains large (the adaptive solver has 56 CUDA
++kernels, and 11 of its files use CUB for sorting, scans and compaction of the
++Morton-ordered mesh). Suggested
++order: HWFV1 first (finite volume, no slopes), then MWDG2.
++- Replace CUB: Metal has no equivalent library. Write a radix sort and an
++  exclusive scan in Metal (or use a well-tested open-source one); compaction
++  is a scan plus a scatter. Check each against the CUDA result on random input
++  before porting anything else.
++- Port the multiresolution analysis (`mra/`: encode, threshold, decode) and
++  the neighbour search (`neighbours/`) kernel by kernel, and compare the mesh
++  (`levels`, `act_idcs`) with CUDA after every step on a small case: it must be
++  identical, or nothing after it can be.
++- Then the update operators (`operators/fv1_update`, `dg2_update`, friction,
++  limiter) and the time step, as for FV2 and DG2 here: same boundary and step
++  order as CUDA, each face flux computed once, no fast math, deterministic
++  reductions (no float atomics in anything that feeds the solution).
++- Losses: reuse `source/metal/losses` with the finest-grid state used by CUDA above.
++- Verify as in this file: identical to CUDA on the small cases where possible,
++  the rest with the same input files and with the CPU or CUDA spread as
++  baseline; every run must repeat bit for bit.
++
++### Where things are, and keeping 8.3 untouched
++
++The exact folders on the development machines (the 8.3 and 8.4 sources and
++zips, the Metal and CUDA builds, the reference outputs and prepared inputs on
++the HPC, the archive) are listed in `HANDOVER_LOCAL.md`, which is kept next to
++this source and out of the release. In general:
++
++- **8.3 is frozen.** Its release, its git history, its build used for the
++  8.3 paper, its test runs and its reference outputs are read only: read,
++  copy and compare, never edit, rebuild in place or write into them.
++- **Work in a copy of 8.4**, with new build and output folders, and new run
++  labels; never reuse a label of an existing reference run.
++- **Compare on the same inputs**: copy the prepared test inputs of the
++  reference runs (with their `.prepared` marker) instead of regenerating them.
++- **The CUDA references** are the 8.3 builds and their outputs; the CPU
++  references are the CPU solvers of the same version.
++
++### Rules that held throughout
++
++- Without the new keywords, results must stay identical to 8.3, byte for
++  byte (`tests/run_suite.sh` + `hash_outputs.sh` + `compare_hashes.py`).
++- Small test first, then the full set; check mass balance and repeatability.
++- Compare against a reference on the same inputs, and report the spread
++  between existing back ends (CPU vs CUDA) next to the new one.
++- Defects found in the existing solvers are reported, not silently changed
++  (list above).
++
++## Plan
++
++1. Constant-rate infiltration and evaporation in CUDA FV1, FV2, DG2 and ACC (this
++   version), tested as above.
++2. Done: Green-Ampt infiltration (`infiltration greenampt`), with
++   soil-property and initial-moisture grids, tested as above.
++   Next for real runs: Ks = 0 on river, lake and sealed cells; parameter
++   grids from the soil map and soil moisture (Geoportal or WRF `SMOIS`).
++   Possible later: recovery between rain events (SWMM-style, drying rate
++   from evapotranspiration).
++3. Done: FV2, DG2 and ACC on Metal, and infiltration, evaporation and
++   Green-Ampt in the four Metal solvers. Possibly later: gridded evaporation.
++4. Done: infiltration, evaporation and Green-Ampt in CUDA MWDG2, HWFV1 and
++   non-uniform-grid ACC. Next: port MWDG2 and HWFV1 to Metal, then reuse the
++   existing Metal loss kernel on their finest-grid soil state.
++
++Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
++not drain; infiltration is a constant rate (step 2 addresses this).
+diff --git a/source/CMakeLists.txt b/source/CMakeLists.txt
+index 37a8151..c33e7fb 100644
+--- a/source/CMakeLists.txt
++++ b/source/CMakeLists.txt
+@@ -83,6 +83,7 @@ if (CMAKE_CUDA_COMPILER)
  		cuda/cuda_geometry.cu
  		cuda/cuda_hll.cu
  		cuda/cuda_max_field.cu
@@ -9,10 +683,11 @@ diff -ruN a/CMakeLists.txt b/CMakeLists.txt
  		cuda/cuda_rain.cu
  		cuda/cuda_sample.cu
  		cuda/cuda_simulate.cu
-diff -ruN a/VersionHistory.h b/VersionHistory.h
---- a/VersionHistory.h	2026-10-08 21:46:13
-+++ b/VersionHistory.h	2026-10-09 15:00:17
-@@ -20,7 +20,7 @@
+diff --git a/source/VersionHistory.h b/source/VersionHistory.h
+index f6aed10..ae59a86 100644
+--- a/source/VersionHistory.h
++++ b/source/VersionHistory.h
+@@ -20,7 +20,7 @@ Tel: +44-117-928-9108, Fax: +44-117-928-7878
  
  // release name printed at start-up; the numbers above stay as in 8.2
  // because they are written into checkpoint files
@@ -21,7 +696,7 @@ diff -ruN a/VersionHistory.h b/VersionHistory.h
  
  /*
  ########################### Version History #########################################
-@@ -28,6 +28,11 @@
+@@ -28,6 +28,11 @@ Reserved for major changes, use list below this one and subversion for full deta
  
  Ver  Date         Details
  ---  ----         -------------------------------------------------------------------------
@@ -33,9 +708,10 @@ diff -ruN a/VersionHistory.h b/VersionHistory.h
  8.3  Oct 07 2026  CUDA: max-depth grid on the GPU (large grids run), dry NoData cells skip
                    the mass counter, flux kernels synchronised; Metal FV1 back end (HR)
  8.1  Nov 23 2020  Merged changes from v7.1 (d8subgrid) into v8 (PFU)
-diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
---- a/cuda/acc/cuda_acc_simulate.cu	2026-10-08 21:46:13
-+++ b/cuda/acc/cuda_acc_simulate.cu	2026-10-09 09:50:08
+diff --git a/source/cuda/acc/cuda_acc_simulate.cu b/source/cuda/acc/cuda_acc_simulate.cu
+index 9090aaa..90cfc70 100644
+--- a/source/cuda/acc/cuda_acc_simulate.cu
++++ b/source/cuda/acc/cuda_acc_simulate.cu
 @@ -8,6 +8,7 @@
  #include "cuda_rain.cuh"
  #include "cuda_max_field.cuh"
@@ -44,7 +720,7 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  #include "cuda_unifiedallocator.cuh"
  #include "../rain/rain.h"
  #include "io.h"
-@@ -88,6 +89,7 @@
+@@ -88,6 +89,7 @@ void lis::cuda::acc::Simulation::run
  	
  
  	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
@@ -52,7 +728,7 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  
  
  	//Load checkpointed data if this job has been restarted
-@@ -202,6 +204,12 @@
+@@ -202,6 +204,12 @@ void lis::cuda::acc::Simulation::run
  					stats_collector.instantaneous_mass(), grid_size); 
  		}
  
@@ -65,7 +741,7 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  		if (states.rainfall == ON) {
  
  			rainfall_uniform.update_rainfall(filenames.rainfilename, solver.t);
-@@ -264,6 +272,11 @@
+@@ -264,6 +272,11 @@ void lis::cuda::acc::Simulation::run
  
  //			lis::StatsEntry Stats_Entry;
  
@@ -77,7 +753,7 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  			lis::StatsEntry Stats_Entry = stats_collector.create_entry(solver, d_U.H);
  
  			stats.write(Stats_Entry);
-@@ -322,7 +335,10 @@
+@@ -322,7 +335,10 @@ void lis::cuda::acc::Simulation::run
  	printf("loop time %lf\n", seconds);  
  
  //	sampler.write();
@@ -89,9 +765,10 @@ diff -ruN a/cuda/acc/cuda_acc_simulate.cu b/cuda/acc/cuda_acc_simulate.cu
  //	max_field.write();
  
  	//output max files
-diff -ruN a/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh b/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh
---- a/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh	2026-10-08 21:46:12
-+++ b/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh	2026-10-09 15:47:06
+diff --git a/source/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh b/source/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh
+index 2056eec..441b057 100644
+--- a/source/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh
++++ b/source/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh
 @@ -5,7 +5,10 @@
  #include <stdio.h>  // for fprintf
  #include <stdlib.h> // for exit(error)
@@ -104,7 +781,7 @@ diff -ruN a/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh b/cuda/acc_nugrid/CHECK_CUDA_ER
  #define CHECK_CUDA_ERROR(ans) { CUDAAssert( (ans), __FILE__, __LINE__); }
  
  inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort = true)
-@@ -16,4 +19,6 @@
+@@ -16,4 +19,6 @@ inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort
  
  		if (abort) exit(error);
  	}
@@ -113,9 +790,10 @@ diff -ruN a/cuda/acc_nugrid/CHECK_CUDA_ERROR.cuh b/cuda/acc_nugrid/CHECK_CUDA_ER
 +}
 +
 +#endif
-diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu
---- a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu	2026-10-08 21:46:12
-+++ b/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu	2026-10-09 15:47:06
+diff --git a/source/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/source/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu
+index 691cee2..bde734a 100644
+--- a/source/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu
++++ b/source/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu
 @@ -69,6 +69,13 @@
  #include "write_chkpnt.cuh"
  #include "read_chkpnt.cuh"
@@ -130,7 +808,7 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
  void lis::cuda::acc_nugrid::Simulation::run
  (
  	Fnames& filenames,
-@@ -151,13 +158,35 @@
+@@ -151,13 +158,35 @@ void lis::cuda::acc_nugrid::Simulation::run
  	MortonCode* d_indices = (MortonCode*)malloc_device(bytes_morton);
  	MortonCode* d_reverse_z_order = (MortonCode*)malloc_device(bytes_morton);
  	NUMERIC_TYPE* d_eta_temp = (NUMERIC_TYPE*)malloc_device(bytes_soln); //TOREMOVE
@@ -167,7 +845,7 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
  	// =========================================================== //
  
  	::DynamicRain<UnifiedAllocator<NUMERIC_TYPE>> rain(
-@@ -226,6 +255,9 @@
+@@ -226,6 +255,9 @@ void lis::cuda::acc_nugrid::Simulation::run
          states.startfile
  	);
  
@@ -177,34 +855,31 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
  	// ================================ //
  
      get_reg_tree
-@@ -419,10 +451,10 @@
+@@ -419,9 +451,9 @@ void lis::cuda::acc_nugrid::Simulation::run
              if (verbose == ON) printf("Unable to open stage output file: %s", fp);
              states.save_stages = OFF;
          }
-+
-+		if (fp != NULL) fclose(fp);
-     }
+-    }
  
 -    fclose(fp);
--
++		if (fp != NULL) fclose(fp);
++    }
+ 
      //velocity output file
      if (states.save_stages == ON && states.voutput_stage == ON) {
- 
-@@ -448,11 +480,11 @@
+@@ -448,9 +480,9 @@ void lis::cuda::acc_nugrid::Simulation::run
              if (verbose == ON) printf("Unable to open stage output file: %s", fp);
              states.save_stages = OFF;
          }
-+
-+		if (fp != NULL) fclose(fp);
-     }
+-    }
  
 -    fclose(fp);
++		if (fp != NULL) fclose(fp);
++    }
  
--
+ 
      if (states.save_stages == ON)
-     {
-         d_plot_assem_sol = project_assem_sol
-@@ -605,7 +637,7 @@
+@@ -605,7 +637,7 @@ void lis::cuda::acc_nugrid::Simulation::run
              non_uniform_n
      	);
  
@@ -213,24 +888,23 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
      	(
      		d_assem_sol,
      		d_non_uniform_nghbrs,
-@@ -614,8 +646,15 @@
+@@ -614,7 +646,14 @@ void lis::cuda::acc_nugrid::Simulation::run
      		solver,
      		boundaries,
      		point_sources
 -    	);
 +	    );
- 
++
 +		if (losses.enabled())
 +		{
 +			losses.apply_acc_nugrid(d_assem_sol, solver.L, solver.Tstep,
 +				solver.DepthThresh, solver.t, device_loss_dem, pars.nodata_elevation);
 +			integrated_loss_time += (double)solver.Tstep;
 +		}
-+
+ 
      	// Update t with final Tstep calculated
      	if (solver.t > C(0.0)) solver.MinTstep = getmin(solver.MinTstep, solver.Tstep);
-     	solver.t += solver.Tstep;
-@@ -638,10 +677,24 @@
+@@ -638,9 +677,23 @@ void lis::cuda::acc_nugrid::Simulation::run
      			C(0.0),
      			C(0.0),
      			C(0.0),
@@ -240,7 +914,7 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
 +				(NUMERIC_TYPE)losses.total_volume(),
 +				C(0.0)
 +			);
- 
++
 +			if (losses.enabled())
 +			{
 +				char loss_path[512];
@@ -254,11 +928,10 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
 +				fclose(loss_file);
 +				first_loss_output = false;
 +			}
-+
+ 
              pars.MassTotal += pars.MassInt;
      
-     		d_plot_assem_sol = project_assem_sol
-@@ -801,6 +854,9 @@
+@@ -801,6 +854,9 @@ void lis::cuda::acc_nugrid::Simulation::run
      	initHtm,
      	pars.output_precision
      );
@@ -268,9 +941,10 @@ diff -ruN a/cuda/acc_nugrid/cuda_acc_nugrid_simulate.cu b/cuda/acc_nugrid/cuda_a
      
   //   time(&solver.time_finish);
      if (verbose == ON) printf("Finished.\n\n");
-diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptive_simulate.cu
---- a/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-08 21:46:13
-+++ b/cuda/adaptive/cuda_adaptive_simulate.cu	2026-10-09 14:55:18
+diff --git a/source/cuda/adaptive/cuda_adaptive_simulate.cu b/source/cuda/adaptive/cuda_adaptive_simulate.cu
+index ac9009a..ad39a30 100644
+--- a/source/cuda/adaptive/cuda_adaptive_simulate.cu
++++ b/source/cuda/adaptive/cuda_adaptive_simulate.cu
 @@ -1,6 +1,9 @@
  //-----------------Custom headers-----------------//
  
@@ -332,7 +1006,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  	// begin timing from the beginning, as input is automated
  	const clock_t start = clock();
  
-@@ -183,11 +223,35 @@
+@@ -183,11 +223,35 @@ void lis::cuda::adaptive::Simulation::run
  	real dy_finest = (test_case != 0) ? (sim_params.ymax - sim_params.ymin) / mesh_dim : read_cell_size(input_filename);
  	real dt        = C(0.001);
  
@@ -368,7 +1042,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  	int num_details           = get_lvl_idx(solver_params.L);
  	int num_blocks_details    = get_num_blocks(num_details, THREADS_PER_BLOCK);
  	int num_blocks_sol        = 0;
-@@ -257,6 +321,9 @@
+@@ -257,6 +321,9 @@ void lis::cuda::adaptive::Simulation::run
  		test_case
  	);
  
@@ -378,7 +1052,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  	// =========================================================== //
  
  	// ================ //
-@@ -476,6 +543,10 @@
+@@ -476,6 +543,10 @@ void lis::cuda::adaptive::Simulation::run
  		//CHECK_CUDA_ERROR(peek());
  		//CHECK_CUDA_ERROR(sync());
  
@@ -389,7 +1063,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  		if (solver_params.epsilon > C(0.0) || first_t_step)
  		{
  		    for_nghbrs = false;
-@@ -601,6 +672,10 @@
+@@ -601,6 +672,10 @@ void lis::cuda::adaptive::Simulation::run
  		//CHECK_CUDA_ERROR(peek());
  		//CHECK_CUDA_ERROR(sync());
  		
@@ -400,7 +1074,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  		boundaries.update_all_inlets(input_filename, current_time);
  
  		add_ghost_cells<<<num_blocks_sol, THREADS_PER_BLOCK>>>
-@@ -795,6 +870,12 @@
+@@ -795,6 +870,12 @@ void lis::cuda::adaptive::Simulation::run
  			//CHECK_CUDA_ERROR(sync());
  		}
  
@@ -413,7 +1087,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  		dt = get_dt_CFL(d_dt_CFL, d_assem_sol.length);
  
  		solver_end = clock();
-@@ -861,6 +942,18 @@
+@@ -861,6 +942,18 @@ void lis::cuda::adaptive::Simulation::run
  
  		if ( massint.save(current_time) )
  		{
@@ -432,7 +1106,7 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  			if (plot_params.cumulative)
  			{
  			    write_cumulative_data
-@@ -954,6 +1047,10 @@
+@@ -954,6 +1047,10 @@ void lis::cuda::adaptive::Simulation::run
  	CHECK_CUDA_ERROR( free_device(d_preflagged_details) );
  	CHECK_CUDA_ERROR( free_device(d_norm_details) );
  	CHECK_CUDA_ERROR( free_device(d_dt_CFL) );
@@ -443,10 +1117,11 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cu b/cuda/adaptive/cuda_adaptiv
  	
  	//reset();
  
-diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cuh b/cuda/adaptive/cuda_adaptive_simulate.cuh
---- a/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-08 21:46:13
-+++ b/cuda/adaptive/cuda_adaptive_simulate.cuh	2026-10-09 14:33:51
-@@ -16,7 +16,8 @@
+diff --git a/source/cuda/adaptive/cuda_adaptive_simulate.cuh b/source/cuda/adaptive/cuda_adaptive_simulate.cuh
+index f25967f..5204247 100644
+--- a/source/cuda/adaptive/cuda_adaptive_simulate.cuh
++++ b/source/cuda/adaptive/cuda_adaptive_simulate.cuh
+@@ -16,7 +16,8 @@ public:
  	void run
  	(
  		int    argc,
@@ -456,9 +1131,10 @@ diff -ruN a/cuda/adaptive/cuda_adaptive_simulate.cuh b/cuda/adaptive/cuda_adapti
  	);
  };
  
-diff -ruN a/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh b/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh
---- a/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh	2026-10-08 21:46:13
-+++ b/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh	2026-10-09 15:47:06
+diff --git a/source/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh b/source/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh
+index 432986f..1a924fd 100644
+--- a/source/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh
++++ b/source/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh
 @@ -5,7 +5,10 @@
  #include <cstdio>  // for fprintf
  #include <cstdlib> // for exit(error)
@@ -471,7 +1147,7 @@ diff -ruN a/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh b/cuda/adaptive/utiliti
  #define CHECK_CUDA_ERROR(ans) { CUDAAssert( (ans), __FILE__, __LINE__); }
  
  inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort = true)
-@@ -16,4 +19,6 @@
+@@ -16,4 +19,6 @@ inline void CUDAAssert(cudaError_t error, const char* file, int line, bool abort
  
  		if (abort) exit(error);
  	}
@@ -480,9 +1156,11 @@ diff -ruN a/cuda/adaptive/utilities/CHECK_CUDA_ERROR.cuh b/cuda/adaptive/utiliti
 +}
 +
 +#endif
-diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
---- a/cuda/cuda_losses.cu	1970-01-01 01:00:00
-+++ b/cuda/cuda_losses.cu	2026-10-09 15:47:06
+diff --git a/source/cuda/cuda_losses.cu b/source/cuda/cuda_losses.cu
+new file mode 100644
+index 0000000..726a287
+--- /dev/null
++++ b/source/cuda/cuda_losses.cu
 @@ -0,0 +1,737 @@
 +#include "cuda_losses.cuh"
 +#include "cuda_geometry.cuh"
@@ -1221,9 +1899,11 @@ diff -ruN a/cuda/cuda_losses.cu b/cuda/cuda_losses.cu
 +	free_device(d_volume);
 +	free_device(d_water);
 +}
-diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
---- a/cuda/cuda_losses.cuh	1970-01-01 01:00:00
-+++ b/cuda/cuda_losses.cuh	2026-10-09 15:47:06
+diff --git a/source/cuda/cuda_losses.cuh b/source/cuda/cuda_losses.cuh
+new file mode 100644
+index 0000000..b9ae469
+--- /dev/null
++++ b/source/cuda/cuda_losses.cuh
 @@ -0,0 +1,178 @@
 +#pragma once
 +#include "../lisflood.h"
@@ -1403,10 +2083,11 @@ diff -ruN a/cuda/cuda_losses.cuh b/cuda/cuda_losses.cuh
 +
 +}
 +}
-diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
---- a/cuda/cuda_stats.cu	2026-10-08 21:46:12
-+++ b/cuda/cuda_stats.cu	2026-10-08 13:18:22
-@@ -106,6 +106,12 @@
+diff --git a/source/cuda/cuda_stats.cu b/source/cuda/cuda_stats.cu
+index c7f963a..2ddf15e 100644
+--- a/source/cuda/cuda_stats.cu
++++ b/source/cuda/cuda_stats.cu
+@@ -106,6 +106,12 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
  
  	zero_cumulative_mass();
  
@@ -1419,7 +2100,7 @@ diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
  	return { 
  		solver.t,
  		cuda::dt,
-@@ -114,8 +120,9 @@
+@@ -114,8 +120,9 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
  		area(H),
  		current_volume,
  		h_instantaneous_mass,
@@ -1431,10 +2112,11 @@ diff -ruN a/cuda/cuda_stats.cu b/cuda/cuda_stats.cu
  	};
  }
  
-diff -ruN a/cuda/cuda_stats.cuh b/cuda/cuda_stats.cuh
---- a/cuda/cuda_stats.cuh	2026-10-08 21:46:12
-+++ b/cuda/cuda_stats.cuh	2026-10-08 13:18:22
-@@ -35,6 +35,10 @@
+diff --git a/source/cuda/cuda_stats.cuh b/source/cuda/cuda_stats.cuh
+index 649a0f0..fb71c95 100644
+--- a/source/cuda/cuda_stats.cuh
++++ b/source/cuda/cuda_stats.cuh
+@@ -35,6 +35,10 @@ public:
  	NUMERIC_TYPE previous_volume = C(0.0);
  	MassStats* d_instantaneous_mass; /**< through BCs/PSs during timestep*/
  
@@ -1445,9 +2127,10 @@ diff -ruN a/cuda/cuda_stats.cuh b/cuda/cuda_stats.cuh
  private:
  	NUMERIC_TYPE area
  	(
-diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
---- a/cuda/dg2/cuda_dg2_simulate.cu	2026-10-08 21:46:12
-+++ b/cuda/dg2/cuda_dg2_simulate.cu	2026-10-08 15:01:10
+diff --git a/source/cuda/dg2/cuda_dg2_simulate.cu b/source/cuda/dg2/cuda_dg2_simulate.cu
+index c159bd4..e1dfad5 100644
+--- a/source/cuda/dg2/cuda_dg2_simulate.cu
++++ b/source/cuda/dg2/cuda_dg2_simulate.cu
 @@ -11,6 +11,7 @@
  #include "cuda_max_field.cuh"
  #include "cuda_rain.cuh"
@@ -1456,7 +2139,7 @@ diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
  #include "cuda_unifiedallocator.cuh"
  #include "../rain/rain.h"
  #include "io.h"
-@@ -92,6 +93,7 @@
+@@ -92,6 +93,7 @@ void lis::cuda::dg2::Simulation::run
  	solver.MinTstep = solver.InitTstep;
  
  	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
@@ -1464,7 +2147,7 @@ diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
  	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
  			grid_size, pars.output_precision);
  
-@@ -172,6 +174,11 @@
+@@ -172,6 +174,11 @@ void lis::cuda::dg2::Simulation::run
  			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM._0, 
  					stats_collector.instantaneous_mass(), grid_size);
  		}
@@ -1476,7 +2159,7 @@ diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
  		stats_collector.accumulate_mass();
  		max_field.update(d_U.H);
  
-@@ -181,6 +188,11 @@
+@@ -181,6 +188,11 @@ void lis::cuda::dg2::Simulation::run
  			solve->zero_ghost_cells();
  			cuda::sync();
  
@@ -1488,9 +2171,10 @@ diff -ruN a/cuda/dg2/cuda_dg2_simulate.cu b/cuda/dg2/cuda_dg2_simulate.cu
  			stats.write(stats_collector.create_entry(solver, d_U.H));
  			sampler.write_if_buffer_full();
  		}
-diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
---- a/cuda/fv1/cuda_fv1_simulate.cu	2026-10-08 21:46:12
-+++ b/cuda/fv1/cuda_fv1_simulate.cu	2026-10-08 13:18:22
+diff --git a/source/cuda/fv1/cuda_fv1_simulate.cu b/source/cuda/fv1/cuda_fv1_simulate.cu
+index cfcc518..4856720 100644
+--- a/source/cuda/fv1/cuda_fv1_simulate.cu
++++ b/source/cuda/fv1/cuda_fv1_simulate.cu
 @@ -8,6 +8,7 @@
  #include "cuda_rain.cuh"
  #include "cuda_max_field.cuh"
@@ -1499,7 +2183,7 @@ diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
  #include "cuda_unifiedallocator.cuh"
  #include "../rain/rain.h"
  #include "io.h"
-@@ -95,6 +96,7 @@
+@@ -95,6 +96,7 @@ void lis::cuda::fv1::Simulation::run
  	solver.MinTstep = solver.InitTstep;
  
  	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
@@ -1507,7 +2191,7 @@ diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
  	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
  			grid_size, pars.output_precision);
  
-@@ -173,6 +175,10 @@
+@@ -173,6 +175,10 @@ void lis::cuda::fv1::Simulation::run
  			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM, 
  					stats_collector.instantaneous_mass(), grid_size);
  		}
@@ -1518,7 +2202,7 @@ diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
  		stats_collector.accumulate_mass();
  		max_field.update(d_U.H);
  
-@@ -182,6 +188,11 @@
+@@ -182,6 +188,11 @@ void lis::cuda::fv1::Simulation::run
  			solve->zero_ghost_cells();
  			cuda::sync();
  
@@ -1530,9 +2214,10 @@ diff -ruN a/cuda/fv1/cuda_fv1_simulate.cu b/cuda/fv1/cuda_fv1_simulate.cu
  			stats.write(stats_collector.create_entry(solver, d_U.H));
  			sampler.write_if_buffer_full();
  		}
-diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
---- a/cuda/fv2/cuda_fv2_simulate.cu	2026-10-08 21:46:12
-+++ b/cuda/fv2/cuda_fv2_simulate.cu	2026-10-08 15:01:10
+diff --git a/source/cuda/fv2/cuda_fv2_simulate.cu b/source/cuda/fv2/cuda_fv2_simulate.cu
+index b6fe65c..b0f1f81 100644
+--- a/source/cuda/fv2/cuda_fv2_simulate.cu
++++ b/source/cuda/fv2/cuda_fv2_simulate.cu
 @@ -11,6 +11,7 @@
  #include "cuda_max_field.cuh"
  #include "cuda_rain.cuh"
@@ -1541,7 +2226,7 @@ diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
  #include "cuda_unifiedallocator.cuh"
  #include "../rain/rain.h"
  #include "io.h"
-@@ -87,6 +88,7 @@
+@@ -87,6 +88,7 @@ void lis::cuda::fv2::Simulation::run
  	solver.MinTstep = solver.InitTstep;
  
  	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
@@ -1549,7 +2234,7 @@ diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
  	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
  			grid_size, pars.output_precision);
  
-@@ -158,6 +160,11 @@
+@@ -158,6 +160,11 @@ void lis::cuda::fv2::Simulation::run
  			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM._0, 
  					stats_collector.instantaneous_mass(), grid_size);
  		}
@@ -1561,7 +2246,7 @@ diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
  		stats_collector.accumulate_mass();
  		max_field.update(d_U.H);
  
-@@ -167,6 +174,11 @@
+@@ -167,6 +174,11 @@ void lis::cuda::fv2::Simulation::run
  			solve->zero_ghost_cells();
  			cuda::sync();
  
@@ -1573,10 +2258,11 @@ diff -ruN a/cuda/fv2/cuda_fv2_simulate.cu b/cuda/fv2/cuda_fv2_simulate.cu
  			stats.write(stats_collector.create_entry(solver, d_U.H));
  			sampler.write_if_buffer_full();
  		}
-diff -ruN a/cuda/stats.cpp b/cuda/stats.cpp
---- a/cuda/stats.cpp	2026-10-08 21:46:12
-+++ b/cuda/stats.cpp	2026-10-08 13:18:22
-@@ -71,7 +71,9 @@
+diff --git a/source/cuda/stats.cpp b/source/cuda/stats.cpp
+index 5d57aa2..c02b9bc 100644
+--- a/source/cuda/stats.cpp
++++ b/source/cuda/stats.cpp
+@@ -71,7 +71,9 @@ void lis::Stats::write
  		entry.mass.out,
  		entry.discharge_error,
  		entry.volume_error,
@@ -1587,10 +2273,11 @@ diff -ruN a/cuda/stats.cpp b/cuda/stats.cpp
  	);
  	fflush(file);
  
-diff -ruN a/cuda/stats.h b/cuda/stats.h
---- a/cuda/stats.h	2026-10-08 21:46:12
-+++ b/cuda/stats.h	2026-10-08 13:18:22
-@@ -22,6 +22,7 @@
+diff --git a/source/cuda/stats.h b/source/cuda/stats.h
+index 4f0a84a..a5e9ae1 100644
+--- a/source/cuda/stats.h
++++ b/source/cuda/stats.h
+@@ -22,6 +22,7 @@ typedef struct StatsEntry
  	MassStats mass;
  	NUMERIC_TYPE volume_error;
  	NUMERIC_TYPE discharge_error;
@@ -1598,10 +2285,31 @@ diff -ruN a/cuda/stats.h b/cuda/stats.h
  } StatsEntry;
  
  class Stats
-diff -ruN a/lisflood.cpp b/lisflood.cpp
---- a/lisflood.cpp	2026-10-08 21:46:13
-+++ b/lisflood.cpp	2026-10-09 15:47:06
-@@ -213,6 +213,7 @@
+diff --git a/source/input.cpp b/source/input.cpp
+index 97814ea..37d3aa2 100644
+--- a/source/input.cpp
++++ b/source/input.cpp
+@@ -1357,8 +1357,14 @@ void LoadDEM(Fnames *Fnameptr, States *Statesptr, Pars *Parptr, Arrays *Arrptr,
+ 		Arrptr->FHUy = memory_allocate_zero_numeric_legacy((Parptr->xsz + 1)*(Parptr->ysz + 1));
+ 		Arrptr->FHVy = memory_allocate_zero_numeric_legacy((Parptr->xsz + 1)*(Parptr->ysz + 1));
+ 	}
+-	else if (Statesptr->fv1 == ON)
++	else if (Statesptr->fv1 == ON
++#ifdef METAL_ENABLED
++		|| Statesptr->hwfv1 == ON || Statesptr->mwdg2 == ON
++#endif
++	)
+ 	{
++		// The Metal adaptive compatibility path evolves the finest-level
++		// HWFV1/MWDG2 fields in the same dense buffers as FV1/DG2.
+ 		allocate_swe_fields(Parptr, Arrptr);
+ 	}
+ 	else if (Statesptr->dg2 == ON)
+diff --git a/source/lisflood.cpp b/source/lisflood.cpp
+index 1c9361e..1742730 100644
+--- a/source/lisflood.cpp
++++ b/source/lisflood.cpp
+@@ -213,6 +213,7 @@ int main(int argc, char *argv[])
  	SimStates.save_Qs = OFF;
  	SimStates.calc_infiltration = OFF;
  	SimStates.calc_distributed_infiltration = OFF;
@@ -1609,13 +2317,13 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	SimStates.call_gzip = OFF;
  	SimStates.alt_ascheader = OFF;
  	SimStates.checkpoint = OFF;
-@@ -416,6 +417,43 @@
+@@ -416,6 +417,46 @@ int main(int argc, char *argv[])
  
  	LoadDEM(Fnameptr, Statesptr, Parptr, Arrptr, verbosemode);
  	
 +	// infiltration and evaporation: CPU classic and sub-grid solvers, and
-+	// (from 8.4) the CUDA and Metal FV1, FV2, DG2 and ACC solvers,
-+	// and CUDA MWDG2/HWFV1; the others ignore them
++	// (from 8.4) the CUDA and Metal FV1, FV2, DG2, ACC, MWDG2 and HWFV1
++	// solvers, plus CUDA ACC_NUGRID; the others ignore them
 +#if defined(CUDA)
 +	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 +		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
@@ -1624,7 +2332,8 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +#elif defined(METAL_ENABLED)
 +	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
 +		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
-+		 Statesptr->acceleration == ON));
++		 Statesptr->acceleration == ON || Statesptr->mwdg2 == ON ||
++		 Statesptr->hwfv1 == ON));
 +#else
 +	const bool losses_on_gpu = false;
 +#endif
@@ -1634,7 +2343,8 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 +	{
 +		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
++			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and MWDG2/HWFV1, "
++			"and CUDA ACC_NUGRID)\n");
 +	}
 +	// Green-Ampt is a separate choice from the constant rate, and only the
 +	// GPU solvers identified above apply it
@@ -1647,13 +2357,14 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
 +	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 +	{
 +		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
++			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and MWDG2/HWFV1, "
++			"and CUDA ACC_NUGRID)\n");
 +	}
 +
  #ifdef CUDA
  	if (Statesptr->cuda == ON)
  	{
-@@ -447,7 +485,7 @@
+@@ -447,7 +488,7 @@ int main(int argc, char *argv[])
  		else if (Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON)
  		{
  			lis::cuda::adaptive::Simulation simulation;
@@ -1662,7 +2373,7 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  		}
  		else
  		{
-@@ -787,6 +825,20 @@
+@@ -787,6 +828,20 @@ int main(int argc, char *argv[])
  		fv1::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
  				Stageptr, Arrptr, verbosemode);
  	}
@@ -1683,8 +2394,22 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  	else if (Statesptr->dg2 == ON)
  	{
  		dg2::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
-@@ -802,6 +854,14 @@
+@@ -800,8 +855,28 @@ int main(int argc, char *argv[])
+ 				Stageptr, Arrptr, verbosemode);
+         */
  	}
++#ifdef METAL_ENABLED
++	else if (Statesptr->hwfv1 == ON && Statesptr->cuda == ON && metal_is_available())
++	{
++		run_metal_hwfv1(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
++				*Stageptr, *Arrptr, verbosemode);
++	}
++	else if (Statesptr->mwdg2 == ON && Statesptr->cuda == ON && metal_is_available())
++	{
++		run_metal_mwdg2(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
++				*Stageptr, *Arrptr, verbosemode);
++	}
++#endif
  	else
  	{
 +#ifdef METAL_ENABLED
@@ -1698,10 +2423,11 @@ diff -ruN a/lisflood.cpp b/lisflood.cpp
  		IterateQ(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr, Stageptr, CSTypePtr, Arrptr, SGCptr, RiversIndexVecPtr, RiversIndexPtr, ChannelSegmentsVecPtr, verbosemode);
  	}
  	time(&ParSolver.time_finish);
-diff -ruN a/lisflood.h b/lisflood.h
---- a/lisflood.h	2026-10-08 21:46:13
-+++ b/lisflood.h	2026-10-08 22:12:36
-@@ -417,6 +417,12 @@
+diff --git a/source/lisflood.h b/source/lisflood.h
+index 3ebf6d2..e936dc2 100644
+--- a/source/lisflood.h
++++ b/source/lisflood.h
+@@ -417,6 +417,12 @@ struct Fnames{
  	char LinkListfilename[256]; // JCN
  	char SGCdirnfilename[256];  // PFU
  	char infilfilename[256]; // JCN
@@ -1714,7 +2440,7 @@ diff -ruN a/lisflood.h b/lisflood.h
      char dynamicrainfilename[256];
  };
  
-@@ -586,6 +592,7 @@
+@@ -586,6 +592,7 @@ struct States{
  	int save_Qs;
  	int calc_infiltration;
  	int calc_distributed_infiltration; // uses a file to use spatially distributed infiltration rates
@@ -1722,16 +2448,17 @@ diff -ruN a/lisflood.h b/lisflood.h
  	int call_gzip;
  	int alt_ascheader;
  	int checkpoint;
-diff -ruN a/metal/CMakeLists.txt b/metal/CMakeLists.txt
---- a/metal/CMakeLists.txt	2026-10-08 21:46:12
-+++ b/metal/CMakeLists.txt	2026-10-09 08:31:40
+diff --git a/source/metal/CMakeLists.txt b/source/metal/CMakeLists.txt
+index 7fd4135..6859b9e 100644
+--- a/source/metal/CMakeLists.txt
++++ b/source/metal/CMakeLists.txt
 @@ -1,4 +1,4 @@
 -# Metal GPU back end for the FV1 solver (Apple Silicon)
 +# Metal GPU back end for the FV1, FV2, DG2 and ACC solvers (Apple Silicon)
  
  find_library(METAL_FRAMEWORK Metal)
  find_library(FOUNDATION_FRAMEWORK Foundation)
-@@ -17,11 +17,58 @@
+@@ -17,11 +17,58 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
                  -o ${METALLIB}
          DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fv1/metal_fv1_kernels.metal
          COMMENT "Compiling Metal FV1 kernels")
@@ -1792,9 +2519,11 @@ diff -ruN a/metal/CMakeLists.txt b/metal/CMakeLists.txt
      add_dependencies(lisflood-metal metal_shaders)
      target_include_directories(lisflood-metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
      target_link_libraries(lisflood-metal PUBLIC ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} lisflood-base)
-diff -ruN a/metal/acc/metal_acc_kernels.metal b/metal/acc/metal_acc_kernels.metal
---- a/metal/acc/metal_acc_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/acc/metal_acc_kernels.metal	2026-10-08 22:39:48
+diff --git a/source/metal/acc/metal_acc_kernels.metal b/source/metal/acc/metal_acc_kernels.metal
+new file mode 100644
+index 0000000..62f6372
+--- /dev/null
++++ b/source/metal/acc/metal_acc_kernels.metal
 @@ -0,0 +1,850 @@
 +//
 +// LISFLOOD-FP Metal ACC Solver Kernels
@@ -2646,9 +3375,11 @@ diff -ruN a/metal/acc/metal_acc_kernels.metal b/metal/acc/metal_acc_kernels.meta
 +        }
 +    }
 +}
-diff -ruN a/metal/acc/metal_acc_simulate.h b/metal/acc/metal_acc_simulate.h
---- a/metal/acc/metal_acc_simulate.h	1970-01-01 01:00:00
-+++ b/metal/acc/metal_acc_simulate.h	2026-10-08 22:39:48
+diff --git a/source/metal/acc/metal_acc_simulate.h b/source/metal/acc/metal_acc_simulate.h
+new file mode 100644
+index 0000000..4444b88
+--- /dev/null
++++ b/source/metal/acc/metal_acc_simulate.h
 @@ -0,0 +1,57 @@
 +//
 +// LISFLOOD-FP Metal ACC Solver - Header
@@ -2707,9 +3438,11 @@ diff -ruN a/metal/acc/metal_acc_simulate.h b/metal/acc/metal_acc_simulate.h
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/acc/metal_acc_simulate.mm b/metal/acc/metal_acc_simulate.mm
---- a/metal/acc/metal_acc_simulate.mm	1970-01-01 01:00:00
-+++ b/metal/acc/metal_acc_simulate.mm	2026-10-09 08:34:11
+diff --git a/source/metal/acc/metal_acc_simulate.mm b/source/metal/acc/metal_acc_simulate.mm
+new file mode 100644
+index 0000000..191c77e
+--- /dev/null
++++ b/source/metal/acc/metal_acc_simulate.mm
 @@ -0,0 +1,944 @@
 +//
 +// LISFLOOD-FP Metal ACC Solver - Implementation
@@ -3655,9 +4388,11 @@ diff -ruN a/metal/acc/metal_acc_simulate.mm b/metal/acc/metal_acc_simulate.mm
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/dg2/metal_dg2_kernels.metal b/metal/dg2/metal_dg2_kernels.metal
---- a/metal/dg2/metal_dg2_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/dg2/metal_dg2_kernels.metal	2026-10-08 23:08:35
+diff --git a/source/metal/dg2/metal_dg2_kernels.metal b/source/metal/dg2/metal_dg2_kernels.metal
+new file mode 100644
+index 0000000..b72dd9c
+--- /dev/null
++++ b/source/metal/dg2/metal_dg2_kernels.metal
 @@ -0,0 +1,2063 @@
 +//
 +// LISFLOOD-FP Metal DG2 Solver Kernels
@@ -5722,9 +6457,11 @@ diff -ruN a/metal/dg2/metal_dg2_kernels.metal b/metal/dg2/metal_dg2_kernels.meta
 +    L[P_H1y] = L1.H; L[P_HU1y] = L1.HU; L[P_HV1y] = L1.HV + Sb1;
 +    dg2_store(O, A, B, stage.mode, solver.dt, c, N, L);
 +}
-diff -ruN a/metal/dg2/metal_dg2_simulate.h b/metal/dg2/metal_dg2_simulate.h
---- a/metal/dg2/metal_dg2_simulate.h	1970-01-01 01:00:00
-+++ b/metal/dg2/metal_dg2_simulate.h	2026-10-08 23:11:13
+diff --git a/source/metal/dg2/metal_dg2_simulate.h b/source/metal/dg2/metal_dg2_simulate.h
+new file mode 100644
+index 0000000..7f48bc0
+--- /dev/null
++++ b/source/metal/dg2/metal_dg2_simulate.h
 @@ -0,0 +1,78 @@
 +//
 +// LISFLOOD-FP Metal DG2 Solver - Header
@@ -5804,10 +6541,12 @@ diff -ruN a/metal/dg2/metal_dg2_simulate.h b/metal/dg2/metal_dg2_simulate.h
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/dg2/metal_dg2_simulate.mm b/metal/dg2/metal_dg2_simulate.mm
---- a/metal/dg2/metal_dg2_simulate.mm	1970-01-01 01:00:00
-+++ b/metal/dg2/metal_dg2_simulate.mm	2026-10-09 08:34:11
-@@ -0,0 +1,1317 @@
+diff --git a/source/metal/dg2/metal_dg2_simulate.mm b/source/metal/dg2/metal_dg2_simulate.mm
+new file mode 100644
+index 0000000..058b1ae
+--- /dev/null
++++ b/source/metal/dg2/metal_dg2_simulate.mm
+@@ -0,0 +1,1337 @@
 +//
 +// LISFLOOD-FP Metal DG2 Solver - Implementation
 +// The Metal DG2 host with the DG2 time step of cuda/dg2 (nine coefficients per
@@ -6369,18 +7108,38 @@ diff -ruN a/metal/dg2/metal_dg2_simulate.mm b/metal/dg2/metal_dg2_simulate.mm
 +    std::string base = filenames_dem;
 +    if (!read_ascii_grid((base + "1x").c_str(), geom.xsz, geom.ysz, z1x) ||
 +        !read_ascii_grid((base + "1y").c_str(), geom.xsz, geom.ysz, z1y)) {
-+      fprintf(stderr, "ERROR: Metal DG2 needs the DEM slope files %s1x and %s1y "
-+                      "(generateDG2DEM)\n", base.c_str(), base.c_str());
-+      std::exit(EXIT_FAILURE);
++      if (states->mwdg2 == ON) {
++        // Adaptive input files contain finest-grid cell averages rather than
++        // the preprocessed DG2 modal rasters.  Start their unresolved modes
++        // at zero; the RKDG2 update evolves them immediately.  This is the
++        // conservative projection of a piecewise-constant finest-grid DEM.
++        z1x.assign((size_t)geom.xsz * geom.ysz, 0.0);
++        z1y.assign((size_t)geom.xsz * geom.ysz, 0.0);
++        if (verbose)
++          printf("Metal MWDG2: DEM modal files absent; using conservative "
++                 "zero-slope projection\n");
++      } else {
++        fprintf(stderr, "ERROR: Metal DG2 needs the DEM slope files %s1x and %s1y "
++                        "(generateDG2DEM)\n", base.c_str(), base.c_str());
++        std::exit(EXIT_FAILURE);
++      }
 +    }
 +    std::vector<double> h1x, h1y;
 +    if (states->startfile == ON) {
 +      std::string sbase = filenames_start;
 +      if (!read_ascii_grid((sbase + "1x").c_str(), geom.xsz, geom.ysz, h1x) ||
 +          !read_ascii_grid((sbase + "1y").c_str(), geom.xsz, geom.ysz, h1y)) {
-+        fprintf(stderr, "ERROR: Metal DG2 needs the start file slopes %s1x and "
-+                        "%s1y (generateDG2start)\n", sbase.c_str(), sbase.c_str());
-+        std::exit(EXIT_FAILURE);
++        if (states->mwdg2 == ON) {
++          h1x.assign((size_t)geom.xsz * geom.ysz, 0.0);
++          h1y.assign((size_t)geom.xsz * geom.ysz, 0.0);
++          if (verbose)
++            printf("Metal MWDG2: start modal files absent; using conservative "
++                   "zero-slope projection\n");
++        } else {
++          fprintf(stderr, "ERROR: Metal DG2 needs the start file slopes %s1x and "
++                          "%s1y (generateDG2start)\n", sbase.c_str(), sbase.c_str());
++          std::exit(EXIT_FAILURE);
++        }
 +      }
 +    }
 +
@@ -7125,9 +7884,10 @@ diff -ruN a/metal/dg2/metal_dg2_simulate.mm b/metal/dg2/metal_dg2_simulate.mm
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/fv1/metal_fv1_simulate.mm b/metal/fv1/metal_fv1_simulate.mm
---- a/metal/fv1/metal_fv1_simulate.mm	2026-10-08 21:46:12
-+++ b/metal/fv1/metal_fv1_simulate.mm	2026-10-09 08:34:11
+diff --git a/source/metal/fv1/metal_fv1_simulate.mm b/source/metal/fv1/metal_fv1_simulate.mm
+index 5e135de..c215b71 100644
+--- a/source/metal/fv1/metal_fv1_simulate.mm
++++ b/source/metal/fv1/metal_fv1_simulate.mm
 @@ -1,1493 +1,1517 @@
 -//
 -// LISFLOOD-FP Metal FV1 Solver - Implementation
@@ -10139,9 +10899,11 @@ diff -ruN a/metal/fv1/metal_fv1_simulate.mm b/metal/fv1/metal_fv1_simulate.mm
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/fv2/metal_fv2_kernels.metal b/metal/fv2/metal_fv2_kernels.metal
---- a/metal/fv2/metal_fv2_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/fv2/metal_fv2_kernels.metal	2026-10-08 22:58:27
+diff --git a/source/metal/fv2/metal_fv2_kernels.metal b/source/metal/fv2/metal_fv2_kernels.metal
+new file mode 100644
+index 0000000..f60ba32
+--- /dev/null
++++ b/source/metal/fv2/metal_fv2_kernels.metal
 @@ -0,0 +1,1432 @@
 +//
 +// LISFLOOD-FP Metal FV2 Solver Kernels
@@ -11575,9 +12337,11 @@ diff -ruN a/metal/fv2/metal_fv2_kernels.metal b/metal/fv2/metal_fv2_kernels.meta
 +    HUO[idx] = O.HU;
 +    HVO[idx] = O.HV;
 +}
-diff -ruN a/metal/fv2/metal_fv2_simulate.h b/metal/fv2/metal_fv2_simulate.h
---- a/metal/fv2/metal_fv2_simulate.h	1970-01-01 01:00:00
-+++ b/metal/fv2/metal_fv2_simulate.h	2026-10-08 22:48:18
+diff --git a/source/metal/fv2/metal_fv2_simulate.h b/source/metal/fv2/metal_fv2_simulate.h
+new file mode 100644
+index 0000000..8a00f5c
+--- /dev/null
++++ b/source/metal/fv2/metal_fv2_simulate.h
 @@ -0,0 +1,78 @@
 +//
 +// LISFLOOD-FP Metal FV2 Solver - Header
@@ -11657,9 +12421,11 @@ diff -ruN a/metal/fv2/metal_fv2_simulate.h b/metal/fv2/metal_fv2_simulate.h
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/fv2/metal_fv2_simulate.mm b/metal/fv2/metal_fv2_simulate.mm
---- a/metal/fv2/metal_fv2_simulate.mm	1970-01-01 01:00:00
-+++ b/metal/fv2/metal_fv2_simulate.mm	2026-10-09 08:34:11
+diff --git a/source/metal/fv2/metal_fv2_simulate.mm b/source/metal/fv2/metal_fv2_simulate.mm
+new file mode 100644
+index 0000000..3e2c84d
+--- /dev/null
++++ b/source/metal/fv2/metal_fv2_simulate.mm
 @@ -0,0 +1,1565 @@
 +//
 +// LISFLOOD-FP Metal FV2 Solver - Implementation
@@ -13226,9 +13992,11 @@ diff -ruN a/metal/fv2/metal_fv2_simulate.mm b/metal/fv2/metal_fv2_simulate.mm
 +} // namespace lis
 +
 +#endif // __APPLE__
-diff -ruN a/metal/losses/metal_losses.h b/metal/losses/metal_losses.h
---- a/metal/losses/metal_losses.h	1970-01-01 01:00:00
-+++ b/metal/losses/metal_losses.h	2026-10-09 08:30:23
+diff --git a/source/metal/losses/metal_losses.h b/source/metal/losses/metal_losses.h
+new file mode 100644
+index 0000000..14a603e
+--- /dev/null
++++ b/source/metal/losses/metal_losses.h
 @@ -0,0 +1,59 @@
 +// LISFLOOD-FP Metal: floodplain infiltration and evaporation (8.4)
 +// Shared by the Metal FV1, FV2, DG2 and ACC solvers; the rules of
@@ -13289,9 +14057,11 @@ diff -ruN a/metal/losses/metal_losses.h b/metal/losses/metal_losses.h
 +} // namespace metal
 +} // namespace lis
 +#endif
-diff -ruN a/metal/losses/metal_losses.mm b/metal/losses/metal_losses.mm
---- a/metal/losses/metal_losses.mm	1970-01-01 01:00:00
-+++ b/metal/losses/metal_losses.mm	2026-10-09 08:30:23
+diff --git a/source/metal/losses/metal_losses.mm b/source/metal/losses/metal_losses.mm
+new file mode 100644
+index 0000000..4fff85b
+--- /dev/null
++++ b/source/metal/losses/metal_losses.mm
 @@ -0,0 +1,253 @@
 +// LISFLOOD-FP Metal: floodplain infiltration and evaporation (8.4)
 +#ifdef __APPLE__
@@ -13546,9 +14316,11 @@ diff -ruN a/metal/losses/metal_losses.mm b/metal/losses/metal_losses.mm
 +} // namespace metal
 +} // namespace lis
 +#endif
-diff -ruN a/metal/losses/metal_losses_kernels.metal b/metal/losses/metal_losses_kernels.metal
---- a/metal/losses/metal_losses_kernels.metal	1970-01-01 01:00:00
-+++ b/metal/losses/metal_losses_kernels.metal	2026-10-09 08:29:38
+diff --git a/source/metal/losses/metal_losses_kernels.metal b/source/metal/losses/metal_losses_kernels.metal
+new file mode 100644
+index 0000000..3e27a78
+--- /dev/null
++++ b/source/metal/losses/metal_losses_kernels.metal
 @@ -0,0 +1,185 @@
 +//
 +// LISFLOOD-FP Metal: floodplain infiltration and evaporation (8.4)
@@ -13735,9 +14507,10 @@ diff -ruN a/metal/losses/metal_losses_kernels.metal b/metal/losses/metal_losses_
 +        partial[tgid.y * (uint)p.ngx + tgid.x] = t;
 +    }
 +}
-diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
---- a/metal/metal_integrate.cpp	2026-10-08 21:46:12
-+++ b/metal/metal_integrate.cpp	2026-10-08 23:11:37
+diff --git a/source/metal/metal_integrate.cpp b/source/metal/metal_integrate.cpp
+index 0f12017..6b7c108 100644
+--- a/source/metal/metal_integrate.cpp
++++ b/source/metal/metal_integrate.cpp
 @@ -1,6 +1,10 @@
  // LISFLOOD-FP Metal GPU back end: entry points called from lisflood.cpp
  #include "metal_integrate.h"
@@ -13749,12 +14522,10 @@ diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
  
  bool metal_is_available() { return lis::metal::fv1::Simulator::is_available(); }
  
-@@ -10,5 +14,36 @@
-   if (verbose)
-     printf("\nUsing the Metal GPU (Apple Silicon) for the FV1 solver\n\n");
+@@ -12,3 +16,64 @@ void run_metal_fv1(Fnames &filenames, Files *files, States &states, Pars &pars,
    lis::metal::fv1::simulate(filenames, files, states, pars, solver, boundCs,
-+                            stage, arrays, verbose);
-+}
+                             stage, arrays, verbose);
+ }
 +
 +void run_metal_fv2(Fnames &filenames, Files *files, States &states, Pars &pars,
 +                   Solver &solver, BoundCs &boundCs, Stage &stage,
@@ -13784,12 +14555,43 @@ diff -ruN a/metal/metal_integrate.cpp b/metal/metal_integrate.cpp
 +  if (verbose)
 +    printf("\nUsing the Metal GPU (Apple Silicon) for the ACC solver\n\n");
 +  lis::metal::acc::simulate(filenames, files, states, pars, solver, boundCs,
-                             stage, arrays, verbose);
- }
-diff -ruN a/metal/metal_integrate.h b/metal/metal_integrate.h
---- a/metal/metal_integrate.h	2026-10-08 21:46:12
-+++ b/metal/metal_integrate.h	2026-10-08 23:11:37
-@@ -9,3 +9,18 @@
++                            stage, arrays, verbose);
++}
++
++void run_metal_hwfv1(Fnames &filenames, Files *files, States &states, Pars &pars,
++                     Solver &solver, BoundCs &boundCs, Stage &stage,
++                     Arrays &arrays, int verbose) {
++  fprintf(stderr, "NOTICE: Metal HWFV1 uses the dense finest-level mesh; "
++                  "epsilon does not compress the mesh.\n");
++  if (verbose) {
++    printf("\nUsing the Metal GPU for HWFV1 in dense finest-level mode\n");
++    printf("  adaptive threshold epsilon=%g (mesh compression is disabled)\n\n",
++           (double)solver.epsilon);
++  }
++  if (arrays.HU == nullptr) allocate_swe_fields(&pars, &arrays);
++  lis::metal::fv1::simulate(filenames, files, states, pars, solver, boundCs,
++                            stage, arrays, verbose);
++}
++
++void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars,
++                     Solver &solver, BoundCs &boundCs, Stage &stage,
++                     Arrays &arrays, int verbose) {
++  fprintf(stderr, "NOTICE: Metal MWDG2 uses the dense finest-level mesh; "
++                  "epsilon does not compress the mesh.\n");
++  if (verbose) {
++    printf("\nUsing the Metal GPU for MWDG2 in dense finest-level mode\n");
++    printf("  adaptive threshold epsilon=%g (mesh compression is disabled)\n\n",
++           (double)solver.epsilon);
++  }
++  if (arrays.HU == nullptr) allocate_swe_fields(&pars, &arrays);
++  lis::metal::dg2::simulate(filenames, files, states, pars, solver, boundCs,
++                            stage, arrays, verbose);
++}
+diff --git a/source/metal/metal_integrate.h b/source/metal/metal_integrate.h
+index dd770fd..ab6774d 100644
+--- a/source/metal/metal_integrate.h
++++ b/source/metal/metal_integrate.h
+@@ -9,3 +9,28 @@ bool metal_is_available();
  void run_metal_fv1(Fnames &filenames, Files *files, States &states, Pars &pars,
                     Solver &solver, BoundCs &boundCs, Stage &stage,
                     Arrays &arrays, int verbose);
@@ -13808,10 +14610,21 @@ diff -ruN a/metal/metal_integrate.h b/metal/metal_integrate.h
 +void run_metal_acc(Fnames &filenames, Files *files, States &states, Pars &pars,
 +                   Solver &solver, BoundCs &boundCs, Stage &stage,
 +                   Arrays &arrays, int verbose);
-diff -ruN a/pars.cpp b/pars.cpp
---- a/pars.cpp	2026-10-08 21:46:12
-+++ b/pars.cpp	2026-10-08 22:12:36
-@@ -483,6 +483,26 @@
++
++// Run the adaptive solver equations at the finest level in dense Metal
++// buffers.  This is the deterministic fallback used until a native Metal
++// replacement for CUDA/CUB tree sorting and compaction is available.
++void run_metal_hwfv1(Fnames &filenames, Files *files, States &states, Pars &pars,
++                     Solver &solver, BoundCs &boundCs, Stage &stage,
++                     Arrays &arrays, int verbose);
++void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars,
++                     Solver &solver, BoundCs &boundCs, Stage &stage,
++                     Arrays &arrays, int verbose);
+diff --git a/source/pars.cpp b/source/pars.cpp
+index 7d637c9..da666ef 100644
+--- a/source/pars.cpp
++++ b/source/pars.cpp
+@@ -483,6 +483,26 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
  		Statesptr->gsection = ON;
  		return;
  	}
@@ -13838,3 +14651,1277 @@ diff -ruN a/pars.cpp b/pars.cpp
  	if (read_numeric_param(param_name, line_number, param_value_ptr, "infiltration", &Parptr->InfilRate, verbose, mode) ||
  		read_numeric_param(param_name, line_number, param_value_ptr, "inf", &Parptr->InfilRate, verbose, mode))
  	{
+diff --git a/tests_8.4/ACC_NUGRID_RESULTS.md b/tests_8.4/ACC_NUGRID_RESULTS.md
+new file mode 100644
+index 0000000..95ab84b
+--- /dev/null
++++ b/tests_8.4/ACC_NUGRID_RESULTS.md
+@@ -0,0 +1,55 @@
++# CUDA `acc_nugrid` loss results
++
++Final validation used an NVIDIA A100, CUDA 12.6, a Release build targeting
++CUDA architecture 80, and the frozen 8.3 binary as the loss-disabled
++reference.
++
++- Job 36653374: **106 checks passed, 0 failures** in a clean work directory.
++- Job 36653375: all 20 uniform-grid CUDA cases matched 8.3: 14 output sets
++  were byte-identical and six differed only in `.mass` atomic-sum last digits.
++
++The standalone suite covers constant and raster infiltration, evaporation,
++Green-Ampt numeric and raster parameters, the 46 mm finite soil-storage cap,
++north/south raster orientation, NoData holes, rectangular inputs, drying, a
++full finest-level mesh and a compressed mixed-size mesh. Closed-basin storage
++plus loss differed from initial storage by at most `2.27e-16` relative in
++these analytic cases.
++
++Constant and raster forms of the same parameters produced identical results.
++Repeated physical outputs were byte-identical. One repeated compressed run's
++diagnostic `.loss` water-volume sum differed by `3.81e-06 m3` out of about
++`3.28e10 m3` (`1.2e-16` relative), because block totals reach the double
++atomic in a nondeterministic order; no depth, stage, velocity, maximum or mass
++output differed.
++
++With losses disabled, the 8.4 `acc_nugrid` output matched 8.3 except for the
++existing decimal rendering of `r.max`: its largest numeric difference was
++`2e-09 m`. All other physical output files were byte-identical.
++
++Early diagnostic jobs used a build directory configured without the required
++single-precision `_CONFIG=config.float.cmake`; its first configuration also
++retained CMake's default CUDA architecture 61. Those double-precision results
++cannot be compared with the frozen single-precision 8.3 binary. The final
++jobs above use a clean build configured with `config.float.cmake`, Release
++mode and `CMAKE_CUDA_ARCHITECTURES=80`, matching the frozen 8.3 build.
++
++The implementation is validated for the closed analytic cases in this suite.
++A larger real-event `acc_nugrid` loss benchmark is still desirable before
++treating it as field validated.
++
++## Loss-disabled uniform CUDA regression
++
++| case | solver | 8.4 versus 8.3 |
++|---|---|---|
++| T01 | ACC, DG2, FV1, FV2 | bit-identical |
++| T02 | ACC, FV1, FV2 | bit-identical |
++| T02 | DG2 | same except `.mass` |
++| T030 | ACC, DG2, FV1, FV2 | bit-identical |
++| T031 | ACC | bit-identical |
++| T031 | DG2, FV1, FV2 | same except `.mass` |
++| T03 | ACC, FV1 | bit-identical |
++| T03 | DG2, FV2 | same except `.mass` |
++
++Every 8.4 run took the same number of time steps as its 8.3 reference. The
++`.mass` differences are the already documented nondeterministic last digits
++from floating-point atomic sums; depth and other physical outputs match.
+diff --git a/tests_8.4/ADAPTIVE_RESULTS.md b/tests_8.4/ADAPTIVE_RESULTS.md
+new file mode 100644
+index 0000000..f2a352f
+--- /dev/null
++++ b/tests_8.4/ADAPTIVE_RESULTS.md
+@@ -0,0 +1,76 @@
++# CUDA adaptive losses: validation on 9 October 2026
++
++NVIDIA A100, CUDA 12.6, GCC 8.5, single-precision flow with double-precision
++Green-Ampt state. Both solvers were checked with epsilon 0 and 0.001.
++
++- `adaptive.py`: **218 checks passed, 0 failures**.
++- `adaptive_sources.py`: **5 checks passed, 0 failures**.
++- Existing suite: T01, T02, T03, T030 and T031, all four uniform-grid solvers:
++  **all 20 numerical output sets match CUDA 8.3**. Thirteen runs match every
++  file; seven differ only in `.mass` (floating-point atomic reduction order).
++- The regenerated source patch passes a dry run against the 8.3 source.
++
++The adaptive suite checks constant and grid infiltration, evaporation, drying,
++Green-Ampt numeric/grid equality and a 46 mm soil-storage cap. It also checks
++north/south raster orientation, rectangular padding and NoData holes (HWFV1),
++changing meshes, retained soil storage, repeatable output grids, and equality
++with 8.3 without losses on both a uniform basin and moving water.
++
++Uniform analytic depths and capped infiltration agree within 0.03 mm (the
++assertion tolerance). Grid and numeric parameters produce identical depth
++outputs. Padding/NoData contribute no loss; after depth carry-over was added,
++the maximum relative storage-plus-loss error is 1.18e-7 for the adaptive
++rectangular basin and 2.05e-5 for the adaptive NoData-hole basin.
++
++The adaptive flow solver itself is not exactly conservative on moving meshes.
++For the moving-water cap test, relative volume drift was:
++
++| solver | epsilon | with losses | loss-free reference |
++|---|---:|---:|---:|
++| HWFV1 | 0 | 0.268 % | 0.365 % |
++| HWFV1 | 0.001 | 0.193 % | 0.124 % |
++| MWDG2 | 0 | 0.165 % | 0.0987 % |
++| MWDG2 | 0.001 | 1.40 % | 1.06 % |
++
++Those checks use 1.5 times the measured loss-free drift plus 0.03 % of initial
++storage as the tolerance, to allow changed flow dynamics. They are not a claim
++of exact conservation on a general adaptive mesh. The zero-loss point-source
++check agrees with 8.3's final water volume within 4.34e-6 of initial storage;
++its pre-existing adaptive source-balance errors (up to 0.856 %) remain.
++
++Reproduce on a GPU node, using fresh output directories:
++```
++python3 tests_8.4/adaptive.py BIN84 BIN83 WORK
++python3 tests_8.4/adaptive_sources.py BIN84 BIN83 SOURCE_WORK
++```
++
++HPC jobs: adaptive 36632956, source/mesh guard 36633384, uniform regression
++36632958. Raw logs and the regression comparison are retained locally under
++`build/validation_adaptive84/`; machine-specific locations are in the local
++handover. Larger real-event adaptive loss tests and Metal adaptive solvers
++are outside this validation.
++
++## Uniform-grid regression fingerprints
++
++| case | solver | run | result | files that differ |
++|---|---|---|---|---|
++| T01 | acc | A84 vs A83 | bit-identical |  |
++| T01 | dg2 | A84 vs A83 | bit-identical |  |
++| T01 | fv1 | A84 vs A83 | bit-identical |  |
++| T01 | fv2 | A84 vs A83 | bit-identical |  |
++| T02 | acc | A84 vs A83 | bit-identical |  |
++| T02 | dg2 | A84 vs A83 | same except .mass |  |
++| T02 | fv1 | A84 vs A83 | bit-identical |  |
++| T02 | fv2 | A84 vs A83 | same except .mass |  |
++| T030 | acc | A84 vs A83 | bit-identical |  |
++| T030 | dg2 | A84 vs A83 | bit-identical |  |
++| T030 | fv1 | A84 vs A83 | bit-identical |  |
++| T030 | fv2 | A84 vs A83 | bit-identical |  |
++| T031 | acc | A84 vs A83 | bit-identical |  |
++| T031 | dg2 | A84 vs A83 | same except .mass |  |
++| T031 | fv1 | A84 vs A83 | same except .mass |  |
++| T031 | fv2 | A84 vs A83 | same except .mass |  |
++| T03 | acc | A84 vs A83 | bit-identical |  |
++| T03 | dg2 | A84 vs A83 | same except .mass |  |
++| T03 | fv1 | A84 vs A83 | bit-identical |  |
++| T03 | fv2 | A84 vs A83 | same except .mass |  |
+diff --git a/tests_8.4/acc_nugrid.py b/tests_8.4/acc_nugrid.py
+new file mode 100644
+index 0000000..7f30a23
+--- /dev/null
++++ b/tests_8.4/acc_nugrid.py
+@@ -0,0 +1,252 @@
++#!/usr/bin/env python3
++"""CUDA acc_nugrid loss checks. Run on a GPU node:
++
++    python3 acc_nugrid.py BIN84 BIN83 WORK
++
++Checks analytic constant-rate, grid, evaporation and Green-Ampt losses,
++spatial orientation, NoData/padding, repeatability and feature-off equality.
++No third-party Python packages are required.
++"""
++import csv
++import math
++from pathlib import Path
++import subprocess
++import sys
++
++
++N = 32  # The legacy traversal needs N*N/4 >= one 256-thread block.
++CELL = 27000  # Large cells allow short analytic tests to use long CFL steps.
++AREA = CELL**2
++
++
++def raster(path, rows):
++    path.write_text(
++        f'ncols {len(rows[0])}\nnrows {len(rows)}\nxllcorner 0\nyllcorner 0\n'
++        f'cellsize {CELL}\nNODATA_value -9999\n'
++        + '\n'.join(' '.join(map(str, row)) for row in rows) + '\n')
++
++
++def main():
++    binary, reference, work = map(lambda x: Path(x).resolve(), sys.argv[1:4])
++    reuse = '--reuse' in sys.argv[4:]
++    work.mkdir(parents=True, exist_ok=True)
++    dem = [[.02 if (x+y) % 2 else 0 for x in range(N)] for y in range(N)]
++    start = [[.1-dem[y][x] for x in range(N)] for y in range(N)]
++    raster(work/'dem.asc', dem)
++    raster(work/'dem.asc1x', [[0]*N for _ in range(N)])
++    raster(work/'dem.asc1y', [[0]*N for _ in range(N)])
++    raster(work/'start.asc', start)
++    raster(work/'rate.asc', [[3.6]*N for _ in range(N)])
++    raster(work/'north_rate.asc', [[1800 if y < N//2 else 0 for _ in range(N)]
++                                   for y in range(N)])
++    for name, value in [('ks', 10), ('psi', 110), ('porosity', .43), ('theta', .2)]:
++        raster(work/(name+'.asc'), [[value]*N for _ in range(N)])
++    mask = [[-9999 if 12 <= x < 20 and 12 <= y < 20 else dem[y][x]
++             for x in range(N)] for y in range(N)]
++    mask_start = [[0 if mask[y][x] == -9999 else .1-mask[y][x]
++                   for x in range(N)] for y in range(N)]
++    raster(work/'mask.asc', mask)
++    raster(work/'mask.asc1x', [[0]*N for _ in range(N)])
++    raster(work/'mask.asc1y', [[0]*N for _ in range(N)])
++    raster(work/'mask_start.asc', mask_start)
++    rect = [[.02 if (x+y) % 2 else 0 for x in range(16)] for y in range(8)]
++    raster(work/'rect.asc', rect)
++    raster(work/'rect.asc1x', [[0]*16 for _ in range(8)])
++    raster(work/'rect.asc1y', [[0]*16 for _ in range(8)])
++    rect_start = [[.1-rect[y][x] for x in range(16)] for y in range(8)]
++    raster(work/'rect_start.asc', rect_start)
++    coarse = [[0 for _ in range(N)] for _ in range(N)]
++    coarse_start = [[.1-coarse[y][x] for x in range(N)] for y in range(N)]
++    raster(work/'coarse.asc', coarse)
++    raster(work/'coarse.asc1x', [[0]*N for _ in range(N)])
++    raster(work/'coarse.asc1y', [[0]*N for _ in range(N)])
++    raster(work/'coarse_start.asc', coarse_start)
++    (work/'evap.dat').write_text('Evaporation\n2 days\n86.4 0\n86.4 10\n')
++    (work/'stage.txt').write_text(
++        f'2\n{CELL/2} {CELL/2}\n{CELL/2} {31*CELL+CELL/2}\n')
++
++    ga = ('infiltration greenampt\ngreenampt_ks 10\ngreenampt_psi 110\n'
++          'greenampt_porosity .43\ngreenampt_theta_init .2\n')
++    cases = {
++        'off': ('dem.asc', 'start.asc', '', 3600),
++        'constant': ('dem.asc', 'start.asc', 'infiltration .000001\n', 3600),
++        'grid': ('dem.asc', 'start.asc', 'infilfile rate.asc\n', 3600),
++        'evap': ('dem.asc', 'start.asc', 'evaporation evap.dat\n', 3600),
++        'orient': ('dem.asc', 'start.asc', 'infilfile north_rate.asc\n', 60),
++        'ga': ('dem.asc', 'start.asc', ga, 3600),
++        'ga_grid': ('dem.asc', 'start.asc',
++                    'infiltration greenampt\ngreenampt_ks ks.asc\n'
++                    'greenampt_psi psi.asc\ngreenampt_porosity porosity.asc\n'
++                    'greenampt_theta_init theta.asc\n', 3600),
++        'cap': ('dem.asc', 'start.asc', ga+'greenampt_soil_depth .2\n', 86400),
++        'mask': ('mask.asc', 'mask_start.asc', 'infiltration .000001\n', 3600),
++        'rectangle': ('rect.asc', 'rect_start.asc', 'infiltration .000001\n', 3600),
++        'compressed': ('coarse.asc', 'coarse_start.asc', 'infiltration .000001\n', 3600),
++        'dry': ('dem.asc', 'start.asc', 'infiltration .001\n', 600),
++    }
++    failures = []
++
++    def check(ok, text):
++        print(('PASS ' if ok else 'FAIL ') + text, flush=True)
++        if not ok:
++            failures.append(text)
++
++    def run(name, epsilon, exe, label):
++        out = work/label
++        if out.exists():
++            if reuse and (out/'r.mass').exists():
++                check(True, label+' reuses completed outputs')
++                return out
++            raise RuntimeError('Refusing to overwrite '+str(out))
++        out.mkdir()
++        dem, start, losses, duration = cases[name]
++        par = work/(label+'.par')
++        par.write_text(
++            f'DEMfile {dem}\nstartfile {start}\nstagefile stage.txt\nresroot r\ndirroot {label}\n'
++            f'acc_nugrid\ncuda\nL 5\nepsilon {epsilon}\n'
++            f'initial_tstep {min(3600, duration)}\nsim_time {duration}\nsaveint {duration}\n'
++            f'massint {min(600, duration)}\n'
++            'fpfric .06\nelevoff\nvoutput_stage\noutput_precision 9\n' + losses)
++        with (out/'run.log').open('w') as log:
++            result = subprocess.run([str(exe), str(par)], cwd=work, stdout=log,
++                                    stderr=subprocess.STDOUT, timeout=180)
++        check(result.returncode == 0, label+f' exits successfully (rc={result.returncode})')
++        return out
++
++    def last_loss(out):
++        rows = list(csv.DictReader((out/'r.loss').open()))
++        return rows, rows[-1]
++
++    epsilon_arg = next((arg for arg in sys.argv[4:] if not arg.startswith('--')), None)
++    epsilons = [float(epsilon_arg)] if epsilon_arg is not None else [0, .001]
++    for epsilon in epsilons:
++        prefix = f'acc_nugrid_{epsilon:g}'
++        results = {}
++        for name in cases:
++            out = run(name, epsilon, binary, prefix+'_'+name)
++            results[name] = out
++            if name == 'off':
++                continue
++            rows, last = last_loss(out)
++            loss = float(last['loss_volume'])
++            water = float(last['water_volume'])
++            elapsed = float(last['integrated_time'])
++            cells = 128 if name == 'rectangle' else N*N-64 if name == 'mask' else N*N
++            if name == 'rectangle':
++                initial = sum(map(sum, rect_start))*AREA
++            elif name == 'mask':
++                initial = sum(map(sum, mask_start))*AREA
++            elif name == 'compressed':
++                initial = sum(map(sum, coarse_start))*AREA
++            else:
++                initial = sum(map(sum, start))*AREA
++            check(math.isfinite(loss) and math.isfinite(water) and loss >= 0 and water >= 0,
++                  prefix+'_'+name+' finite nonnegative volumes')
++            check(abs(water+loss-initial)/initial < 3e-5,
++                  prefix+'_'+name+f' closed volume balance ({abs(water+loss-initial)/initial:.3g})')
++            if name in ('constant', 'grid', 'evap', 'mask', 'rectangle', 'compressed'):
++                expected = cells*AREA*1e-6*elapsed
++                check(abs(loss-expected)/max(expected, 1) < 3e-5,
++                      prefix+'_'+name+' analytic loss')
++            if name == 'orient':
++                expected = (N*N//2)*AREA*.0005*elapsed
++                check(abs(loss-expected)/expected < 3e-5,
++                      prefix+' north/south raster orientation')
++                numeric = []
++                for line in (out/'r.stage').read_text().splitlines():
++                    fields = line.split()
++                    try:
++                        numeric.append([float(value) for value in fields])
++                    except ValueError:
++                        pass
++                bottom, top = numeric[-1][1:3]
++                check(abs(bottom-.08) < 6e-5 and abs(top-.07) < 6e-5,
++                      prefix+' north/south losses reach the intended cells')
++            if name == 'compressed':
++                vtk = next(out.glob('r-*.vtk'))
++                points = next(line for line in vtk.read_text().splitlines()
++                              if line.startswith('POINTS '))
++                elements = int(points.split()[1])//4
++                if epsilon > 0:
++                    check(0 < elements < N*N, prefix+' losses run on a compressed mesh')
++                else:
++                    check(elements == N*N, prefix+' zero threshold retains the finest mesh')
++            if name == 'cap':
++                expected = cells*AREA*.046
++                check(abs(loss-expected)/expected < 3e-5,
++                      prefix+' Green-Ampt soil cap is 46 mm')
++            if name == 'dry':
++                check(water/(cells*AREA) <= .00101, prefix+' dry case stops at threshold or zero')
++
++        for a, b in [('constant', 'grid'), ('ga', 'ga_grid')]:
++            _, ar = last_loss(results[a])
++            _, br = last_loss(results[b])
++            check(ar == br, prefix+f' {a} == {b}')
++
++        old = run('off', epsilon, reference, prefix+'_off83')
++        new_files = {p.name: p.read_bytes() for p in results['off'].glob('r.*')}
++        old_files = {p.name: p.read_bytes() for p in old.glob('r.*')}
++        exact_names = new_files.keys() - {'r.max'}
++        exact = new_files.keys() == old_files.keys() and all(
++            new_files[name] == old_files[name] for name in exact_names)
++        def raster_values(path):
++            return [float(value) for line in path.read_text().splitlines()[6:]
++                    for value in line.split()]
++        new_max = raster_values(results['off']/'r.max')
++        old_max = raster_values(old/'r.max')
++        max_error = max(abs(a-b) for a, b in zip(new_max, old_max))
++        check(exact and len(new_max) == len(old_max) and max_error < 3e-9,
++              prefix+f' feature off matches 8.3 numerically (max depth error {max_error:.3g} m)')
++
++        repeat = run('cap', epsilon, binary, prefix+'_repeat')
++        cap_files = {p.name: p.read_bytes() for p in results['cap'].glob('r.*')
++                     if p.name != 'r.loss'}
++        repeat_files = {p.name: p.read_bytes() for p in repeat.glob('r.*')
++                        if p.name != 'r.loss'}
++        check(cap_files == repeat_files,
++              prefix+' repeat physical outputs are byte-identical')
++        cap_rows, _ = last_loss(results['cap'])
++        repeat_rows, _ = last_loss(repeat)
++        diagnostic_error = max(
++            abs(float(a[key])-float(b[key]))
++            for a, b in zip(cap_rows, repeat_rows)
++            for key in ('loss_volume', 'water_volume'))
++        check(len(cap_rows) == len(repeat_rows)
++              and all(a['time'] == b['time']
++                      and a['integrated_time'] == b['integrated_time']
++                      for a, b in zip(cap_rows, repeat_rows))
++              and diagnostic_error <= 1e-5,
++              prefix+f' repeat diagnostics agree ({diagnostic_error:.3g} m3 maximum difference)')
++
++    guard = work/'guard'
++    guard.mkdir(exist_ok=reuse)
++    guard_par = work/'guard.par'
++    guard_par.write_text(
++        'DEMfile dem.asc\nstartfile start.asc\nstagefile stage.txt\nresroot r\ndirroot guard\nacc_nugrid\n'
++        'cuda\nL 4\nepsilon 0\ninitial_tstep 60\nsim_time 60\n'
++        'massint 60\nsaveint 60\nfpfric .06\nelevoff\ninfiltration .000001\n')
++    result = subprocess.run([str(binary), str(guard_par)], cwd=work,
++                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
++    check(result.returncode != 0 and 'L >= 5' in result.stdout,
++          'small-tree loss run is rejected')
++
++    no_velocity = work/'no_velocity'
++    no_velocity.mkdir(exist_ok=reuse)
++    no_velocity_par = work/'no_velocity.par'
++    no_velocity_par.write_text(
++        'DEMfile dem.asc\nstartfile start.asc\nstagefile stage.txt\nresroot r\n'
++        'dirroot no_velocity\nacc_nugrid\ncuda\nL 5\nepsilon 0\ninitial_tstep 60\n'
++        'sim_time 60\nmassint 60\nsaveint 60\nfpfric .06\nelevoff\n'
++        'infiltration .000001\n')
++    with (no_velocity/'run.log').open('w') as log:
++        result = subprocess.run([str(binary), str(no_velocity_par)], cwd=work,
++                                stdout=log, stderr=subprocess.STDOUT, timeout=180)
++    check(result.returncode == 0 and (no_velocity/'r.loss').exists(),
++          'stage output without velocity closes files safely')
++
++    print(f'{len(failures)} failures', flush=True)
++    return bool(failures)
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/tests_8.4/adaptive.py b/tests_8.4/adaptive.py
+new file mode 100644
+index 0000000..5ab3133
+--- /dev/null
++++ b/tests_8.4/adaptive.py
+@@ -0,0 +1,145 @@
++#!/usr/bin/env python3
++"""CUDA adaptive loss checks. Run on a GPU node:
++
++    python3 adaptive.py BIN84 BIN83 WORK
++
++Uses new output folders only. Checks closed-basin analytic losses, file versus
++uniform parameters, changing meshes, conservation, repeatability, and 8.3
++feature-off equality. No third-party Python packages are required.
++"""
++import csv
++import math
++from pathlib import Path
++import subprocess
++import sys
++
++
++N = 32  # Tree traversal requires at least one full block (N*N/4 >= 256).
++
++def raster(path, rows):
++    path.write_text(f'ncols {len(rows[0])}\nnrows {len(rows)}\nxllcorner 0\nyllcorner 0\ncellsize 270\nNODATA_value -9999\n'
++                    + '\n'.join(' '.join(map(str, row)) for row in rows) + '\n')
++
++
++def values(path):
++    return [float(x) for x in ' '.join(path.read_text().splitlines()[6:]).split()]
++
++
++def main():
++    binary, reference, work = map(lambda x: Path(x).resolve(), sys.argv[1:])
++    work.mkdir(parents=True, exist_ok=True)
++    raster(work/'dem.asc', [[0]*N for _ in range(N)])
++    raster(work/'start.asc', [[.1]*N for _ in range(N)])
++    raster(work/'bump.asc', [[.1+.05*math.sin(math.pi*x/(N-1))**2*math.sin(math.pi*y/(N-1))**2
++                            for x in range(N)] for y in range(N)])
++    for name, v in [('rate', 3.6), ('ks', 10), ('psi', 110), ('porosity', .43), ('theta', .2)]:
++        raster(work/(name+'.asc'), [[v]*N for _ in range(N)])
++    raster(work/'rect_dem.asc', [[0]*(N//2) for _ in range(N//4)])
++    raster(work/'rect_start.asc', [[.1]*(N//2) for _ in range(N//4)])
++    raster(work/'mask_dem.asc', [[-9999 if 12<=x<20 and 12<=y<20 else 0 for x in range(N)] for y in range(N)])
++    raster(work/'mask_start.asc', [[0 if 12<=x<20 and 12<=y<20 else .1 for x in range(N)] for y in range(N)])
++    # Different rates above and below the midline detect the adaptive/raster y flip.
++    raster(work/'half.asc', [[3.6 if y<N//2 else 0]*N for y in range(N)])
++    (work/'evap.dat').write_text('Evaporation\n2 days\n3.6 0\n3.6 10\n')
++    ga = 'infiltration greenampt\ngreenampt_ks 10\ngreenampt_psi 110\ngreenampt_porosity .43\ngreenampt_theta_init .2\n'
++    cases = {
++        'off': '', 'moving_off': '', 'constant': 'infiltration .000001\n', 'grid': 'infilfile rate.asc\n',
++        'evap': 'evaporation evap.dat\n', 'half': 'infilfile half.asc\n',
++        'ga': ga, 'ga_grid': 'infiltration greenampt\ngreenampt_ks ks.asc\ngreenampt_psi psi.asc\ngreenampt_porosity porosity.asc\ngreenampt_theta_init theta.asc\n',
++        'cap': ga+'greenampt_soil_depth .2\n',
++        'moving_cap': ga+'greenampt_soil_depth .2\n',
++        'rectangle_off': '', 'rectangle': 'infiltration .000001\n', 'mask_off': '', 'mask': 'infiltration .000001\n',
++        'dry': 'infiltration .001\n',
++    }
++    failures = []
++    def check(ok, text):
++        print(('PASS ' if ok else 'FAIL ')+text, flush=True)
++        if not ok: failures.append(text)
++
++    def run(solver, name, epsilon, exe, label):
++        out = work/label
++        if out.exists(): raise RuntimeError('Refusing to overwrite '+str(out))
++        out.mkdir()
++        start = 'bump.asc' if name in ['moving_cap', 'moving_off'] else 'start.asc'
++        dem = 'dem.asc'
++        if name.startswith('rectangle'): dem, start = 'rect_dem.asc', 'rect_start.asc'
++        if name.startswith('mask'): dem, start = 'mask_dem.asc', 'mask_start.asc'
++        par = work/(label+'.par')
++        par.write_text(f'DEMfile {dem}\nstartfile {start}\nresroot r\ndirroot {label}\n'
++                       f'{solver}\ncuda\nmax_ref_lvl 5\nepsilon {epsilon}\nwall_height 25\n'
++                       'initial_tstep 60\nsim_time 86400\nsaveint 21600\nmassint 3600\n'
++                       'fpfric .06\nraster_out\ncumulative\nqoutput\nelevoff\n'+cases[name])
++        if name=='half':
++            par.write_text(par.read_text().replace('sim_time 86400', 'sim_time 3600').replace('saveint 21600', 'saveint 900').replace('massint 3600', 'massint 150'))
++        with (out/'run.log').open('w') as log:
++            result = subprocess.run([str(exe), str(par)], cwd=work, stdout=log, stderr=subprocess.STDOUT, timeout=180)
++        check(result.returncode==0, label+f' exits successfully (rc={result.returncode})')
++        grids = sorted(out.glob('r-*.wd'), key=lambda p:int(p.stem.split('-')[-1]))
++        if not grids: raise RuntimeError('No grids in '+str(out))
++        return out, grids
++
++    def physical(path, name):
++        data = values(path)
++        if name.startswith('mask'):
++            data = [v for i,v in enumerate(data) if not (12<=i%N<20 and 12<=i//N<20)]
++        return data
++
++    area = 270**2
++    for solver in ['hwfv1', 'mwdg2']:
++        for epsilon in [0, .001]:
++            prefix = f'{solver}_{epsilon}'
++            results = {}
++            for name in cases:
++                if solver=='mwdg2' and name.startswith(('rectangle','mask')): continue
++                out, grids = run(solver, name, epsilon, binary, prefix+'_'+name)
++                results[name] = (out, grids)
++                final = physical(grids[-1], name)
++                check(all(math.isfinite(v) and v>=-1e-7 for v in final), prefix+'_'+name+' nonnegative finite depths')
++                if not cases[name]: continue
++                rows = list(csv.DictReader((out/'r.loss').open()))
++                initial = sum(physical(grids[0], name))*area + float(rows[0]['loss_volume'])
++                error = max(abs(float(r['water_volume'])+float(r['loss_volume'])-initial) for r in rows)
++                if name not in ['moving_cap', 'rectangle', 'mask']:
++                    check(error/initial < 3e-4, prefix+'_'+name+f' closed volume balance ({error/initial:.3g})')
++                else:
++                    baseline = 'moving_off' if name=='moving_cap' else name+'_off'
++                    before = physical(results[baseline][1][0], baseline)
++                    initial_off = sum(before)*area
++                    reference_drift = max(abs(sum(physical(g, baseline))*area-initial_off) for g in results[baseline][1])/initial_off
++                    check(error/initial <= 1.5*reference_drift+3e-4, prefix+f' {name} balance vs loss-free solver (loss={error/initial:.3g}, reference={reference_drift:.3g})')
++                if name in ['rectangle', 'mask']:
++                    expected_loss = 1e-6*float(rows[-1]['integrated_time'])
++                    check(abs(float(rows[-1]['loss_volume'])/(len(final)*area)-expected_loss)<3e-5, prefix+'_'+name+' loss excludes padding/NoData')
++                if name in ['constant', 'grid', 'evap']:
++                    rate = 1e-6 if name!='evap' else 3.6/86400000
++                    expected = .1-rate*float(rows[-1]['integrated_time'])
++                    check(max(abs(h-expected) for h in final)<3e-5, prefix+'_'+name+' analytic depth')
++                if name=='cap':
++                    check(max(abs(h-.054) for h in final)<3e-5, prefix+' cap stops at 46 mm')
++                if name=='dry':
++                    check(max(final)<=.0011, prefix+' drains to dry threshold')
++                if name=='half':
++                    check(sum(final[:N*N//4]) < sum(final[-N*N//4:])-.1, prefix+' raster north/south rates have correct orientation')
++                if name in ['moving_cap', 'moving_off']:
++                    loss = float(rows[-1]['loss_volume'])
++                    check(abs(loss/(N*N*area)-.046)<3e-5, prefix+' moving mesh retains soil cap')
++                    cumu = list(csv.DictReader((out/'r.cumu').open()))
++                    mesh = {r['reduction'] for r in cumu}
++                    if epsilon:
++                        check(len(mesh)>1, prefix+' mesh changes during moving test')
++            for a,b in [('constant','grid'), ('ga','ga_grid')]:
++                check([p.read_bytes() for p in results[a][1]]==[p.read_bytes() for p in results[b][1]], prefix+f' {a} == {b}')
++            old, old_grids = run(solver, 'off', epsilon, reference, prefix+'_off83')
++            check([p.read_bytes() for p in old_grids]==[p.read_bytes() for p in results['off'][1]], prefix+' off == 8.3 depth grids')
++            for suffix in ['qx','qy']:
++                check([p.read_bytes() for p in sorted(old.glob('*.'+suffix))]==[p.read_bytes() for p in sorted(results['off'][0].glob('*.'+suffix))], prefix+' off == 8.3 '+suffix)
++            old_moving, old_moving_grids = run(solver, 'moving_off', epsilon, reference, prefix+'_moving83')
++            check([p.read_bytes() for p in old_moving_grids]==[p.read_bytes() for p in results['moving_off'][1]], prefix+' moving off == 8.3 depth grids')
++            repeat, repeat_grids = run(solver, 'moving_cap', epsilon, binary, prefix+'_repeat')
++            check([p.read_bytes() for p in repeat_grids]==[p.read_bytes() for p in results['moving_cap'][1]], prefix+' repeat grids identical')
++    print(f'{len(failures)} failures', flush=True)
++    return bool(failures)
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/tests_8.4/adaptive_sources.py b/tests_8.4/adaptive_sources.py
+new file mode 100644
+index 0000000..3a902f4
+--- /dev/null
++++ b/tests_8.4/adaptive_sources.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python3
++"""Check adaptive depth carry-over with point sources and a zero loss rate.
++Run on a GPU node: python3 adaptive_sources.py BIN84 BIN83 WORK (new WORK only).
++"""
++import csv
++from pathlib import Path
++import subprocess
++import sys
++from adaptive import N, raster, values
++
++binary, reference, work = [Path(p).resolve() for p in sys.argv[1:]]
++work.mkdir(parents=True, exist_ok=False)
++raster(work/'dem.asc', [[0]*N for _ in range(N)])
++raster(work/'start.asc', [[.1]*N for _ in range(N)])
++(work/'source.bci').write_text('P 4455 4455 QFIX .1\n')
++failed = 0
++for solver in ['hwfv1', 'mwdg2']:
++    for epsilon in [0, .001]:
++        label = f'{solver}_{epsilon}'
++        par = work/(label+'.par')
++        par.write_text(f'DEMfile dem.asc\nstartfile start.asc\nbcifile source.bci\n'
++                       f'dirroot {label}\nresroot r\n{solver}\ncuda\nmax_ref_lvl 5\n'
++                       f'epsilon {epsilon}\nwall_height 25\ninitial_tstep 60\n'
++                       'sim_time 3600\nsaveint 900\nmassint 150\nfpfric .06\n'
++                       'raster_out\ncumulative\nelevoff\ninfiltration 0\n')
++        with (work/(label+'.log')).open('w') as log:
++            rc = subprocess.run([str(binary), par.name], cwd=work, stdout=log,
++                                stderr=subprocess.STDOUT, timeout=120).returncode
++        rows = list(csv.DictReader((work/label/'r.loss').open())) if rc==0 else []
++        error = float('inf')
++        if rows:
++            initial = float(rows[0]['water_volume'])
++            t0 = float(rows[0]['integrated_time'])
++            error = max(abs(float(r['water_volume'])-initial-.1*270*(float(r['integrated_time'])-t0)) for r in rows)/initial
++        old_label = label+'_83'
++        with (work/(old_label+'.log')).open('w') as log:
++            old_rc = subprocess.run([str(reference), '-dirroot', old_label, par.name], cwd=work,
++                                    stdout=log, stderr=subprocess.STDOUT, timeout=120).returncode
++        old_grids = sorted((work/old_label).glob('r-*.wd'), key=lambda p:int(p.stem.split('-')[-1]))
++        difference = float('inf')
++        old_error = float('inf')
++        if rows and old_rc==0 and old_grids:
++            old_water = sum(values(old_grids[-1]))*270**2
++            difference = abs(float(rows[-1]['water_volume'])-old_water)/initial
++            old_error = abs(old_water-initial-.1*270*(float(rows[-1]['integrated_time'])-t0))/initial
++        ok = rc==0 and old_rc==0 and difference<3e-4
++        failed += not ok
++        print(('PASS ' if ok else 'FAIL ')+f'{label} point-source volume agrees with 8.3 (difference={difference:.3g}; balance error new={error:.3g}, reference={old_error:.3g})', flush=True)
++# A small padded mesh must fail clearly before entering legacy tree traversal.
++small = work/'small.par'
++small.write_text(par.read_text().replace('max_ref_lvl 5','max_ref_lvl 4').replace(f'dirroot {label}','dirroot small'))
++result = subprocess.run([str(binary), small.name], cwd=work, capture_output=True, text=True, timeout=30)
++ok = result.returncode!=0 and 'max_ref_lvl >= 5' in result.stderr
++failed += not ok
++print(('PASS ' if ok else 'FAIL ')+'unsupported padded mesh rejected clearly', flush=True)
++print(f'{failed} failures', flush=True)
++sys.exit(bool(failed))
+diff --git a/tests_8.4/check.py b/tests_8.4/check.py
+new file mode 100755
+index 0000000..0a91682
+--- /dev/null
++++ b/tests_8.4/check.py
+@@ -0,0 +1,313 @@
++#!/usr/bin/env python3
++"""Check the 8.4 tests run by run_tests.sh (Python 3, no packages).
++
++    check.py WORK
++
++Prints one line per check, PASS or FAIL, and ends with ALL PASSED or the
++number of failures.
++"""
++import bisect
++import filecmp
++import glob
++import math
++import os
++import sys
++
++WORK = os.path.abspath(sys.argv[1])
++OUT = os.path.join(WORK, "out")
++failures = 0
++
++
++def report(ok, text):
++    global failures
++    failures += 0 if ok else 1
++    print(("PASS  " if ok else "FAIL  ") + text)
++
++
++def grid(path):
++    with open(path) as f:
++        for _ in range(6):
++            f.readline()
++        return [[float(v) for v in row.split()] for row in f if row.strip()]
++
++
++def wd(run, k):
++    p = glob.glob(os.path.join(OUT, run, f"*-{k:04d}.wd"))
++    return grid(p[0]) if p else None
++
++
++def mass(run):
++    """rows of the .mass file as lists of floats"""
++    p = glob.glob(os.path.join(OUT, run, "*.mass"))
++    if not p:
++        return []
++    return [[float(v) for v in l.split()] for l in open(p[0]).readlines()[1:] if l.strip()]
++
++
++TOL = 2e-6       # m: two units of the last written digit (output_precision 6)
++THRESH = 0.001   # m: DepthThresh; shallower cells lose nothing (CPU rule)
++
++
++# CUDA FV2 and DG2 hold the bed elevation in single precision as it is (20 m
++# here, where one unit of the last digit is 1.9 um, about one step's loss), so
++# the per-cell rounding of the loss makes small false water-surface slopes and
++# some water moves: up to 0.2 % of the loss (README_8.4.md). With the same DEM
++# lowered to 0 m they remove exactly rate x dt, as FV1 and ACC do; the Metal
++# solvers shift the DEM to its lowest cell and are exact.
++FV2_DG2_REL = 3e-3
++
++
++def tol_for(run, h0, expected):
++    """depth tolerance: two units of the last written digit; CUDA FV2 and DG2:
++    0.3 % of the expected loss (see FV2_DG2_REL)"""
++    if "fv2" in run or "dg2" in run:
++        return max(TOL, FV2_DG2_REL * (h0 - expected))
++    return TOL
++
++
++def steps(run):
++    """(t, dt) of every time step, from the run.log of a run with -v"""
++    out = []
++    for l in open(os.path.join(OUT, run, "run.log")):
++        if l.startswith("t="):
++            a, b = l.split()
++            out.append((float(a[2:]), float(b[3:])))
++    return out
++
++
++def exact_depth(run, k, h0, rate, save_interval, fv1):
++    """depth after the step at which output k is written, from the steps the
++    model took: sum of rate x dt. (The model's clock is single precision and
++    falls behind the sum of the steps on long runs, so the analytic
++    h0 - rate x t at the clock time is not the right reference.) The CUDA
++    FV1 solver evaluates the rate at the end of a step, ACC at its start."""
++    st = steps(run)
++    ends = [t + dt for t, dt in st]
++    i = min(bisect.bisect_left(ends, k * save_interval - 1e-3), len(st) - 1)
++    lost = sum(rate(t + dt if fv1 else t) * dt for t, dt in st[:i + 1])
++    return h0 - lost
++
++
++def check_depth(run, k, expected, tol, cols=None, label=""):
++    g = wd(run, k)
++    if g is None:
++        report(False, f"{run}: output {k} missing")
++        return
++    vals = [row[i] for row in g for i in (cols or range(len(row)))]
++    err = max(abs(v - expected) for v in vals)
++    report(err <= tol, f"{run}: depth at output {k}{label} = {expected:.4f} m "
++                       f"(largest error {1000 * err:.4f} mm)")
++
++
++def check_dry(run, k, cols=None, label=""):
++    g = wd(run, k)
++    if g is None:
++        report(False, f"{run}: output {k} missing")
++        return
++    vals = [row[i] for row in g for i in (cols or range(len(row)))]
++    report(all(0.0 <= v <= THRESH for v in vals),
++           f"{run}: depth at output {k}{label} between 0 and the {1000 * THRESH:g} mm "
++           f"threshold (range {1000 * min(vals):.4f} to {1000 * max(vals):.4f} mm)")
++
++
++def grid_volume(run, k, area=270.0 * 270.0):
++    g = wd(run, k)
++    return None if g is None else sum(map(sum, g)) * area
++
++
++def start_volume(start_file, area=270.0 * 270.0):
++    return sum(map(sum, grid(os.path.join(WORK, "t012", start_file)))) * area
++
++
++def same_files(a, b, pattern="*"):
++    fa = sorted(os.path.basename(p) for p in glob.glob(os.path.join(OUT, a, pattern))
++                if not p.endswith("run.log"))
++    fb = sorted(os.path.basename(p) for p in glob.glob(os.path.join(OUT, b, pattern))
++                if not p.endswith("run.log"))
++    if not fa or fa != fb:
++        return False, "different file lists"
++    diff = [f for f in fa if not filecmp.cmp(os.path.join(OUT, a, f), os.path.join(OUT, b, f), shallow=False)]
++    return not diff, (f"{len(fa)} files identical" if not diff else "differ: " + ", ".join(diff[:5]))
++
++
++def check_mass(run, label, start_file, verror=True):
++    """removed volume (last .mass column) against the depth grids; Verror
++    after the first row (the GPU's first row always shows the whole volume,
++    as in 8.3; FV1's .mass volume includes the ghost cells, so its Verror is
++    only reported)"""
++    m = mass(run)
++    outs = glob.glob(os.path.join(OUT, run, "*-[0-9][0-9][0-9][0-9].wd"))
++    if not outs:
++        report(False, f"{run}: no outputs")
++        return
++    last = max(int(p[-7:-3]) for p in outs)
++    v0, v2 = start_volume(start_file), grid_volume(run, last)
++    if not m or v0 is None or v2 is None:
++        report(False, f"{run}: .mass or outputs missing")
++        return
++    lost, gone = -m[-1][11], v0 - v2
++    verr = max(abs(r[10]) for r in m[1:])
++    rel = FV2_DG2_REL if ("fv2" in run or "dg2" in run) else 1e-3
++    ok = abs(lost - gone) <= rel * gone and (not verror or verr <= 1e-3 * gone)
++    report(ok, f"{run}: {label}volume removed {lost:.1f} m3, depth grids lost {gone:.1f} m3, "
++               f"largest |Verror| after the first row {verr:.3g} m3"
++               + ("" if verror else " (not checked: FV1 .mass volume includes ghost cells)"))
++
++
++# ---------------------------------------------------------------- T012
++H0 = 0.4464
++T50, T100 = 4320000.0, 8640000.0
++RATE = 3.6 / 1000 / 86400 + 1e-8          # evaporation + infiltration, m/s
++START, WALL = "ETInfTest_start.ascii", "wall_start.ascii"
++if glob.glob(os.path.join(OUT, "t012_base_*")):
++    print("== T012: flat basin, 0.4464 m of water, 100 days")
++    print("   (expected depth: h0 minus the sum of rate x dt over the steps the model took)")
++    r = "t012_base_cpu_acc_84"   # CPU reference: its own clock, 1e-4 m tolerance
++    check_depth(r, 1, H0 - RATE * T50, 1e-4, label=" (50 days)")
++    check_dry(r, 2, label=" (100 days)")
++    check_mass(r, "", START)
++    GPU = [s for s in ("cuda_acc", "cuda_fv1", "cuda_fv2", "cuda_dg2")
++           if os.path.isdir(os.path.join(OUT, f"t012_base_{s}_84"))]
++    for s in GPU:
++        r = f"t012_base_{s}_84"
++        # FV1, FV2, DG2 apply the loss at the end of a step, ACC at its start;
++        # their .mass volume includes the ghost cells (Verror not checked)
++        end = (s != "cuda_acc")
++        e = exact_depth(r, 1, H0, lambda t: RATE, T50, end)
++        check_depth(r, 1, e, tol_for(r, H0, e), label=" (50 days)")
++        check_dry(r, 2, label=" (100 days)")
++        check_mass(r, "", START, verror=not end)
++    for s in ["cpu_acc"] + GPU:
++        if os.path.isdir(os.path.join(OUT, f"t012_off_{s}_84")):
++            check_depth(f"t012_off_{s}_84", 2, H0, TOL, label=" (no losses, 100 days)")
++    for s in GPU:
++        if os.path.isdir(os.path.join(OUT, f"t012_off_{s}_83")):
++            ok, msg = same_files(f"t012_off_{s}_84", f"t012_off_{s}_83")
++            report(ok, f"t012 off, {s}: 8.4 vs 8.3: {msg}")
++        if not os.path.isdir(os.path.join(OUT, f"t012_ramp_{s}_84")):
++            continue
++        fv1 = (s != "cuda_acc")
++        r = f"t012_ramp_{s}_84"   # evaporation 0 -> 7.2 mm/day (about 90 and 360 mm lost)
++        ramp = lambda t: 7.2 / 1000 / 86400 * t / T100
++        for k, label in ((1, " (ramp, 50 days)"), (2, " (ramp, 100 days)")):
++            e = exact_depth(r, k, H0, ramp, T50, fv1)
++            check_depth(r, k, e, tol_for(r, H0, e), label=label)
++        check_mass(r, "ramp: ", START, verror=not fv1)
++        r = f"t012_wall_{s}_84"   # 0.3 mm/h on the left half only
++        left = 0.3 / 1000 / 3600
++        e = exact_depth(r, 1, H0, lambda t: left, T50, fv1)
++        check_depth(r, 1, e, tol_for(r, H0, e), cols=range(4), label=" left half (50 days)")
++        check_dry(r, 2, cols=range(4), label=" left half (100 days)")
++        check_depth(r, 2, H0, TOL, cols=range(5, 10), label=" right half (100 days)")
++        check_mass(r, "wall: ", WALL, verror=not fv1)
++
++# ---------------------------------------------------------------- Green-Ampt
++GA_KS, GA_PSI, GA_DTH, GA_H0 = 10 / 3.6e6, 0.110, 0.23, 0.1
++
++
++def ga_stepped(run, k, cap=None, ks=GA_KS):
++    """depth after the step that writes output k (hourly), stepping Green-Ampt
++    exactly as the model does (implicit Euler with the logged steps)"""
++    st = steps(run)
++    ends = [t + dt for t, dt in st]
++    i = min(bisect.bisect_left(ends, k * 3600.0 - 1e-3), len(st) - 1)
++    F, h = 0.0, GA_H0
++    for _, dt in st[:i + 1]:
++        if h <= 0:
++            break
++        M = (GA_PSI + h) * GA_DTH
++        a = F + ks * dt
++        dF = 0.5 * (a + math.sqrt(a * a + 4 * ks * dt * M)) - F
++        if cap is not None:
++            dF = min(dF, max(cap - F, 0.0))
++        dF = min(dF, h)
++        F += dF
++        h -= dF
++    return h
++
++
++def ga_continuous(hours, cap=None, dt=0.25):
++    """depth of the pond from the continuous Green-Ampt equation (RK4)"""
++    f = lambda F: 0.0 if F >= GA_H0 or (cap is not None and F >= cap) else \
++        GA_KS * (1 + (GA_PSI + GA_H0 - F) * GA_DTH / F)
++    t, F, out = 1.0, math.sqrt(2 * GA_KS * (GA_PSI + GA_H0) * GA_DTH), {}
++    while t < max(hours) * 3600 - 1e-9:
++        k1 = f(F); k2 = f(F + dt / 2 * k1); k3 = f(F + dt / 2 * k2); k4 = f(F + dt * k3)
++        F = min(F + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4), GA_H0, cap if cap is not None else GA_H0)
++        t += dt
++        if abs(t / 3600 - round(t / 3600)) < 1e-9 and round(t / 3600) in hours:
++            out[round(t / 3600)] = GA_H0 - F
++    return out
++
++
++if glob.glob(os.path.join(OUT, "t012_ga_*")):
++    print("\n== Green-Ampt: flat basin, 0.1 m of water, Ks 10 mm/h, psi 110 mm, dtheta 0.23, 1 day")
++    hours = list(range(1, 25))
++    exact = ga_continuous(hours)
++    for s in ("cuda_fv1", "cuda_acc", "cuda_fv2", "cuda_dg2"):
++        r = f"t012_ga_pond_{s}_84"
++        if not os.path.isdir(os.path.join(OUT, r)):
++            continue
++        worst_step, worst_cont, ok = 0.0, 0.0, True
++        for k in hours:
++            g = wd(r, k)
++            if g is None:
++                ok = False
++                break
++            vals = [x for row in g for x in row]
++            e = ga_stepped(r, k)
++            err = max(abs(x - e) for x in vals)
++            ok = ok and err <= tol_for(r, GA_H0, e)
++            worst_step = max(worst_step, err)
++            worst_cont = max(worst_cont, max(abs(x - exact[k]) for x in vals))
++        report(ok, f"{r}: depth against Green-Ampt as stepped, 24 hourly outputs "
++               f"(largest error {1000 * worst_step:.4f} mm)")
++        report(worst_cont <= 6e-4, f"{r}: depth against the continuous Green-Ampt solution "
++               f"(largest difference {1000 * worst_cont:.3f} mm; 60 s steps)")
++        check_mass(r, "Green-Ampt: ", "ga_start.ascii", verror=(s == "cuda_acc"))
++        ok, msg = same_files(r, f"t012_ga_grid_{s}_84", "*-*")
++        report(ok, f"t012_ga_grid_{s}_84: parameters as grid files vs numbers: {msg}")
++        rc = f"t012_ga_cap_{s}_84"
++        last = wd(rc, 24)
++        if last is not None:
++            v = max(abs(x) for row in last for x in row)
++            report(abs(v - (GA_H0 - 0.2 * GA_DTH)) <= tol_for(rc, GA_H0, GA_H0 - 0.2 * GA_DTH),
++                   f"{rc}: soil depth 0.2 m stops infiltration at 46 mm: depth {v:.6f} m (expected 0.054000)")
++        rw = f"t012_ga_wall_{s}_84"
++        if os.path.isdir(os.path.join(OUT, rw)):
++            e = ga_stepped(rw, 3)
++            check_depth(rw, 3, e, tol_for(rw, GA_H0, e), cols=range(4), label=" left half, Ks 10 mm/h (3 h)")
++            check_depth(rw, 3, GA_H0, TOL, cols=range(5, 10), label=" right half, Ks 0 (3 h)")
++    rc = "t012_ga_conflict_cuda_fv1_84"
++    if os.path.isdir(os.path.join(OUT, rc)):
++        log = open(os.path.join(OUT, rc, "run.log")).read()
++        report("choose one infiltration model" in log and not glob.glob(os.path.join(OUT, rc, "*.wd")),
++               f"{rc}: both infiltration models in one file stop with an error")
++
++# ---------------------------------------------------------------- Alzette
++if glob.glob(os.path.join(OUT, "alz_*")):
++    print("\n== Alzette 10 m, 6 h")
++    for s in ("fv1", "acceleration"):
++        # output grids; the .mass flux columns vary in their last digit
++        # between any two GPU runs (8.3 alike), so the log is not compared
++        ok, msg = same_files(f"alz_off_{s}_84", f"alz_off_{s}_83", "*-*")
++        report(ok, f"alzette {s}, no losses: 8.4 vs 8.3, output grids: {msg}")
++    ok, msg = same_files("alz_uniform_fv1_84", "alz_grid_fv1_84", "*-*")
++    report(ok, f"alzette fv1: uniform 2 mm/h vs infilfile 2 mm/h: {msg}")
++    for s in ("fv1", "acceleration"):
++        off, inf = mass(f"alz_off_{s}_84"), mass(f"alz_uniform_{s}_84")
++        if off and inf:
++            lost = -inf[-1][11]
++            report(inf[-1][5] < off[-1][5] and lost > 0,
++                   f"alzette {s}: volume after 6 h {off[-1][5]:.4g} m3 without, "
++                   f"{inf[-1][5]:.4g} m3 with 2 mm/h; removed {lost:.4g} m3; "
++                   f"largest |Verror| {max(abs(r[10]) for r in off):.3g} without, "
++                   f"{max(abs(r[10]) for r in inf):.3g} with")
++    ev, un = mass("alz_evap_fv1_84"), mass("alz_uniform_fv1_84")
++    if ev and un:
++        report(-ev[-1][11] > -un[-1][11],
++               f"alzette fv1: with evaporation removed {-ev[-1][11]:.4g} m3 "
++               f"(infiltration only {-un[-1][11]:.4g} m3)")
++
++print("\nALL PASSED" if failures == 0 else f"\n{failures} FAILED")
++sys.exit(1 if failures else 0)
+diff --git a/tests_8.4/data/T012/ETInfTest_dtm.ascii b/tests_8.4/data/T012/ETInfTest_dtm.ascii
+new file mode 100644
+index 0000000..7bf990e
+--- /dev/null
++++ b/tests_8.4/data/T012/ETInfTest_dtm.ascii
+@@ -0,0 +1,11 @@
++ncols         10
++nrows         5
++xllcorner     0
++yllcorner     0
++cellsize      270
++NODATA_value  -9999
++20 20 20 20 20 20 20 20 20 20
++20 20 20 20 20 20 20 20 20 20
++20 20 20 20 20 20 20 20 20 20
++20 20 20 20 20 20 20 20 20 20
++20 20 20 20 20 20 20 20 20 20
+diff --git a/tests_8.4/data/T012/ETInfTest_evap.dat b/tests_8.4/data/T012/ETInfTest_evap.dat
+new file mode 100644
+index 0000000..14348c9
+--- /dev/null
++++ b/tests_8.4/data/T012/ETInfTest_evap.dat
+@@ -0,0 +1,4 @@
++Test evaporation - same value for full run
++2 days
++3.6 0
++3.6 100
+\ No newline at end of file
+diff --git a/tests_8.4/data/T012/ETInfTest_start.ascii b/tests_8.4/data/T012/ETInfTest_start.ascii
+new file mode 100644
+index 0000000..c5dec5d
+--- /dev/null
++++ b/tests_8.4/data/T012/ETInfTest_start.ascii
+@@ -0,0 +1,11 @@
++ncols         10
++nrows         5
++xllcorner     0
++yllcorner     0
++cellsize      270
++NODATA_value  -9999
++0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464
++0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464
++0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464
++0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464
++0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464 0.4464
+diff --git a/tests_8.4/make_inputs.py b/tests_8.4/make_inputs.py
+new file mode 100755
+index 0000000..e55440b
+--- /dev/null
++++ b/tests_8.4/make_inputs.py
+@@ -0,0 +1,160 @@
++#!/usr/bin/env python3
++"""Write the inputs and .par files of the 8.4 tests (Python 3, no packages).
++
++    make_inputs.py WORK [ALZETTE_PAR]
++
++WORK/t012/      T012 variants (see README_8.4.md)
++WORK/alzette/   Alzette 6 h variants, made from ALZETTE_PAR (the .par of the
++                paper's 24 h run, with absolute input paths)
++"""
++import os
++import struct
++import sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++WORK = os.path.abspath(sys.argv[1])
++T012 = os.path.join(HERE, "data", "T012")
++
++
++def f32(x):
++    """x rounded to single precision, written so that it reads back exactly"""
++    return "%.9g" % struct.unpack("f", struct.pack("f", x))[0]
++
++
++def grid(path, rows, header):
++    with open(path, "w") as f:
++        f.write(header)
++        for r in rows:
++            f.write(" ".join(r) + "\n")
++
++
++# ---------------------------------------------------------------- T012
++t = os.path.join(WORK, "t012")
++os.makedirs(t, exist_ok=True)
++header = ("ncols         10\nnrows         5\nxllcorner     0\nyllcorner     0\n"
++          "cellsize      270\nNODATA_value  -9999\n")
++for name in ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii", "ETInfTest_evap.dat"):
++    with open(os.path.join(T012, name)) as src, open(os.path.join(t, name), "w") as dst:
++        dst.write(src.read())
++
++# evaporation rising linearly from 0 to 7.2 mm/day over 100 days
++with open(os.path.join(t, "evap_ramp.dat"), "w") as f:
++    f.write("Evaporation rising linearly from 0 to 7.2 mm/day\n2 days\n0 0\n7.2 100\n")
++
++# a wall (column 5, 25 m) between two flat halves; infiltration 0.3 mm/h on the left
++grid(os.path.join(t, "wall_dtm.ascii"),
++     [["25" if i == 4 else "20" for i in range(10)] for _ in range(5)], header)
++grid(os.path.join(t, "wall_start.ascii"),
++     [["0" if i == 4 else "0.4464" for i in range(10)] for _ in range(5)], header)
++grid(os.path.join(t, "wall_infil.ascii"),
++     [["0.3" if i < 4 else "0" for i in range(10)] for _ in range(5)], header)
++
++# DG2 also reads the slopes of the DEM and of the start depth (<file>1x, 1y):
++# zero on these piecewise flat grids
++for name in ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii", "wall_dtm.ascii", "wall_start.ascii"):
++    for suffix in ("1x", "1y"):
++        grid(os.path.join(t, name + suffix), [["0"] * 10 for _ in range(5)], header)
++
++common = ("sim_time 8640000.0\nmassint 86400.0\nsaveint 4320000.0\n"
++          "fpfric 0.06\nelevoff\noutput_precision 6\n")
++fixed = "initial_tstep 86400.0\nadaptoff\n"   # as the original T012 (CPU ACC)
++adaptive = "initial_tstep 100.0\n"           # FV1: time step from the Courant number (~65 s)
++solvers = {
++    "cpu_acc": "acceleration\n" + fixed,
++    "cuda_acc": "acceleration\ncuda\n" + fixed,
++    "cuda_fv1": "fv1\ncuda\n" + adaptive,
++    "cuda_fv2": "fv2\ncuda\n" + adaptive,
++    "cuda_dg2": "dg2\ncuda\n" + adaptive,
++}
++cases = {
++    "base": ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii",
++             "evaporation ETInfTest_evap.dat\ninfiltration 0.00000001\n"),
++    "off": ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii", ""),
++    "ramp": ("ETInfTest_dtm.ascii", "ETInfTest_start.ascii", "evaporation evap_ramp.dat\n"),
++    "wall": ("wall_dtm.ascii", "wall_start.ascii", "infilfile wall_infil.ascii\n"),
++}
++for case, (dem, start, losses) in cases.items():
++    for solver, settings in solvers.items():
++        if case != "base" and solver == "cpu_acc" and case != "off":
++            continue  # the CPU reference is needed for the base case (and off)
++        with open(os.path.join(t, f"{case}_{solver}.par"), "w") as f:
++            f.write(f"DEMfile {dem}\nstartfile {start}\nresroot r\n"
++                    + common + settings + losses)
++
++# ---------------------------------------------------------------- Green-Ampt
++# flat closed basin (T012 grid), 0.1 m of water, loam-like soil, 1 day
++for name, rows in (("ga_start.ascii", [["0.1"] * 10 for _ in range(5)]),
++                   ("ga_wall_start.ascii", [["0" if i == 4 else "0.1" for i in range(10)] for _ in range(5)])):
++    grid(os.path.join(t, name), rows, header)
++    for suffix in ("1x", "1y"):
++        grid(os.path.join(t, name + suffix), [["0"] * 10 for _ in range(5)], header)
++for name, value in (("ga_ks.ascii", "10"), ("ga_psi.ascii", "110"),
++                    ("ga_por.ascii", "0.43"), ("ga_theta.ascii", "0.2")):
++    grid(os.path.join(t, name), [[value] * 10 for _ in range(5)], header)
++grid(os.path.join(t, "ga_ks_left.ascii"), [["10" if i < 4 else "0" for i in range(10)] for _ in range(5)], header)
++
++ga_common = ("sim_time 86400.0\nmassint 3600.0\nsaveint 3600.0\nfpfric 0.06\n"
++             "elevoff\noutput_precision 6\ninfiltration greenampt\n")
++ga_uniform = ("greenampt_ks 10\ngreenampt_psi 110\ngreenampt_porosity 0.43\n"
++              "greenampt_theta_init 0.2\n")
++ga_solvers = {
++    "cuda_fv1": "fv1\ncuda\ninitial_tstep 60.0\n",
++    "cuda_fv2": "fv2\ncuda\ninitial_tstep 60.0\n",
++    "cuda_dg2": "dg2\ncuda\ninitial_tstep 60.0\n",
++    "cuda_acc": "acceleration\ncuda\ninitial_tstep 60.0\nadaptoff\n",
++}
++ga_cases = {
++    "ga_pond": ("ETInfTest_dtm.ascii", "ga_start.ascii", ga_uniform),
++    "ga_grid": ("ETInfTest_dtm.ascii", "ga_start.ascii",
++                "greenampt_ks ga_ks.ascii\ngreenampt_psi ga_psi.ascii\n"
++                "greenampt_porosity ga_por.ascii\ngreenampt_theta_init ga_theta.ascii\n"),
++    "ga_cap": ("ETInfTest_dtm.ascii", "ga_start.ascii", ga_uniform + "greenampt_soil_depth 0.2\n"),
++    "ga_wall": ("wall_dtm.ascii", "ga_wall_start.ascii",
++                ga_uniform.replace("greenampt_ks 10", "greenampt_ks ga_ks_left.ascii")),
++}
++for case, (dem, start, extra) in ga_cases.items():
++    for solver, settings in ga_solvers.items():
++        with open(os.path.join(t, f"{case}_{solver}.par"), "w") as f:
++            f.write(f"DEMfile {dem}\nstartfile {start}\nresroot r\n" + ga_common + settings + extra)
++# both infiltration models in one file: must stop with an error
++with open(os.path.join(t, "ga_conflict_cuda_fv1.par"), "w") as f:
++    f.write("DEMfile ETInfTest_dtm.ascii\nstartfile ga_start.ascii\nresroot r\n" + ga_common
++            + ga_solvers["cuda_fv1"] + ga_uniform + "infiltration 0.000001\n")
++
++# ---------------------------------------------------------------- Alzette, 6 h
++if len(sys.argv) > 2:
++    a = os.path.join(WORK, "alzette")
++    os.makedirs(a, exist_ok=True)
++    lines = [l for l in open(sys.argv[2]) if l.strip() and not l.startswith("#")]
++    keep = [l for l in lines if l.split()[0] not in ("sim_time", "fv1", "acceleration", "cuda")]
++    base = "".join(keep) + "sim_time 21600\ncuda\n"
++    dem = [l.split()[1] for l in lines if l.split()[0] == "DEMfile"][0]
++
++    # infiltration 2 mm/h in every basin cell, NoData outside
++    with open(dem) as src, open(os.path.join(a, "infil_2mmh.ascii"), "w") as dst:
++        head = [src.readline() for _ in range(6)]
++        dst.write("".join(head))
++        nodata = head[5].split()[1]
++        for row in src:
++            dst.write(" ".join(nodata if float(v) == float(nodata) else "2"
++                               for v in row.split()) + "\n")
++    with open(os.path.join(a, "evap_3mmday.dat"), "w") as f:
++        f.write("Evaporation 3 mm/day\n2 days\n3 0\n3 10\n")
++
++    uniform = f32(2.0 / 3600000.0)   # the same single-precision rate as 2 mm/h
++    variants = {
++        "off": "",
++        "uniform": f"infiltration {uniform}\n",
++        "grid": "infilfile infil_2mmh.ascii\n",
++        "evap": f"infiltration {uniform}\nevaporation evap_3mmday.dat\n",
++        # loam-like soil, already wet at the start (theta_init 0.30 of 0.43)
++        "greenampt": "infiltration greenampt\ngreenampt_ks 10\ngreenampt_psi 110\n"
++                     "greenampt_porosity 0.43\ngreenampt_theta_init 0.30\n",
++    }
++    for solver in ("fv1", "acceleration"):
++        for name, losses in variants.items():
++            if solver == "acceleration" and name in ("grid", "evap", "greenampt"):
++                continue
++            with open(os.path.join(a, f"{name}_{solver}.par"), "w") as f:
++                f.write(base + solver + "\n" + losses)
++print("inputs written to", WORK)
+diff --git a/tests_8.4/metal_adaptive.py b/tests_8.4/metal_adaptive.py
+new file mode 100755
+index 0000000..a8fe4a0
+--- /dev/null
++++ b/tests_8.4/metal_adaptive.py
+@@ -0,0 +1,74 @@
++#!/usr/bin/env python3
++"""Small Apple-Metal checks for the HWFV1 and MWDG2 dense paths.
++
++Usage: python3 tests_8.4/metal_adaptive.py build/lisflood [WORK]
++"""
++import math
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++import tempfile
++
++
++def raster(path, rows):
++    path.write_text(
++        f"ncols {len(rows[0])}\nnrows {len(rows)}\nxllcorner 0\n"
++        "yllcorner 0\ncellsize 100\nNODATA_value -9999\n"
++        + "\n".join(" ".join(map(str, row)) for row in rows) + "\n"
++    )
++
++
++def values(path):
++    return [float(x) for x in " ".join(path.read_text().splitlines()[6:]).split()]
++
++
++def main():
++    binary = Path(sys.argv[1]).resolve()
++    root = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else Path(
++        tempfile.mkdtemp(prefix="lisflood-metal-adaptive-")
++    )
++    root.mkdir(parents=True, exist_ok=True)
++    n = 16
++    raster(root / "dem.asc", [[0.0] * n for _ in range(n)])
++    raster(root / "start.asc", [
++        [0.15 if 6 <= x < 10 and 6 <= y < 10 else 0.10 for x in range(n)]
++        for y in range(n)
++    ])
++    base = (
++        "DEMfile dem.asc\nstartfile start.asc\nmetal\nmax_ref_lvl 4\n"
++        "epsilon .001\nwall_height 25\ninitial_tstep 2\nsim_time 120\n"
++        "saveint 60\nmassint 30\nfpfric .06\nraster_out\nqoutput\n"
++        "output_precision 9\ninfiltration .000001\n"
++    )
++    failed = []
++    for solver in ("hwfv1", "mwdg2"):
++        out = root / solver
++        if out.exists():
++            shutil.rmtree(out)
++        out.mkdir()
++        par = root / f"{solver}.par"
++        par.write_text(base + f"{solver}\ndirroot {solver}\nresroot r\n")
++        run = subprocess.run([str(binary), str(par)], cwd=root,
++                             text=True, capture_output=True, timeout=60)
++        grids = sorted(out.glob("*.wd"))
++        final = values(grids[-1]) if grids else []
++        expected_mean = 0.103125 - 0.000001 * 120
++        mean = sum(final) / len(final) if final else math.nan
++        ok = (run.returncode == 0 and len(grids) == 3 and final and
++              all(math.isfinite(v) and v >= -1e-7 for v in final) and
++              abs(mean - expected_mean) < 2e-6 and
++              "dense finest-level mesh" in run.stderr)
++        print(("PASS " if ok else "FAIL ") +
++              f"{solver}: rc={run.returncode}, grids={len(grids)}, "
++              f"range={min(final) if final else 'n/a'}..{max(final) if final else 'n/a'}, "
++              f"mean error={mean - expected_mean:.3g}")
++        if not ok:
++            failed.append(solver)
++            print(run.stdout)
++            print(run.stderr)
++    return bool(failed)
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests_8.4/run_tests.sh b/tests_8.4/run_tests.sh
+new file mode 100755
+index 0000000..3c1989e
+--- /dev/null
++++ b/tests_8.4/run_tests.sh
+@@ -0,0 +1,43 @@
++#!/bin/sh
++# Run the 8.4 tests on a machine with an NVIDIA GPU, or on a Mac with Apple
++# Silicon (the .par files say `cuda`, which runs the Metal solvers there).
++#
++#   tests_8.4/run_tests.sh BIN84 BIN83 WORK [ALZETTE_PAR]
++#
++#   BIN84        lisflood built from this folder
++#   BIN83        lisflood 8.3 (CUDA), for the "feature off = 8.3" checks
++#   WORK         output folder
++#   ALZETTE_PAR  .par of the paper's Alzette 24 h run (absolute input paths);
++#                the Alzette tests run 6 h of it
++#
++# ONLY=t012 or ONLY=alzette runs one part.
++# Then: python3 tests_8.4/check.py WORK
++HERE=$(cd "$(dirname "$0")" && pwd)
++BIN84=$1; BIN83=$2; WORK=$3; ALZ=$4
++[ -x "$BIN84" ] && [ -x "$BIN83" ] && [ -n "$WORK" ] || { sed -n 2,13p "$0"; exit 2; }
++mkdir -p "$WORK" && WORK=$(cd "$WORK" && pwd)
++python3 "$HERE/make_inputs.py" "$WORK" $ALZ || exit 1
++
++run() {  # bin dir par name
++  O=$WORK/out/$4; rm -rf "$O"; mkdir -p "$O"
++  (cd "$2" && "$1" -v -dirroot "$O" "$3" > "$O/run.log" 2>&1); rc=$?
++  echo "RESULT $4 rc=$rc loop=$(awk '/^loop time/{print $3}' "$O/run.log" | tail -1)"
++}
++
++[ "$ONLY" = alzette ] || for p in "$WORK"/t012/*.par; do
++  n=$(basename "$p" .par)
++  run "$BIN84" "$WORK/t012" "$(basename "$p")" "t012_${n}_84"
++done
++[ "$ONLY" = alzette ] || for s in cuda_fv1 cuda_acc cuda_fv2 cuda_dg2; do
++  run "$BIN83" "$WORK/t012" off_$s.par "t012_off_${s}_83"
++done
++
++if [ -n "$ALZ" ] && [ "$ONLY" != t012 ]; then
++  for p in "$WORK"/alzette/*.par; do
++    n=$(basename "$p" .par)
++    run "$BIN84" "$WORK/alzette" "$(basename "$p")" "alz_${n}_84"
++  done
++  for s in fv1 acceleration; do
++    run "$BIN83" "$WORK/alzette" off_$s.par "alz_off_${s}_83"
++  done
++fi

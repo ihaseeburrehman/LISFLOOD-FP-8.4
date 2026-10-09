@@ -1357,8 +1357,14 @@ void LoadDEM(Fnames *Fnameptr, States *Statesptr, Pars *Parptr, Arrays *Arrptr, 
 		Arrptr->FHUy = memory_allocate_zero_numeric_legacy((Parptr->xsz + 1)*(Parptr->ysz + 1));
 		Arrptr->FHVy = memory_allocate_zero_numeric_legacy((Parptr->xsz + 1)*(Parptr->ysz + 1));
 	}
-	else if (Statesptr->fv1 == ON)
+	else if (Statesptr->fv1 == ON
+#ifdef METAL_ENABLED
+		|| Statesptr->hwfv1 == ON || Statesptr->mwdg2 == ON
+#endif
+	)
 	{
+		// The Metal adaptive compatibility path evolves the finest-level
+		// HWFV1/MWDG2 fields in the same dense buffers as FV1/DG2.
 		allocate_swe_fields(Parptr, Arrptr);
 	}
 	else if (Statesptr->dg2 == ON)

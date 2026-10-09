@@ -24,3 +24,13 @@ void run_metal_dg2(Fnames &filenames, Files *files, States &states, Pars &pars,
 void run_metal_acc(Fnames &filenames, Files *files, States &states, Pars &pars,
                    Solver &solver, BoundCs &boundCs, Stage &stage,
                    Arrays &arrays, int verbose);
+
+// Run the adaptive solver equations at the finest level in dense Metal
+// buffers.  This is the deterministic fallback used until a native Metal
+// replacement for CUDA/CUB tree sorting and compaction is available.
+void run_metal_hwfv1(Fnames &filenames, Files *files, States &states, Pars &pars,
+                     Solver &solver, BoundCs &boundCs, Stage &stage,
+                     Arrays &arrays, int verbose);
+void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars,
+                     Solver &solver, BoundCs &boundCs, Stage &stage,
+                     Arrays &arrays, int verbose);

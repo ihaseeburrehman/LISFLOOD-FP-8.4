@@ -559,18 +559,38 @@ struct SimulatorImpl {
     std::string base = filenames_dem;
     if (!read_ascii_grid((base + "1x").c_str(), geom.xsz, geom.ysz, z1x) ||
         !read_ascii_grid((base + "1y").c_str(), geom.xsz, geom.ysz, z1y)) {
-      fprintf(stderr, "ERROR: Metal DG2 needs the DEM slope files %s1x and %s1y "
-                      "(generateDG2DEM)\n", base.c_str(), base.c_str());
-      std::exit(EXIT_FAILURE);
+      if (states->mwdg2 == ON) {
+        // Adaptive input files contain finest-grid cell averages rather than
+        // the preprocessed DG2 modal rasters.  Start their unresolved modes
+        // at zero; the RKDG2 update evolves them immediately.  This is the
+        // conservative projection of a piecewise-constant finest-grid DEM.
+        z1x.assign((size_t)geom.xsz * geom.ysz, 0.0);
+        z1y.assign((size_t)geom.xsz * geom.ysz, 0.0);
+        if (verbose)
+          printf("Metal MWDG2: DEM modal files absent; using conservative "
+                 "zero-slope projection\n");
+      } else {
+        fprintf(stderr, "ERROR: Metal DG2 needs the DEM slope files %s1x and %s1y "
+                        "(generateDG2DEM)\n", base.c_str(), base.c_str());
+        std::exit(EXIT_FAILURE);
+      }
     }
     std::vector<double> h1x, h1y;
     if (states->startfile == ON) {
       std::string sbase = filenames_start;
       if (!read_ascii_grid((sbase + "1x").c_str(), geom.xsz, geom.ysz, h1x) ||
           !read_ascii_grid((sbase + "1y").c_str(), geom.xsz, geom.ysz, h1y)) {
-        fprintf(stderr, "ERROR: Metal DG2 needs the start file slopes %s1x and "
-                        "%s1y (generateDG2start)\n", sbase.c_str(), sbase.c_str());
-        std::exit(EXIT_FAILURE);
+        if (states->mwdg2 == ON) {
+          h1x.assign((size_t)geom.xsz * geom.ysz, 0.0);
+          h1y.assign((size_t)geom.xsz * geom.ysz, 0.0);
+          if (verbose)
+            printf("Metal MWDG2: start modal files absent; using conservative "
+                   "zero-slope projection\n");
+        } else {
+          fprintf(stderr, "ERROR: Metal DG2 needs the start file slopes %s1x and "
+                          "%s1y (generateDG2start)\n", sbase.c_str(), sbase.c_str());
+          std::exit(EXIT_FAILURE);
+        }
       }
     }
 

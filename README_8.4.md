@@ -157,12 +157,13 @@ background and did not wait for it before freeing the arrays it reads
 the last output file was cut short and the run ended with a segmentation
 fault. It now waits; results are unchanged.
 
-## Metal back end: FV2, DG2 and ACC (Apple Silicon)
+## Metal back end: FV2, DG2, ACC, HWFV1 and MWDG2 (Apple Silicon)
 
-8.3 ran only FV1 on Metal. 8.4 adds the other three GPU solvers. As in 8.3, a
-`.par` file with `cuda` (or `metal`) and `fv2`, `dg2` or `acceleration` runs on
-the Mac's GPU when LISFLOOD-FP is built on macOS; the build compiles one
-metallib per solver (`source/metal/{fv1,fv2,dg2,acc}`).
+8.3 ran only FV1 on Metal. 8.4 adds FV2, DG2 and ACC plus dense finest-level
+paths for HWFV1 and MWDG2. A `.par` file with `cuda` (or `metal`) and one of
+these solvers runs on the Mac's GPU when LISFLOOD-FP is built on macOS; the
+build compiles one metallib per uniform operator
+(`source/metal/{fv1,fv2,dg2,acc}`).
 
 - **FV2** (`source/metal/fv2`) follows `cuda/fv2`: the same reconstruction,
   limiter, bed source and two Runge-Kutta stages, and CUDA's boundary
@@ -190,6 +191,47 @@ metallib per solver (`source/metal/{fv1,fv2,dg2,acc}`).
   the step, as CUDA.
 - With `-v` the Metal solvers print one `t= dt=` line per time step, as the
   CUDA solvers do (the 8.4 tests rebuild the expected depths from it).
+
+### HWFV1 and MWDG2 dense compatibility mode
+
+The `hwfv1` and `mwdg2` keywords now dispatch to Metal on macOS. HWFV1 uses
+the tested Metal hydrostatic FV1/HLL operator; MWDG2 uses the tested Metal
+nine-mode RKDG2 operator, friction, limiter, boundaries, sources and loss
+kernels. Both hold every DEM cell at the finest level. Therefore this mode
+computes the requested flow equations on the Apple GPU but does not yet give
+the memory or speed reduction of CUDA's multiwavelet tree. `epsilon`,
+`grading`, `refine_wall` and `ref_thickness` are accepted for input
+compatibility but do not alter the Metal mesh. Every run prints a notice to
+that effect, including non-verbose runs.
+
+Output follows the uniform Metal driver: depth/discharge rasters, `.mass` and
+maximum-depth output are available, and loss volume is included in `.mass`.
+The CUDA adaptive-only `.cumu` mesh-reduction log and `.loss` diagnostic are
+not emitted because there is no changing tree in this mode.
+
+This dense design was chosen because the adaptive CUDA implementation depends
+on CUB radix sort, exclusive scans and compaction in 11 files. Metal has no
+CUB equivalent. Reusing the already validated FV1/DG2 operators avoids a
+partial GPU tree implementation whose neighbour topology could silently
+change the solution. The host allocates H/HU/HV buffers for the two adaptive
+keywords only in Metal builds, so CUDA adaptive memory use and execution are
+unchanged.
+
+CUDA MWDG2 constructs modal coefficients directly from the input rasters.
+Ordinary Metal DG2 instead expects `generateDG2DEM` and `generateDG2start`
+outputs. For MWDG2 only, missing `1x`/`1y` files now select a conservative
+piecewise-constant projection: the mean comes from the raster and unresolved
+slopes start at zero. Supplied modal files are still used. This removed the
+preprocessing failure without changing the existing `dg2` path.
+
+Validation on the Apple M1 Max used
+`python3 tests_8.4/metal_adaptive.py build/macos/lisflood`. Both solvers built,
+ran a 16 x 16 moving-water case with infiltration for 120 s, wrote all three
+expected depth rasters, and kept every depth finite and nonnegative (HWFV1
+range 0.100--0.133 m; MWDG2 0.099--0.144 m). This is a dispatch and numerical
+sanity check. It is not evidence of equality with the compressed CUDA
+MWDG2/HWFV1 solution when `epsilon > 0`; a native adaptive Metal port still
+needs the tree work below.
 
 Lessons from the port (they apply to any new back end):
 - Copying a host from another solver copies its boundary rules too. Metal
@@ -349,10 +391,11 @@ small-tree guard and loss-disabled equality with CUDA 8.3. The final clean
 A100 run passed all 106 checks; details and remaining limits are in
 `tests_8.4/ACC_NUGRID_RESULTS.md`.
 
-### Next: MWDG2 and HWFV1 on Metal
+### Remaining work: native adaptive MWDG2 and HWFV1 on Metal
 
-A large port (the adaptive solver has 56 CUDA kernels, and 11 of its files
-use CUB for sorting, scans and compaction of the Morton-ordered mesh). Suggested
+A native compressed-mesh port remains large (the adaptive solver has 56 CUDA
+kernels, and 11 of its files use CUB for sorting, scans and compaction of the
+Morton-ordered mesh). Suggested
 order: HWFV1 first (finite volume, no slopes), then MWDG2.
 - Replace CUB: Metal has no equivalent library. Write a radix sort and an
   exclusive scan in Metal (or use a well-tested open-source one); compaction

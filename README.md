@@ -99,13 +99,24 @@ Details:
   `L >= 5` for `acc_nugrid`.
 - CPU FV1/FV2/DG2 do not apply them and print a warning.
 
-### FV2, DG2 and ACC on Apple Silicon
+### GPU solvers on Apple Silicon
 
-With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2 and ACC run on the
-Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and Metal ACC the CPU ACC
-solver. Every Metal run repeats bit for bit. On LISFLOOD-FP's test cases,
-Metal FV2 and DG2 match CUDA bit for bit on most small cases and to within 1
-cm on 99.6 % or more of the wet cells of the large ones (`README_8.4.md`).
+With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2, ACC, HWFV1 and
+MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and
+Metal ACC follows the CPU ACC solver. HWFV1 and MWDG2 use their corresponding
+Metal FV1 and DG2 update operators on the complete finest-level DEM grid. This
+overcomes Metal's lack of the CUB sort/scan primitives used to build the CUDA
+adaptive tree, but it does not compress the mesh: `epsilon`, `grading` and
+`refine_wall` do not change the Metal mesh. A notice is printed at startup so
+this limitation cannot be mistaken for a native adaptive run.
+Outputs follow the uniform Metal path; the adaptive-only `.cumu` and `.loss`
+files are not produced because the mesh does not change.
+
+MWDG2 accepts ordinary adaptive DEM and start rasters. If DG2 modal `1x`/`1y`
+files are absent, it uses the conservative piecewise-constant projection
+(zero initial unresolved slopes); the RKDG2 kernel then evolves all modes.
+Infiltration, evaporation and Green-Ampt use the same Metal loss kernels as
+FV1/DG2. See `README_8.4.md` for implementation details and validation scope.
 
 Start-up line: `LISFLOOD-FP 8.4`.
 
@@ -222,8 +233,9 @@ ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite,
 ## Use
 
 As 8.2. Put `cuda` in the `.par` file, or pass `-cuda`, to run on the GPU; on a
-Mac `metal` / `-metal` means the same, and FV1, FV2, DG2 and ACC run on the
-Apple GPU. Add the keywords above for infiltration and evaporation.
+Mac `metal` / `-metal` means the same, and FV1, FV2, DG2, ACC, HWFV1 and
+MWDG2 run on the Apple GPU. HWFV1/MWDG2 currently use the dense finest-level
+mode described above. Add the keywords above for infiltration and evaporation.
 
 ## Licence
 

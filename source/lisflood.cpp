@@ -418,8 +418,8 @@ int main(int argc, char *argv[])
 	LoadDEM(Fnameptr, Statesptr, Parptr, Arrptr, verbosemode);
 	
 	// infiltration and evaporation: CPU classic and sub-grid solvers, and
-	// (from 8.4) the CUDA and Metal FV1, FV2, DG2 and ACC solvers,
-	// and CUDA MWDG2/HWFV1; the others ignore them
+	// (from 8.4) the CUDA and Metal FV1, FV2, DG2, ACC, MWDG2 and HWFV1
+	// solvers, plus CUDA ACC_NUGRID; the others ignore them
 #if defined(CUDA)
 	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
@@ -428,7 +428,8 @@ int main(int argc, char *argv[])
 #elif defined(METAL_ENABLED)
 	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
-		 Statesptr->acceleration == ON));
+		 Statesptr->acceleration == ON || Statesptr->mwdg2 == ON ||
+		 Statesptr->hwfv1 == ON));
 #else
 	const bool losses_on_gpu = false;
 #endif
@@ -438,7 +439,8 @@ int main(int argc, char *argv[])
 		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 	{
 		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and MWDG2/HWFV1, "
+			"and CUDA ACC_NUGRID)\n");
 	}
 	// Green-Ampt is a separate choice from the constant rate, and only the
 	// GPU solvers identified above apply it
@@ -451,7 +453,8 @@ int main(int argc, char *argv[])
 	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 	{
 		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and CUDA ACC_NUGRID/MWDG2/HWFV1)\n");
+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and MWDG2/HWFV1, "
+			"and CUDA ACC_NUGRID)\n");
 	}
 
 #ifdef CUDA
@@ -852,6 +855,18 @@ int main(int argc, char *argv[])
 				Stageptr, Arrptr, verbosemode);
         */
 	}
+#ifdef METAL_ENABLED
+	else if (Statesptr->hwfv1 == ON && Statesptr->cuda == ON && metal_is_available())
+	{
+		run_metal_hwfv1(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
+				*Stageptr, *Arrptr, verbosemode);
+	}
+	else if (Statesptr->mwdg2 == ON && Statesptr->cuda == ON && metal_is_available())
+	{
+		run_metal_mwdg2(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
+				*Stageptr, *Arrptr, verbosemode);
+	}
+#endif
 	else
 	{
 #ifdef METAL_ENABLED

@@ -47,3 +47,33 @@ void run_metal_acc(Fnames &filenames, Files *files, States &states, Pars &pars,
   lis::metal::acc::simulate(filenames, files, states, pars, solver, boundCs,
                             stage, arrays, verbose);
 }
+
+void run_metal_hwfv1(Fnames &filenames, Files *files, States &states, Pars &pars,
+                     Solver &solver, BoundCs &boundCs, Stage &stage,
+                     Arrays &arrays, int verbose) {
+  fprintf(stderr, "NOTICE: Metal HWFV1 uses the dense finest-level mesh; "
+                  "epsilon does not compress the mesh.\n");
+  if (verbose) {
+    printf("\nUsing the Metal GPU for HWFV1 in dense finest-level mode\n");
+    printf("  adaptive threshold epsilon=%g (mesh compression is disabled)\n\n",
+           (double)solver.epsilon);
+  }
+  if (arrays.HU == nullptr) allocate_swe_fields(&pars, &arrays);
+  lis::metal::fv1::simulate(filenames, files, states, pars, solver, boundCs,
+                            stage, arrays, verbose);
+}
+
+void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars,
+                     Solver &solver, BoundCs &boundCs, Stage &stage,
+                     Arrays &arrays, int verbose) {
+  fprintf(stderr, "NOTICE: Metal MWDG2 uses the dense finest-level mesh; "
+                  "epsilon does not compress the mesh.\n");
+  if (verbose) {
+    printf("\nUsing the Metal GPU for MWDG2 in dense finest-level mode\n");
+    printf("  adaptive threshold epsilon=%g (mesh compression is disabled)\n\n",
+           (double)solver.epsilon);
+  }
+  if (arrays.HU == nullptr) allocate_swe_fields(&pars, &arrays);
+  lis::metal::dg2::simulate(filenames, files, states, pars, solver, boundCs,
+                            stage, arrays, verbose);
+}
