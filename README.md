@@ -8,7 +8,8 @@ Neither full adaptive Metal support nor complete cross-backend validation is
 claimed. See the current handover in `README_8.4.md`.
 
 LISFLOOD-FP 8.3 with floodplain infiltration and evaporation on the GPU
-(constant rate or Green-Ampt) and every GPU solver on Apple computers.
+(constant rate or Green-Ampt) and the FV2, DG2 and ACC solvers on Apple
+computers (with FV1 from 8.3, all four uniform-grid GPU solvers).
 8.3 is LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA
 hardware and a Metal back end for FV1. Without the new keywords, 8.4 computes
 exactly what 8.3 computes.
