@@ -1,4 +1,4 @@
-# Metal GPU back end for the FV1 solver (Apple Silicon)
+# Metal GPU back end for the FV1, FV2, DG2 and ACC solvers (Apple Silicon)
 
 find_library(METAL_FRAMEWORK Metal)
 find_library(FOUNDATION_FRAMEWORK Foundation)
@@ -17,11 +17,46 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
                 -o ${METALLIB}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fv1/metal_fv1_kernels.metal
         COMMENT "Compiling Metal FV1 kernels")
-    add_custom_target(metal_shaders DEPENDS ${METALLIB})
+    # ACC kernels: -fno-fast-math as well (correctly rounded sqrt for the CFL
+    # step; pow still differs from the CPU's powf in the last bit)
+    set(METALLIB_ACC ${CMAKE_BINARY_DIR}/metal_acc_kernels.metallib)
+    add_custom_command(
+        OUTPUT ${METALLIB_ACC}
+        COMMAND xcrun -sdk macosx metal -fno-fast-math
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/acc/metal_acc_kernels.metal
+                -o ${CMAKE_BINARY_DIR}/metal_acc_kernels.air
+        COMMAND xcrun -sdk macosx metallib ${CMAKE_BINARY_DIR}/metal_acc_kernels.air
+                -o ${METALLIB_ACC}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/acc/metal_acc_kernels.metal
+        COMMENT "Compiling Metal ACC kernels")
+    set(METALLIB_FV2 ${CMAKE_BINARY_DIR}/metal_fv2_kernels.metallib)
+    add_custom_command(
+        OUTPUT ${METALLIB_FV2}
+        COMMAND xcrun -sdk macosx metal -fno-fast-math
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/fv2/metal_fv2_kernels.metal
+                -o ${CMAKE_BINARY_DIR}/metal_fv2_kernels.air
+        COMMAND xcrun -sdk macosx metallib ${CMAKE_BINARY_DIR}/metal_fv2_kernels.air
+                -o ${METALLIB_FV2}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/fv2/metal_fv2_kernels.metal
+        COMMENT "Compiling Metal FV2 kernels")
+    set(METALLIB_DG2 ${CMAKE_BINARY_DIR}/metal_dg2_kernels.metallib)
+    add_custom_command(
+        OUTPUT ${METALLIB_DG2}
+        COMMAND xcrun -sdk macosx metal -fno-fast-math
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/dg2/metal_dg2_kernels.metal
+                -o ${CMAKE_BINARY_DIR}/metal_dg2_kernels.air
+        COMMAND xcrun -sdk macosx metallib ${CMAKE_BINARY_DIR}/metal_dg2_kernels.air
+                -o ${METALLIB_DG2}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dg2/metal_dg2_kernels.metal
+        COMMENT "Compiling Metal DG2 kernels")
+    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2})
 
     add_library(lisflood-metal STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/metal_integrate.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/fv1/metal_fv1_simulate.mm)
+        ${CMAKE_CURRENT_SOURCE_DIR}/fv1/metal_fv1_simulate.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/acc/metal_acc_simulate.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/fv2/metal_fv2_simulate.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/dg2/metal_dg2_simulate.mm)
     add_dependencies(lisflood-metal metal_shaders)
     target_include_directories(lisflood-metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
     target_link_libraries(lisflood-metal PUBLIC ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} lisflood-base)

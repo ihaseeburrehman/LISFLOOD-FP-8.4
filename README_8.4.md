@@ -1,8 +1,10 @@
-# LISFLOOD-FP 8.4 (in development): infiltration and evaporation on the GPU
+# LISFLOOD-FP 8.4 (in development): infiltration and evaporation on the GPU, and every GPU solver on Apple Metal
 
 This folder is a working copy of LISFLOOD-FP 8.3 (`README.md` describes 8.3).
-**8.4 adds one thing:** floodplain infiltration and evaporation for the CUDA
-FV1, FV2, DG2 and ACC solvers. Nothing else changes. It is developed in parallel
+**8.4 adds two things:** floodplain infiltration and evaporation for the CUDA
+FV1, FV2, DG2 and ACC solvers, and Metal (Apple Silicon) versions of the FV2,
+DG2 and ACC solvers, so that every solver 8.3 runs on an NVIDIA GPU also runs
+on a Mac (see "Metal back end" below). Nothing else changes. It is developed in parallel
 with the 8.3 paper and will be released only if every test below passes.
 
 ## Why
@@ -133,6 +135,82 @@ Found on the way, already in 8.2/8.3 and not changed here:
   the land-use map (446 000 cells at n = 0.016); ACC is known to become
   unstable at low friction on fine grids.
 
+## Metal back end: FV2, DG2 and ACC (Apple Silicon)
+
+8.3 ran only FV1 on Metal. 8.4 adds the other three GPU solvers. As in 8.3, a
+`.par` file with `cuda` (or `metal`) and `fv2`, `dg2` or `acceleration` runs on
+the Mac's GPU when LISFLOOD-FP is built on macOS; the build compiles one
+metallib per solver (`source/metal/{fv1,fv2,dg2,acc}`).
+
+- **FV2** (`source/metal/fv2`) follows `cuda/fv2`: the same reconstruction,
+  limiter, bed source and two Runge-Kutta stages, and CUDA's boundary
+  treatment (ghost cells hold the outside state of each boundary face) and
+  step order (rain and point sources with the previous dt, then ghost cells,
+  then the time step over every cell including the ghost cells).
+- **DG2** (`source/metal/dg2`) is a line-by-line port of `cuda/dg2` (nine
+  coefficients per cell, friction at the Gauss points, Krivodonova limiter,
+  DEM and start-file slopes from `generateDG2DEM`/`generateDG2start`). One
+  deliberate difference: CUDA limits the slopes in place, so a cell may see a
+  neighbour's slope before or after it is limited; Metal limits into a
+  separate buffer, which makes the result independent of thread timing.
+- **ACC** (`source/metal/acc`) follows the CPU ACC solver, with a conservative
+  dry-cell limiter that keeps each face flux shared by its two cells (CUDA ACC
+  does not).
+- As for FV1, each face flux is computed once and shared by the two cells
+  (overlapping threadgroup tiles), and the kernels are compiled with
+  `-fno-fast-math`, so every run repeats bit for bit.
+- Infiltration, evaporation and Green-Ampt are applied only by the CUDA
+  solvers; the Metal solvers warn and ignore them.
+
+Lessons from the port (they apply to any new back end):
+- Copying a host from another solver copies its boundary rules too. Metal
+  FV2 first kept FV1's boundary handling and lost water at a fixed-discharge
+  inflow (T031): its first steps ignored the inflow's speed and were 30 times
+  too long. Taking the ghost-cell states and the time-step order from CUDA
+  fixed this and made five of six small cases bit-identical.
+- Compare with the reference on the same input files. `generateDG2DEM` and
+  `generateDG2start` built on macOS and on Linux write slightly different
+  DEMs and start files; the first T05 comparisons differed for that reason
+  alone (and for every solver, FV1 included).
+
+### Metal results (9 October 2026, Apple M1 Max, against CUDA 8.3 on an A100)
+
+Inputs as used on the HPC. "Identical" counts wet cells with the same depth to
+the output precision (1 mm).
+
+| case | FV2 | DG2 |
+|---|---|---|
+| T01, T031 | identical, same number of steps | identical, same number of steps |
+| T030 (dynamic rain) | 87.5 % identical, max 1 mm | identical |
+| T02 | identical | 99.99 % identical, max 1 mm |
+| T03 | identical (max 1 mm) | identical for 4 outputs, then 54 % (CPU DG2 vs CUDA: 45 %) |
+| T05 (dam break, 0.32 M cells) | 99.99 %, max 4 mm, same steps (4733) | 86 % (CPU DG2 vs CUDA: 85 %), volume within 0.002 % |
+| T07s (Carlisle, 6 h) | all outputs within 1 mm, volume within 0.0003 % | 99.6-99.9 % within 1 cm up to 4 h; then CUDA and Metal both blow up (below) |
+| T06 (EA test 5, 1.7 M cells, 30 h) | 99.95 % within 1 cm, volume within 0.016 %, steps 230 266 vs 230 264 | 99.85 % within 1 cm, volume within 0.003 %, steps 262 559 vs 262 584 |
+
+ACC (against the CPU ACC solver, as Metal ACC follows the CPU): T01, T02,
+T030 and T031 bit-identical; T07s 99.5 % identical, max 1 mm; T05 71 % and T06
+75 % (CUDA ACC against the CPU on the same cases: 13 %, unstable, and 42 %).
+
+Every Metal run repeats bit for bit (FV2 and DG2 checked on T02, T03, T031 and
+on the 2853 x 1833 grid T07x3).
+
+Where Metal and CUDA DG2 differ (T03, T05), the difference starts at rounding
+level (the first steps agree to 4-5 digits) and grows in these sensitive
+cases, as it does between the CPU and CUDA DG2 solvers.
+
+Found in the original solvers while porting (to report, not changed in 8.4):
+- CUDA DG2 on Carlisle (T07s) blows up after about 4 h (volume from 1.4 M m3
+  to 1e10-1e11 m3), preceded by negative depths down to -0.15 m; Metal DG2
+  does the same.
+- CUDA DG2 and Metal DG2 both write depths down to -0.86 m on EA test 5 (T06).
+- CPU DG2 differs strongly from CUDA DG2 on T031 (fixed-discharge inflow with
+  NoData cells): 40 % identical, volume 29 % apart, 1283 against 219 steps.
+- CUDA FV2 slope limiter: r = (local - forward) / (local - backward), which
+  gives non-zero slopes only at local extrema; ported unchanged.
+- CUDA applies dynamic rain and point sources with the previous step's dt
+  (zero before the first step); ported unchanged.
+
 ## Plan
 
 1. Constant-rate infiltration and evaporation in CUDA FV1, FV2, DG2 and ACC (this
@@ -143,7 +221,8 @@ Found on the way, already in 8.2/8.3 and not changed here:
    grids from the soil map and soil moisture (Geoportal or WRF `SMOIS`).
    Possible later: recovery between rain events (SWMM-style, drying rate
    from evapotranspiration).
-3. Possibly later: the same in Metal FV1; gridded evaporation.
+3. Done: FV2, DG2 and ACC on Metal. Possibly later: infiltration and
+   evaporation in the Metal solvers; gridded evaporation.
 
 Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
 not drain; infiltration is a constant rate (step 2 addresses this).

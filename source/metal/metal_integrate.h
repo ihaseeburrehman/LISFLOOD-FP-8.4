@@ -9,3 +9,18 @@ bool metal_is_available();
 void run_metal_fv1(Fnames &filenames, Files *files, States &states, Pars &pars,
                    Solver &solver, BoundCs &boundCs, Stage &stage,
                    Arrays &arrays, int verbose);
+
+// run the FV2 solver on the Metal GPU
+void run_metal_fv2(Fnames &filenames, Files *files, States &states, Pars &pars,
+                   Solver &solver, BoundCs &boundCs, Stage &stage,
+                   Arrays &arrays, int verbose);
+
+// run the DG2 solver on the Metal GPU
+void run_metal_dg2(Fnames &filenames, Files *files, States &states, Pars &pars,
+                   Solver &solver, BoundCs &boundCs, Stage &stage,
+                   Arrays &arrays, int verbose);
+
+// run the local-inertial (ACC) solver on the Metal GPU
+void run_metal_acc(Fnames &filenames, Files *files, States &states, Pars &pars,
+                   Solver &solver, BoundCs &boundCs, Stage &stage,
+                   Arrays &arrays, int verbose);

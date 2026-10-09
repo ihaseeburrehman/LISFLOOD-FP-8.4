@@ -442,6 +442,14 @@ int main(int argc, char *argv[])
 			"or 'infilfile <file>' (constant rate), or 'infiltration greenampt'\n");
 		return -1;
 	}
+#ifdef METAL_ENABLED
+	if ((Statesptr->calc_infiltration == ON || Statesptr->calc_evap == ON) &&
+		Statesptr->acceleration == ON && Statesptr->cuda == ON && metal_is_available())
+	{
+		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by the "
+			"Metal ACC solver (they are, by the CPU and CUDA ACC solvers)\n");
+	}
+#endif
 	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 	{
 		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
@@ -819,6 +827,20 @@ int main(int argc, char *argv[])
 		fv1::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
 				Stageptr, Arrptr, verbosemode);
 	}
+#ifdef METAL_ENABLED
+	else if (Statesptr->fv2 == ON && Statesptr->cuda == ON && metal_is_available())
+	{
+		// FV2 on the Metal GPU (there is no CPU FV2 solver)
+		run_metal_fv2(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
+				*Stageptr, *Arrptr, verbosemode);
+	}
+	else if (Statesptr->dg2 == ON && Statesptr->cuda == ON && metal_is_available())
+	{
+		// DG2 on the Metal GPU (a port of the CUDA DG2 solver)
+		run_metal_dg2(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
+				*Stageptr, *Arrptr, verbosemode);
+	}
+#endif
 	else if (Statesptr->dg2 == ON)
 	{
 		dg2::solve(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr,
@@ -834,6 +856,14 @@ int main(int argc, char *argv[])
 	}
 	else
 	{
+#ifdef METAL_ENABLED
+		// local-inertial (ACC) solver on the Metal GPU when the .par asks for
+		// both 'acceleration' and the GPU (cuda or metal keyword)
+		if (Statesptr->acceleration == ON && Statesptr->cuda == ON && metal_is_available())
+			run_metal_acc(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
+					*Stageptr, *Arrptr, verbosemode);
+		else
+#endif
 		IterateQ(Fnameptr, &Fps, Statesptr, Parptr, Solverptr, BCptr, Stageptr, CSTypePtr, Arrptr, SGCptr, RiversIndexVecPtr, RiversIndexPtr, ChannelSegmentsVecPtr, verbosemode);
 	}
 	time(&ParSolver.time_finish);
