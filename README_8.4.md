@@ -307,6 +307,13 @@ level (the first steps agree to 4-5 digits) and grows in these sensitive
 cases, as it does between the CPU and CUDA DG2 solvers.
 
 Found in the original solvers while porting (to report, not changed in 8.4):
+- CUDA MWDG2 on the Alzette 100 m basin (DEM padded to 512 x 512) collapses
+  to time steps of 1e-6 to 1e-8 s within the first 5-14 s of simulated time,
+  with and without the loss keywords (loss-free run: 6.3e-8 s at 11.4 s), so
+  the cause is in the adaptive solver, not in the losses; a smaller initial
+  time step does not avoid it. CUDA HWFV1 on the same basin writes small
+  negative depths (down to -0.007 m) in about 104 000 cells, also without
+  losses, and its adaptive path does not read `dynamicrainfile`.
 - CUDA DG2 on Carlisle (T07s) blows up after about 4 h (volume from 1.4 M m3
   to 1e10-1e11 m3), preceded by negative depths down to -0.15 m; Metal DG2
   does the same.
