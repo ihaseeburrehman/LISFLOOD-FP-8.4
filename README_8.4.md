@@ -2,10 +2,11 @@
 
 `README.md` describes 8.4 and how to build and use it; this file records how
 8.4 was developed and tested, and the results.
-**8.4 adds two things to 8.3:** floodplain infiltration and evaporation for the
-CUDA and Metal FV1, FV2, DG2 and ACC solvers and CUDA MWDG2/HWFV1;
-and Metal (Apple Silicon) versions of FV2, DG2 and ACC, covering the four
-uniform-grid GPU solvers on a Mac (see "Metal back end" below).
+**8.4 adds two things to 8.3:** floodplain infiltration, evaporation and
+Green-Ampt for every GPU solver selection; and a Metal (Apple Silicon) path
+for every GPU solver keyword. FV1, FV2, DG2 and ACC are native uniform-grid
+implementations. ACC_NUGRID, HWFV1 and MWDG2 run at the finest level without
+adaptive compression on Metal (see "Metal back end" below).
 
 ## Why
 
@@ -17,7 +18,8 @@ cannot be represented on the GPU at all.
 
 ## What 8.4 does
 
-The CUDA and Metal FV1, FV2, DG2 and ACC solvers apply the CPU rules at every time step: every wet
+The CUDA and Metal FV1, FV2, DG2, ACC, ACC_NUGRID, HWFV1 and MWDG2 paths
+apply the loss rules at every time step: every wet
 cell (deeper than `DepthThresh`, not NoData) loses
 `(infiltration rate + evaporation rate) x dt` of depth, never below zero.
 
@@ -66,9 +68,10 @@ Otherwise they infiltrate as if dry soil (see the Alzette test below).
   removed since the start (rain is not counted in this column).
 - **Without these keywords** 8.4 computes exactly what 8.3 computes; outputs,
   `.mass` file included, are identical byte for byte.
-- Solvers that do not apply them (CUDA ACC-nugrid; CPU
-  FV1/FV2/DG2) now print a warning instead of ignoring them silently.
-- Start-up line: `LISFLOOD-FP 8.4`.
+- CPU FV1/FV2/DG2 still do not apply them and print a warning instead of
+  ignoring them silently.
+- `lisflood -version` and normal startup print only `LISFLOOD-FP 8.4` for the
+  version banner.
 
 Code: `source/cuda/cuda_losses.cu` (new), calls in
 `source/cuda/fv1/cuda_fv1_simulate.cu` and `source/cuda/acc/cuda_acc_simulate.cu`,
@@ -157,11 +160,12 @@ background and did not wait for it before freeing the arrays it reads
 the last output file was cut short and the run ended with a segmentation
 fault. It now waits; results are unchanged.
 
-## Metal back end: FV2, DG2, ACC, HWFV1 and MWDG2 (Apple Silicon)
+## Metal back end: all seven GPU solver selections (Apple Silicon)
 
 8.3 ran only FV1 on Metal. 8.4 adds FV2, DG2 and ACC plus dense finest-level
-paths for HWFV1 and MWDG2. A `.par` file with `cuda` (or `metal`) and one of
-these solvers runs on the Mac's GPU when LISFLOOD-FP is built on macOS; the
+paths for ACC_NUGRID, HWFV1 and MWDG2. A `.par` file with `cuda` (or `metal`)
+and any of the seven GPU solver keywords runs on the Mac's GPU when
+LISFLOOD-FP is built on macOS; the
 build compiles one metallib per uniform operator
 (`source/metal/{fv1,fv2,dg2,acc}`).
 
@@ -183,7 +187,7 @@ build compiles one metallib per uniform operator
   (overlapping threadgroup tiles), and the kernels are compiled with
   `-fno-fast-math`, so every run repeats bit for bit.
 - Infiltration, evaporation and Green-Ampt: the same rules as CUDA, in
-  `source/metal/losses` (one kernel for the four solvers). Metal GPUs have no
+  `source/metal/losses` (shared by all seven Metal solver paths). Metal GPUs have no
   double precision, which CUDA uses for the Green-Ampt depth F; Metal keeps F
   as a pair of floats (exact two-sum) and computes each step's increment in a
   form without cancellation. ACC applies the losses where the CPU ACC solver
@@ -192,15 +196,16 @@ build compiles one metallib per uniform operator
 - With `-v` the Metal solvers print one `t= dt=` line per time step, as the
   CUDA solvers do (the 8.4 tests rebuild the expected depths from it).
 
-### HWFV1 and MWDG2 dense compatibility mode
+### ACC_NUGRID, HWFV1 and MWDG2 dense compatibility mode
 
-The `hwfv1` and `mwdg2` keywords now dispatch to Metal on macOS. HWFV1 uses
-the tested Metal hydrostatic FV1/HLL operator; MWDG2 uses the tested Metal
+The `acc_nugrid`, `hwfv1` and `mwdg2` keywords now dispatch to Metal on macOS.
+ACC_NUGRID uses the tested Metal ACC operator, HWFV1 uses the tested Metal
+hydrostatic FV1/HLL operator, and MWDG2 uses the tested Metal
 nine-mode RKDG2 operator, friction, limiter, boundaries, sources and loss
-kernels. Both hold every DEM cell at the finest level. Therefore this mode
+kernels. All three hold every DEM cell at the finest level. Therefore this mode
 computes the requested flow equations on the Apple GPU but does not yet give
 the memory or speed reduction of CUDA's multiwavelet tree. `epsilon`,
-`grading`, `refine_wall` and `ref_thickness` are accepted for input
+`L`, `grading`, `refine_wall` and `ref_thickness` are accepted for input
 compatibility but do not alter the Metal mesh. Every run prints a notice to
 that effect, including non-verbose runs.
 
@@ -213,7 +218,7 @@ This dense design was chosen because the adaptive CUDA implementation depends
 on CUB radix sort, exclusive scans and compaction in 11 files. Metal has no
 CUB equivalent. Reusing the already validated FV1/DG2 operators avoids a
 partial GPU tree implementation whose neighbour topology could silently
-change the solution. The host allocates H/HU/HV buffers for the two adaptive
+change the solution. The host allocates H/HU/HV buffers for the three dense
 keywords only in Metal builds, so CUDA adaptive memory use and execution are
 unchanged.
 
@@ -225,13 +230,18 @@ slopes start at zero. Supplied modal files are still used. This removed the
 preprocessing failure without changing the existing `dg2` path.
 
 Validation on the Apple M1 Max used
-`python3 tests_8.4/metal_adaptive.py build/macos/lisflood`. Both solvers built,
+`python3 tests_8.4/metal_adaptive.py build/macos/lisflood`. All three paths built,
 ran a 16 x 16 moving-water case with infiltration for 120 s, wrote all three
 expected depth rasters, and kept every depth finite and nonnegative (HWFV1
-range 0.100--0.133 m; MWDG2 0.099--0.144 m). This is a dispatch and numerical
+range 0.100--0.133 m; MWDG2 0.099--0.144 m; ACC_NUGRID 0.100--0.133 m).
+This is a dispatch and numerical
 sanity check. It is not evidence of equality with the compressed CUDA
 MWDG2/HWFV1 solution when `epsilon > 0`; a native adaptive Metal port still
 needs the tree work below.
+
+The full 100 m Alzette six-hour matrix, including separate uniform infiltration,
+evaporation and Green-Ampt runs for all seven keywords, is recorded in
+`tests_8.4/ALZETTE_METAL_RESULTS.md`.
 
 Lessons from the port (they apply to any new back end):
 - Copying a host from another solver copies its boundary rules too. Metal
@@ -306,11 +316,10 @@ Kept here so that whoever extends 8.4 does not meet them again.
 
 ## Handover: what to do next
 
-The four uniform-grid GPU solvers (FV1, FV2, DG2, ACC) apply infiltration,
-evaporation and Green-Ampt on CUDA and Metal. CUDA MWDG2 and HWFV1 now
-apply the same losses, as does CUDA ACC on its static non-uniform grid. The
-next large step is to port MWDG2 and HWFV1 themselves to Metal. The sub-grid
-channel model remains CPU-only.
+All seven GPU solver selections apply infiltration, evaporation and
+Green-Ampt on CUDA and Metal. Metal ACC_NUGRID, MWDG2 and HWFV1 use dense
+finest-level compatibility paths. The next large step is native adaptive Metal
+meshes for those three keywords. The sub-grid channel model remains CPU-only.
 
 ### Completed: losses in CUDA MWDG2 and HWFV1 (9 October 2026)
 
@@ -391,12 +400,13 @@ small-tree guard and loss-disabled equality with CUDA 8.3. The final clean
 A100 run passed all 106 checks; details and remaining limits are in
 `tests_8.4/ACC_NUGRID_RESULTS.md`.
 
-### Remaining work: native adaptive MWDG2 and HWFV1 on Metal
+### Remaining work: native non-uniform/adaptive solvers on Metal
 
 A native compressed-mesh port remains large (the adaptive solver has 56 CUDA
 kernels, and 11 of its files use CUB for sorting, scans and compaction of the
 Morton-ordered mesh). Suggested
-order: HWFV1 first (finite volume, no slopes), then MWDG2.
+order: HWFV1 first (finite volume, no slopes), then MWDG2, followed by the
+static mixed-size ACC_NUGRID mesh.
 - Replace CUB: Metal has no equivalent library. Write a radix sort and an
   exclusive scan in Metal (or use a well-tested open-source one); compaction
   is a scan plus a scatter. Check each against the CUDA result on random input
@@ -451,11 +461,11 @@ this source and out of the release. In general:
    grids from the soil map and soil moisture (Geoportal or WRF `SMOIS`).
    Possible later: recovery between rain events (SWMM-style, drying rate
    from evapotranspiration).
-3. Done: FV2, DG2 and ACC on Metal, and infiltration, evaporation and
-   Green-Ampt in the four Metal solvers. Possibly later: gridded evaporation.
+3. Done: every GPU solver keyword runs on Metal, and infiltration, evaporation
+   and Green-Ampt work in every Metal path. ACC_NUGRID, HWFV1 and MWDG2 are
+   dense finest-level compatibility paths. Possibly later: gridded evaporation.
 4. Done: infiltration, evaporation and Green-Ampt in CUDA MWDG2, HWFV1 and
-   non-uniform-grid ACC. Next: port MWDG2 and HWFV1 to Metal, then reuse the
-   existing Metal loss kernel on their finest-grid soil state.
+   non-uniform-grid ACC. Next: native Metal compressed/mixed-size meshes.
 
 Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
 not drain; infiltration is a constant rate (step 2 addresses this).

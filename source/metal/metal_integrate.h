@@ -34,3 +34,6 @@ void run_metal_hwfv1(Fnames &filenames, Files *files, States &states, Pars &pars
 void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars,
                      Solver &solver, BoundCs &boundCs, Stage &stage,
                      Arrays &arrays, int verbose);
+void run_metal_acc_nugrid(Fnames &filenames, Files *files, States &states,
+                          Pars &pars, Solver &solver, BoundCs &boundCs,
+                          Stage &stage, Arrays &arrays, int verbose);

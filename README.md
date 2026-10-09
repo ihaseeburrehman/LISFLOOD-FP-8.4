@@ -38,8 +38,8 @@ from its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`, then
 
 In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
 water by infiltration and evaporation; the GPU solvers read the keywords and
-ignore them. In 8.4 the CUDA and Metal FV1, FV2, DG2 and ACC solvers,
-and the CUDA adaptive MWDG2/HWFV1 solvers, apply them at every time step.
+ignore them. In 8.4 all seven GPU solver selections apply them on CUDA and
+Metal: FV1, FV2, DG2, ACC, ACC_NUGRID, HWFV1 and MWDG2.
 
 **Constant rate**, as in the CPU solvers: every wet cell (deeper than
 `DepthThresh`, not NoData) loses `(infiltration rate + evaporation rate) x dt`
@@ -101,14 +101,16 @@ Details:
 
 ### GPU solvers on Apple Silicon
 
-With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2, ACC, HWFV1 and
-MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and
+With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2, ACC, ACC_NUGRID,
+HWFV1 and MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and
 Metal ACC follows the CPU ACC solver. HWFV1 and MWDG2 use their corresponding
 Metal FV1 and DG2 update operators on the complete finest-level DEM grid. This
 overcomes Metal's lack of the CUB sort/scan primitives used to build the CUDA
 adaptive tree, but it does not compress the mesh: `epsilon`, `grading` and
 `refine_wall` do not change the Metal mesh. A notice is printed at startup so
 this limitation cannot be mistaken for a native adaptive run.
+ACC_NUGRID likewise uses the dense Metal ACC operator at the finest level;
+`L` and `epsilon` are accepted but do not make a mixed-size Metal mesh.
 Outputs follow the uniform Metal path; the adaptive-only `.cumu` and `.loss`
 files are not produced because the mesh does not change.
 
@@ -118,7 +120,8 @@ files are absent, it uses the conservative piecewise-constant projection
 Infiltration, evaporation and Green-Ampt use the same Metal loss kernels as
 FV1/DG2. See `README_8.4.md` for implementation details and validation scope.
 
-Start-up line: `LISFLOOD-FP 8.4`.
+`lisflood -version` and normal startup print one minimal version line:
+`LISFLOOD-FP 8.4`.
 
 ## Earlier changes
 
@@ -233,9 +236,10 @@ ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite,
 ## Use
 
 As 8.2. Put `cuda` in the `.par` file, or pass `-cuda`, to run on the GPU; on a
-Mac `metal` / `-metal` means the same, and FV1, FV2, DG2, ACC, HWFV1 and
-MWDG2 run on the Apple GPU. HWFV1/MWDG2 currently use the dense finest-level
-mode described above. Add the keywords above for infiltration and evaporation.
+Mac `metal` / `-metal` means the same, and FV1, FV2, DG2, ACC, ACC_NUGRID,
+HWFV1 and MWDG2 run on the Apple GPU. The three non-uniform/adaptive solver
+keywords currently use the dense finest-level mode described above. Add the
+keywords above for infiltration and evaporation.
 
 ## Licence
 

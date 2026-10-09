@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small Apple-Metal checks for the HWFV1 and MWDG2 dense paths.
+"""Small Apple-Metal checks for all three non-uniform/adaptive dense paths.
 
 Usage: python3 tests_8.4/metal_adaptive.py build/lisflood [WORK]
 """
@@ -42,7 +42,7 @@ def main():
         "output_precision 9\ninfiltration .000001\n"
     )
     failed = []
-    for solver in ("hwfv1", "mwdg2"):
+    for solver in ("hwfv1", "mwdg2", "acc_nugrid"):
         out = root / solver
         if out.exists():
             shutil.rmtree(out)

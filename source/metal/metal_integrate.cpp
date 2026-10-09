@@ -77,3 +77,17 @@ void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars
   lis::metal::dg2::simulate(filenames, files, states, pars, solver, boundCs,
                             stage, arrays, verbose);
 }
+
+void run_metal_acc_nugrid(Fnames &filenames, Files *files, States &states,
+                          Pars &pars, Solver &solver, BoundCs &boundCs,
+                          Stage &stage, Arrays &arrays, int verbose) {
+  fprintf(stderr, "NOTICE: Metal ACC_NUGRID uses the dense finest-level mesh; "
+                  "epsilon does not compress the mesh.\n");
+  if (verbose) {
+    printf("\nUsing the Metal GPU for ACC_NUGRID in dense finest-level mode\n");
+    printf("  adaptive threshold epsilon=%g (mesh compression is disabled)\n\n",
+           (double)solver.epsilon);
+  }
+  lis::metal::acc::simulate(filenames, files, states, pars, solver, boundCs,
+                            stage, arrays, verbose);
+}

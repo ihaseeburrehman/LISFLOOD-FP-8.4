@@ -419,7 +419,7 @@ int main(int argc, char *argv[])
 	
 	// infiltration and evaporation: CPU classic and sub-grid solvers, and
 	// (from 8.4) the CUDA and Metal FV1, FV2, DG2, ACC, MWDG2 and HWFV1
-	// solvers, plus CUDA ACC_NUGRID; the others ignore them
+	// and ACC_NUGRID solvers; the others ignore them
 #if defined(CUDA)
 	const bool losses_on_gpu = (Statesptr->cuda == ON &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
@@ -429,7 +429,7 @@ int main(int argc, char *argv[])
 	const bool losses_on_gpu = (Statesptr->cuda == ON && metal_is_available() &&
 		(Statesptr->fv1 == ON || Statesptr->fv2 == ON || Statesptr->dg2 == ON ||
 		 Statesptr->acceleration == ON || Statesptr->mwdg2 == ON ||
-		 Statesptr->hwfv1 == ON));
+		 Statesptr->hwfv1 == ON || Statesptr->acc_nugrid == ON));
 #else
 	const bool losses_on_gpu = false;
 #endif
@@ -439,8 +439,8 @@ int main(int argc, char *argv[])
 		 Statesptr->acc_nugrid == ON || Statesptr->mwdg2 == ON || Statesptr->hwfv1 == ON))
 	{
 		fprintf(stderr, "WARNING: infiltration and evaporation are not applied by this solver "
-			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and MWDG2/HWFV1, "
-			"and CUDA ACC_NUGRID)\n");
+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC, ACC_NUGRID, "
+			"MWDG2 and HWFV1)\n");
 	}
 	// Green-Ampt is a separate choice from the constant rate, and only the
 	// GPU solvers identified above apply it
@@ -453,8 +453,8 @@ int main(int argc, char *argv[])
 	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
 	{
 		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
-			"(supported by CUDA/Metal FV1, FV2, DG2, ACC and MWDG2/HWFV1, "
-			"and CUDA ACC_NUGRID)\n");
+			"(supported by CUDA/Metal FV1, FV2, DG2, ACC, ACC_NUGRID, "
+			"MWDG2 and HWFV1)\n");
 	}
 
 #ifdef CUDA
@@ -866,6 +866,11 @@ int main(int argc, char *argv[])
 		run_metal_mwdg2(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr, *BCptr,
 				*Stageptr, *Arrptr, verbosemode);
 	}
+	else if (Statesptr->acc_nugrid == ON && Statesptr->cuda == ON && metal_is_available())
+	{
+		run_metal_acc_nugrid(*Fnameptr, &Fps, *Statesptr, *Parptr, *Solverptr,
+				*BCptr, *Stageptr, *Arrptr, verbosemode);
+	}
 #endif
 	else
 	{
@@ -930,63 +935,7 @@ int main(int argc, char *argv[])
 void printversion(int verbose)
 // printout header with program and version number
 {
-  printf("***************************\n");
-  printf(" LISFLOOD-FP %s\n", LF_Release);
-  if (verbose == ON)
-  {
-#if defined (__INTEL_COMPILER)
-	  printf("Intel Compiler version: %d\n", __INTEL_COMPILER);
-
-	  //https://software.intel.com/en-us/node/514528
-	  printf("CPU instructions used:");
-#if defined (__AVX2__)
-	  printf(" AVX2");
-#endif
-#if defined (__AVX__)
-	  printf(" AVX");
-#endif
-#if defined (__SSE4_2__)
-	  printf(" SSE_4.2");
-#endif
-#if defined (__SSE4_1__)
-	  printf(" SSE_4.1");
-#endif
-#if defined (__SSE3__)
-	  printf(" SSE3");
-#endif
-#if defined (__SSE2__)
-	  printf(" SSE2");
-#endif
-#if defined (__SSE__)
-	  printf(" SSE");
-#endif
-	  printf("\n");
-
-#endif
-  }
-
-#if defined (CUDA)
-  printf("CUDA supported\n");
-#endif
-#if defined (_PROFILE_MODE) && _PROFILE_MODE > 0
-  printf("Profile Mode Enabled: %d\n", _PROFILE_MODE);
-#endif
-#if defined (_SGM_BY_BLOCKS) && _SGM_BY_BLOCKS > 0
-  printf("_SGM_BY_BLOCKS: %d\n", _SGM_BY_BLOCKS);
-#endif
-#if defined (_BALANCE_TYPE) && _BALANCE_TYPE > 0
-  printf("_BALANCE_TYPE: %d\n", _BALANCE_TYPE);
-#endif
-#if defined (_ONLY_RECT) && _ONLY_RECT == 1
-  printf("Rectangular channels only.\n");
-#endif
-#if defined (_DISABLE_WET_DRY) && _DISABLE_WET_DRY == 1
-  printf("_DISABLE_WET_DRY.\n");
-#endif
-#if defined (_CALCULATE_Q_MODE) && (_CALCULATE_Q_MODE != 0)
-  printf("_CALCULATE_Q_MODE %d.\n", _CALCULATE_Q_MODE);
-#endif
-
-  printf("***************************\n\n");
+  (void)verbose;
+  printf("LISFLOOD-FP %s\n", LF_Release);
 }
 
