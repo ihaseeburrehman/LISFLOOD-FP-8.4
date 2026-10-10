@@ -1,18 +1,34 @@
 # LISFLOOD-FP 8.4
 
-Implementation status (9 October 2026): native adaptive Metal support is
-unfinished. HWFV1, MWDG2 and ACC_NUGRID currently dispatch to dense operators;
-accepting those keywords does not implement their compressed meshes. The
-28-run Metal Alzette matrix completed, but the CUDA matrix timed out in MWDG2.
-Neither full adaptive Metal support nor complete cross-backend validation is
-claimed. See the current handover in `README_8.4.md`.
+8.4 adds **GPU infiltration and evaporation** and **expanded Apple Metal
+support** to 8.3. Infiltration can use a uniform rate, a per-cell rate grid,
+or Green-Ampt; evaporation uses a time series and can accompany either
+infiltration model. The table below separates loss support from solver and
+mesh support.
 
-LISFLOOD-FP 8.3 with floodplain infiltration and evaporation on the GPU
-(constant rate or Green-Ampt) and the FV2, DG2 and ACC solvers on Apple
-computers (with FV1 from 8.3, all four uniform-grid GPU solvers).
-8.3 is LISFLOOD-FP 8.2 with faster, reproducible GPU solvers on NVIDIA
-hardware and a Metal back end for FV1. Without the new keywords, 8.4 computes
-exactly what 8.3 computes.
+8.3 improved CUDA execution and introduced Metal FV1. 8.2 had no Metal
+backend. Existing CPU loss support is unchanged in 8.4; CPU FV1/FV2/DG2
+still do not apply these losses. Thus the new coverage is every **GPU solver
+selection**, not every CPU solver in LISFLOOD-FP.
+
+| GPU solver | CUDA flow solver in 8.2/8.3 | CUDA losses in 8.2/8.3 | CUDA losses in 8.4 | Metal flow solver in 8.3 | Metal in 8.4, including losses |
+|---|---|---|---|---|---|
+| FV1 | Available | None | All three loss options | Available, without losses | Native uniform grid; losses added |
+| FV2 | Available | None | All three loss options | Unavailable | New native uniform-grid solver and losses |
+| DG2 | Available | None | All three loss options | Unavailable | New native uniform-grid solver and losses |
+| ACC | Available | None | All three loss options | Unavailable | New native uniform-grid solver and losses |
+| ACC_NUGRID | Static non-uniform mesh | None | All three loss options | Unavailable | Dense ACC compatibility mode and losses; no mixed-size mesh |
+| HWFV1 | Adaptive mesh | None | All three loss options | Unavailable | Dense FV1 compatibility mode and losses; no adaptation |
+| MWDG2 | Adaptive mesh | None | All three loss options | Unavailable | Dense DG2 compatibility mode and losses; no adaptation |
+
+**All three loss options** means constant-rate infiltration (uniform or
+gridded), Green-Ampt infiltration, and evaporation. Uniform-rate and
+Green-Ampt infiltration are alternatives; evaporation can be combined with
+either. A supported keyword does not imply identical meshes or results across
+backends. Native Metal adaptation for the last three rows remains unfinished.
+The 28-run dense Metal Alzette matrix completed; the CUDA MWDG2 basin run
+stalled, so the complete cross-backend matrix is not yet validated. See
+`README_8.4.md` for the evidence and handover.
 
 The version number 8.4 is a working name until agreed with the LISFLOOD-FP
 developers.
@@ -42,12 +58,48 @@ from its top folder: `patch -p1 -E --binary < lisflood-8.2-to-8.3.patch`, then
 
 ## What is new in 8.4
 
-### Infiltration and evaporation on the GPU
+### 1. Infiltration and evaporation on CUDA
 
 In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
 water by infiltration and evaporation; the GPU solvers read the keywords and
 ignore them. In 8.4 all seven GPU solver selections apply them on CUDA and
-Metal: FV1, FV2, DG2, ACC, ACC_NUGRID, HWFV1 and MWDG2.
+Metal: FV1, FV2, DG2, ACC, ACC_NUGRID, HWFV1 and MWDG2, with the Metal mesh
+limitations shown above. On CUDA the existing uniform, non-uniform and
+adaptive flow implementations are retained.
+
+Add the following to a case's `.par` file for CUDA FV1 with 2 mm/h uniform
+infiltration and evaporation; keep the case's terrain, boundaries, forcing
+and output settings:
+
+```text
+cuda
+fv1
+infiltration 0.00000055555556
+evaporation evap.dat
+```
+
+An `evap.dat` specifying a constant 3 mm/day is:
+
+```text
+Evaporation 3 mm/day
+2 days
+3 0
+3 10
+```
+
+For Green-Ampt, replace the `infiltration <rate>` line with:
+
+```text
+infiltration greenampt
+greenampt_ks 10
+greenampt_psi 110
+greenampt_porosity 0.43
+greenampt_theta_init 0.30
+```
+
+These values illustrate file syntax; they are not calibrated basin parameters.
+Choose one solver keyword: `fv1`, `fv2`, `dg2`, `acceleration`, `acc_nugrid`,
+`hwfv1`, or `mwdg2`. Adaptive/non-uniform input requirements are described below.
 
 **Constant rate**, as in the CPU solvers: every wet cell (deeper than
 `DepthThresh`, not NoData) loses `(infiltration rate + evaporation rate) x dt`
@@ -107,7 +159,13 @@ Details:
   `L >= 5` for `acc_nugrid`.
 - CPU FV1/FV2/DG2 do not apply them and print a warning.
 
-### GPU solvers on Apple Silicon
+### 2. Additional Metal solvers and their losses
+
+8.4 adds native Metal FV2, DG2 and ACC to the Metal FV1 introduced in 8.3.
+All four apply the same infiltration and evaporation options described above.
+On an Apple Silicon build, replace `cuda` with `metal` in the example; retain
+the loss keywords and the solver's required input files. The three remaining
+GPU solver keywords are accepted through the dense compatibility modes below.
 
 With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2, ACC, ACC_NUGRID,
 HWFV1 and MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and
