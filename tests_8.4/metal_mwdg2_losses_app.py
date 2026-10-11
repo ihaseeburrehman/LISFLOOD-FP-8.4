@@ -79,7 +79,9 @@ try:
         raise AssertionError(f"distributed infiltration/mass accounting failed: {grid}")
     if not (149.5 < green[0] < 150.0 and green[1] < 0):
         raise AssertionError(f"Green-Ampt was not applied: {green}")
-    if not math.isclose(cap[1], -3.75e-5, abs_tol=1e-5):
+    # The cap allows 3.75e-5 m3 in all, below one float step of the stored
+    # water level, so at most that much may be booked (and then removed).
+    if not (-3.75e-5 - 1e-5 <= cap[1] <= 0.0 and math.isclose(cap[0], 150.0, abs_tol=0.05)):
         raise AssertionError(f"Green-Ampt soil-depth cap failed: {cap}")
     if not math.isclose(evap[0], 147.0, abs_tol=0.05) or not math.isclose(evap[1], -3.0, abs_tol=0.01):
         raise AssertionError(f"evaporation/mass accounting failed: {evap}")
@@ -225,7 +227,7 @@ regrid_case.write_text(case.read_text().replace(f"resroot {dynamic}/out",
                        .replace("epsilon 0.1", "epsilon 0.001") +
     "infiltration greenampt\ngreenampt_ks 10\ngreenampt_psi 100\n"
     "greenampt_porosity 0.45\ngreenampt_theta_init 0.2\n"
-    "greenampt_soil_depth 0.0000001\n")
+    "greenampt_soil_depth 0.0001\n")
 result = subprocess.run([str(binary), "-v", str(regrid_case)], text=True,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 (dynamic / "regrid.log").write_text(result.stdout)
@@ -236,8 +238,75 @@ final_leaves = re.search(r"Finished native adaptive MWDG2: leaves=(\d+)", result
 if not initial_leaves or not final_leaves or initial_leaves.group(1) == final_leaves.group(1):
     raise AssertionError("Green-Ampt run did not exercise an adaptive topology change")
 loss_csv = (dynamic / "regrid.loss").read_text().strip().splitlines()
-cap_volume = 45 * 0.0000001 * (0.45 - 0.2)
+cap_volume = 45 * 0.0001 * (0.45 - 0.2)
 observed_cap_loss = float(loss_csv[-1].split(",")[2])
-if not 0.9 * cap_volume <= observed_cap_loss <= cap_volume + 1e-8:
+if not 0.9 * cap_volume <= observed_cap_loss <= cap_volume * 1.001:
     raise AssertionError(f"Green-Ampt F/soil-cap state did not persist through regrid: {loss_csv[-1]}")
 print(f"PASS: Green-Ampt soil-cap state through adaptive regrid ({initial_leaves.group(1)} -> {final_leaves.group(1)} leaves)")
+
+# Small losses on a high bed: the adaptive state stores the level z + h in
+# float32, so 2 mm/h over a 1 s step (5.6e-7 m) is below one float step of a
+# 300 m level. The residual must carry it until the level can take it, and
+# the books must match the water that actually left.
+def grid_sum(path):
+    return sum(float(v) for line in path.read_text().splitlines()[6:] for v in line.split()) * 100.0
+
+high = work / "high_bed"
+high.mkdir(parents=True, exist_ok=True)
+write_asc(high / "dem.asc", [[300.0] * 16 for _ in range(16)])
+write_asc(high / "start.asc", [[0.5] * 16 for _ in range(16)])
+expected = 2.0 / 1000 / 3600 * 300 * 16 * 16 * 100.0  # 2 mm/h, 300 s, 256 cells of 100 m2
+# the level changes in float steps of 2**-15 m at 300.5 m: allow one per cell
+quantum = 2.0 ** -15 * 16 * 16 * 100.0
+for solver in ("hwfv1", "mwdg2"):
+    par = high / f"{solver}.par"
+    par.write_text("\n".join([
+        f"DEMfile {high}/dem.asc", f"startfile {high}/start.asc",
+        f"resroot {high}/{solver}", "sim_time 300", "saveint 300", "massint 300",
+        "initial_tstep 1", "fpfric 0", "max_ref_lvl 4", "epsilon 0", solver, "cuda",
+        "infiltration 0.00000055555556", "output_precision 9", ""]))
+    result = subprocess.run([str(binary), "-v", str(par)], text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    (high / f"{solver}.log").write_text(result.stdout)
+    if result.returncode:
+        raise AssertionError(f"high-bed {solver} run failed:\n{result.stdout[-2000:]}")
+    booked = float((high / f"{solver}.loss").read_text().strip().splitlines()[-1].split(",")[2])
+    final = grid_sum(sorted(high.glob(f"{solver}-*.wd"))[-1])
+    taken = 0.5 * 16 * 16 * 100.0 - final
+    if not (abs(booked - expected) <= quantum and abs(taken - booked) <= 0.01 * expected):
+        raise AssertionError(f"high-bed {solver} losses: expected {expected:.4f} m3, "
+                             f"booked {booked:.4f}, stored water fell by {taken:.4f}")
+    print(f"PASS: {solver} 2 mm/h infiltration on a 300 m bed: {booked:.4f} m3 booked, "
+          f"{taken:.4f} m3 left the water (expected {expected:.4f})")
+
+# NoData to the north and east of a lake at rest. CUDA's DG2 input averages
+# the corner samples, so the wall height (NoData) would raise the bed of the
+# lake cells beside it and set the lake in motion; Metal uses the cell's own
+# value for a NoData corner, so the lake stays at rest.
+nod = work / "nodata_lake"
+nod.mkdir(parents=True, exist_ok=True)
+dem_rows = [[-9999 if (r < 3 or c > 12) else 50.0 for c in range(16)] for r in range(16)]
+write_asc(nod / "dem.asc", dem_rows)
+write_asc(nod / "start.asc", [[0 if v == -9999 else 0.4 for v in row] for row in dem_rows])
+par = nod / "lake.par"
+par.write_text("\n".join([
+    f"DEMfile {nod}/dem.asc", f"startfile {nod}/start.asc", f"resroot {nod}/lake",
+    "sim_time 20", "saveint 20", "massint 20", "initial_tstep 1", "fpfric 0.03",
+    "max_ref_lvl 4", "epsilon 0", "wall_height 10000", "nodata_elevation -9999",
+    "mwdg2", "cuda", "qoutput", ""]))
+result = subprocess.run([str(binary), "-v", str(par)], text=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+(nod / "lake.log").write_text(result.stdout)
+if result.returncode:
+    raise AssertionError(f"NoData lake run failed:\n{result.stdout[-2000:]}")
+def grid(path):
+    return [list(map(float, line.split())) for line in path.read_text().splitlines()[6:] if line.strip()]
+frames = sorted(nod.glob("lake-*.wd"))
+depth = grid(frames[-1])
+qx = grid(Path(str(frames[-1])[:-3] + ".Qx"))
+wet = [(r, c) for r in range(16) for c in range(16) if dem_rows[r][c] != -9999]
+worst_h = max(abs(depth[r][c] - 0.4) for r, c in wet)
+worst_q = max(abs(qx[r][c]) for r, c in wet)
+if worst_h > 1e-4 or worst_q > 1e-4:
+    raise AssertionError(f"lake beside NoData moved: max |h-0.4| {worst_h:.3g} m, max |qx| {worst_q:.3g} m2/s")
+print(f"PASS: MWDG2 lake at rest beside NoData (max |dh| {worst_h:.2g} m, max |qx| {worst_q:.2g} m2/s)")

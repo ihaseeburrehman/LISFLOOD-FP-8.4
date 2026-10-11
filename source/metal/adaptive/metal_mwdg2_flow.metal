@@ -492,10 +492,12 @@ kernel void mwdg2_restrict_losses(device float *state [[buffer(0)]],
                                  device const float *depth [[buffer(2)]],
                                  device const float *dem [[buffer(3)]],
                                  device float *residual [[buffer(4)]],
-                                 constant uint4 &layout [[buffer(5)]], // count,L,xsz,ysz
-                                 constant float2 &physics [[buffer(6)]], // nodata,threshold
+                                 device float *removed [[buffer(5)]],  // depth x cells taken
+                                 constant uint4 &layout [[buffer(6)]], // count,L,xsz,ysz
+                                 constant float2 &physics [[buffer(7)]], // nodata,threshold
                                  uint index [[thread_position_in_grid]]) {
     if (index >= layout.x) return;
+    removed[index] = 0.0f;
     const uint node = active[index];
     const uint4 cell = node_geometry(node, layout.y);
     const uint xEnd = min(cell.x + cell.z, layout.z);
@@ -515,7 +517,12 @@ kernel void mwdg2_restrict_losses(device float *state [[buffer(0)]],
     }
     if (valid == 0) return;
     const float next = max(0.0f, h - loss / float(valid));
-    const float correction = (loss - float(valid) * (h - next)) / float(valid);
+    // The state holds the level eta = z + h: on a high bed a small loss can
+    // round away (one float step of eta at z = 300 m is 3e-5 m). Carry what
+    // the stored level did not take in the residual and report what it took.
+    const float stored = next < h ? (state[p + 9] + next) - state[p + 9] : h;
+    const float correction = (loss - float(valid) * (h - stored)) / float(valid);
+    removed[index] = float(valid) * (h - stored);
     for (uint y = cell.y; y < yEnd; ++y) {
         const uint row = layout.w - 1 - y;
         for (uint x = cell.x; x < xEnd; ++x) {
@@ -524,9 +531,9 @@ kernel void mwdg2_restrict_losses(device float *state [[buffer(0)]],
             residual[raster] += correction;
         }
     }
-    if (next == h) return;
+    if (stored == h) return;
     const float oldDepth = max(h, 0.0f);
-    const float scale = next > physics.y && oldDepth > 0.0f ? next / oldDepth : 0.0f;
+    const float scale = stored > physics.y && oldDepth > 0.0f ? stored / oldDepth : 0.0f;
     state[p] = state[p + 9] + next;
     const float h1x = state[p + 1] - state[p + 10];
     const float h1y = state[p + 2] - state[p + 11];

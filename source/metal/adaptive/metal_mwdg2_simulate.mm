@@ -451,8 +451,10 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
             {sizeof(lossPreflagLayout), sizeof(lossPreflagModes), sizeof(nodata)},
             nodeCount);
       }
-      uint32_t inputGeometry[4] = {side, side, static_cast<uint32_t>(pars.xsz),
-                                   static_cast<uint32_t>(pars.ysz)};
+      uint32_t wallBits = 0;
+      if (!std::getenv("LISFLOOD_ADAPTIVE_CUDA_NODATA_INPUT"))  // CUDA's wall averaging
+        std::memcpy(&wallBits, &wall, sizeof(wallBits));
+      uint32_t inputGeometry[4] = {side, side, static_cast<uint32_t>(pars.xsz), wallBits};
       runtime.dispatch("mwdg2_project_input", {packed, modalRaster}, inputGeometry,
                        sizeof(inputGeometry), finestCount);
       const float *modal = static_cast<const float *>(modalRaster.contents);
@@ -1058,11 +1060,17 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
               static_cast<uint32_t>(pars.xsz), static_cast<uint32_t>(pars.ysz)};
           float restrictPhysics[2] = {static_cast<float>(pars.nodata_elevation),
                                       static_cast<float>(solver.DepthThresh)};
+          id<MTLBuffer> leafRemoved = runtime.buffer(size_t(mesh.activeCount) * sizeof(float));
           runtime.dispatch("mwdg2_restrict_losses",
-              {state[2], mesh.active, lossDepth, lossDem, losses.residual_buffer()},
+              {state[2], mesh.active, lossDepth, lossDem, losses.residual_buffer(), leafRemoved},
               {restrictArgs, restrictPhysics}, {sizeof(restrictArgs), sizeof(restrictPhysics)},
               mesh.activeCount);
-          stepLossVolume = losses.take_interval_volume();
+          // Book what the leaf levels actually lost; the raster tally also
+          // counts residual carried from earlier steps.
+          losses.take_interval_volume();
+          const float *taken = static_cast<const float *>(leafRemoved.contents);
+          for (uint32_t i = 0; i < mesh.activeCount; ++i)
+            stepLossVolume += static_cast<double>(taken[i]) * cellArea;
           boundCs.VolOutMT += static_cast<NUMERIC_TYPE>(stepLossVolume);
           pars.InfilTotalLoss += static_cast<NUMERIC_TYPE>(stepLossVolume);
           cumulativeLossVolume += stepLossVolume;

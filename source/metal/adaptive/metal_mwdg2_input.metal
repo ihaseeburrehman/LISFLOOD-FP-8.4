@@ -40,6 +40,21 @@ kernel void mwdg2_project_input(device const float *raster [[buffer(0)]],
         corner[variable][2] = plane[nw];
         corner[variable][3] = plane[ne];
     }
+    // Metal deviation (geometry.w = wall_height as float bits, 0 = off): a
+    // corner on a NoData wall takes the projected cell's own values. CUDA
+    // averages the wall height into the cell, so a basin cell with NoData to
+    // its north or east gets a bed thousands of metres high (Alzette: -60 m
+    // depths; CUDA MWDG2 collapses there).
+    // A NoData cell keeps its own (wall) values at every corner.
+    const float wall = as_type<float>(geometry.w);
+    if (wall > 0.0f) {
+        const bool ownWall = corner[3][2] >= wall;
+        for (uint c = 0; c < 4; ++c) {
+            if (!ownWall && corner[3][c] < wall) continue;
+            for (uint variable = 0; variable < 4; ++variable)
+                corner[variable][c] = corner[variable][2];
+        }
+    }
 
     // The state stores free surface rather than depth. Projecting eta from
     // nodal sums preserves lake-at-rest cancellation with the independently
