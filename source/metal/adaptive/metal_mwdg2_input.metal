@@ -22,7 +22,10 @@ kernel void mwdg2_project_input(device const float *raster [[buffer(0)]],
 
     const uint x = index % width;
     const uint y = index / width;
-    const uint xp = min(x + 1, width - 1);
+    // read_and_project_modes_dg2: the node on the raster's east edge takes the
+    // edge cell (geometry.z = raster width), not the wall padding
+    const uint validWidth = geometry.z ? geometry.z : width;
+    const uint xp = x + 1 == validWidth ? x : min(x + 1, width - 1);
     const uint ym = y == 0 ? 0 : y - 1;
 
     const uint nw = y * width + x;

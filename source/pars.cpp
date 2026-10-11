@@ -1041,6 +1041,14 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
         return;
     }
 
+	if (read_empty_param(param_name, line_number, param_value_ptr, "refine_wall", verbose, mode))
+	{
+		Parptr->refine_wall = ON;
+		return;
+	}
+	if (read_integer_param(param_name, line_number, param_value_ptr, "ref_thickness", &Parptr->ref_thickness, verbose, mode))
+		return;
+
 	if (read_empty_param(param_name, line_number, param_value_ptr, "drain_nodata", verbose, mode))
 	{
 		Parptr->drain_nodata = ON;

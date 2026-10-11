@@ -4,6 +4,7 @@
     adaptive_parity.py make WORK              write every case and run_cuda.sh
     adaptive_parity.py metal WORK BIN [CASE]  run the Metal binary on the cases
     adaptive_parity.py compare WORK [CASE]    compare Metal with the CUDA outputs
+    adaptive_parity.py check WORK BIN         Metal against the saved CUDA outputs
 
 Each case folder holds the inputs, `case.par` (run in the folder by both back
 ends) and, after the runs, CUDA's `res/<case>-<k>.*` and Metal's
@@ -116,6 +117,22 @@ for solver in ("mwdg2", "hwfv1"):
                                       ["fpfric 0.03"] + BC_LINES[group])
 
 
+def rect_lake_inputs(folder):
+    # 20 x 12 raster (padded to 32 x 32): hill in a lake at rest
+    y, x = np.mgrid[0:12, 0:20]
+    dem = 0.1 * x + 1.5 * np.exp(-((x - 8) ** 2 + (y - 5) ** 2) / 6.0)
+    grid(os.path.join(folder, "dem.asc"), dem)
+    grid(os.path.join(folder, "start.asc"), np.clip(3.0 - dem, 0, None))
+
+
+def rect_dam_inputs(folder):
+    # 20 x 12 raster: a dam break that reaches the raster's north and east edges
+    y, x = np.mgrid[0:12, 0:20]
+    dem = 0.02 * x
+    grid(os.path.join(folder, "dem.asc"), dem)
+    grid(os.path.join(folder, "start.asc"), np.where(x < 8, 2.0, 0.2))
+
+
 def with_slopes(inputs):
     # acc_nugrid also reads <DEM>1x and <DEM>1y (DG2 bed slopes): zero here
     def make_inputs(folder):
@@ -144,6 +161,9 @@ FILES.update({"nug_hill": {"stage.txt": STAGE}, "nug_dam": {"stage.txt": STAGE},
               "nug_ps": {"bc.bci": "P 10.5 16.5 QFIX 0.5\nP 20.5 20.5 HVAR h1\n", "bc.bdy": BDY,
                          "stage.txt": STAGE},
               "nug_raininf": {"rain.txt": RAIN, "stage.txt": STAGE}})
+for solver in ("mwdg2", "hwfv1"):
+    CASES[f"rectlake_{solver}"] = (rect_lake_inputs, [solver, "epsilon 0.01"], 1, 0.1, 0.05, ["fpfric 0.03"])
+    CASES[f"rectdam_{solver}"] = (rect_dam_inputs, [solver, "epsilon 0.01"], 10, 1, 0.05, ["fpfric 0.03"])
 for name in ("nug_hill", "nug_dam", "nug_bcfree", "nug_ps", "nug_raininf"):
     CASES[name][5].append("stagefile stage.txt")
 
@@ -236,12 +256,57 @@ def compare(work, only=None):
     return worst
 
 
+# check: saved single-precision CUDA outputs (tests_8.4/fixtures/adaptive_parity,
+# the last output of each case, from the A100 build of 8.4) against Metal.
+# Limits: normalized L2 depth difference (%) at that output.
+CHECKS = {
+    "dam_fric_mwdg2_diag": ("dam_fric_mwdg2_diag-28", 0.01),  # MWDG2, friction, limiter, 29 steps
+    "dam_hwfv1_long": ("dam_hwfv1_long-10", 0.1),            # HWFV1, 20 s
+    "hill_hwfv1": ("hill_hwfv1-10", 0.2),                    # HWFV1, wet/dry hill, 30 s
+    "bcfree_hwfv1": ("bcfree_hwfv1-10", 0.5),                # HFIX inflow, FREE outflow
+    "bcqvar_hwfv1": ("bcqvar_hwfv1-10", 0.5),                # QVAR inflow, FREE outflow
+    "ps_hwfv1": ("ps_hwfv1-10", 0.5),                        # QFIX and HVAR point sources
+    "bcinf_hwfv1": ("bcinf_hwfv1-10", 0.5),                  # QFIX inflow with infiltration
+    "nug_dam": ("nug_dam-0010", 0.5),                        # ACC_NUGRID, compressed mesh
+}
+
+
+def check(work, binary):
+    fix = os.path.join(HERE, "fixtures", "adaptive_parity")
+    make(work)
+    failures = 0
+    for name, (ref, limit) in CHECKS.items():
+        folder = os.path.join(work, name)
+        metal(work, binary, name)
+        if name.startswith("nug_"):
+            k = int(ref.rsplit("-", 1)[1])
+            zc, hc = read_vtk(os.path.join(fix, name, ref + ".vtk"))
+            zm, hm = read_vtk(os.path.join(folder, f"metal-{k:04d}.vtk"))
+            ok = len(hc) == len(hm)
+            dl2 = 100 * np.linalg.norm(hm - hc) / np.linalg.norm(hc) if ok else float("inf")
+            text = f"{len(hm)} leaves (CUDA {len(hc)}), depth L2 {dl2:.4f}%"
+        else:
+            k = int(ref.rsplit("-", 1)[1])
+            hc = read(os.path.join(fix, name, ref + ".wd"))
+            hm = read(os.path.join(folder, f"metal-{k:04d}.wd"))
+            dl2 = 100 * np.linalg.norm(hm - hc) / np.linalg.norm(hc)
+            ok = True
+            text = f"depth L2 {dl2:.4f}%, max |dh| {abs(hm - hc).max():.3g} m"
+        ok = ok and dl2 <= limit
+        failures += not ok
+        print(("PASS " if ok else "FAIL ") + f"{name}: output {k} against CUDA: {text} (limit {limit}%)")
+    print("ALL PASSED" if not failures else f"{failures} FAILED")
+    return failures
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "make":
         make(sys.argv[2])
     elif cmd == "metal":
         metal(sys.argv[2], os.path.abspath(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None)
+    elif cmd == "check":
+        sys.exit(1 if check(sys.argv[2], os.path.abspath(sys.argv[3])) else 0)
     elif cmd == "compare":
         compare(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
     else:

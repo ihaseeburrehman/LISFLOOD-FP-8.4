@@ -69,6 +69,8 @@ public:
   // "mwdg2_encode_level" (multiwavelets, MWDG2) or "hwfv1_encode_level" (Haar).
   void setEncodeKernel(const char *name) { encodeKernel_ = name; }
   float lastNorms[4] = {0, 0, 0, 0};  // eta, qx, qy, z normalizers of the last select
+  // raster size inside the 2^L square: its last row/column is the domain edge
+  void setValidSize(uint32_t width, uint32_t height) { validW_ = width; validH_ = height; }
 
 private:
   id<MTLDevice> device_;
@@ -76,6 +78,7 @@ private:
   id<MTLCommandQueue> queue_;
   TreeScan scan_;
   std::string encodeKernel_ = "mwdg2_encode_level";
+  uint32_t validW_ = 0, validH_ = 0;
   std::unordered_map<std::string, id<MTLComputePipelineState>> pipelines_;
   id<MTLComputePipelineState> pipeline(const char *name);
   void dispatch(const char *name, const std::vector<id<MTLBuffer>> &buffers,

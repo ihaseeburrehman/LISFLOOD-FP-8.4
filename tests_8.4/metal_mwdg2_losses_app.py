@@ -182,7 +182,9 @@ if not mass_rows or not math.isclose(float(mass_rows[-1].split()[11]), expected_
 # As CUDA, the first mass record follows the first step ending at or after
 # 0.1 s; it holds the rain of every step that started before that time.
 first_rows = [row for row in mass_rows if float(row.split()[0]) >= 0.1 - 1e-6]
-first_time = float(first_rows[0].split()[0]) if first_rows else None
+# the .mass time has three decimals: take the record's end time from the log
+ends = [t + dt for t, dt in steps if t + dt >= 0.1 - 1e-6]
+first_time = ends[0] if first_rows and ends else None
 first_expected = 0.0
 previous_dt = 0.01
 for time, current_dt in steps:
@@ -206,8 +208,21 @@ print("PASS: adaptive Metal dynamic NetCDF rain slice update, NoData skip, and m
 # persistent raster soil state while the adaptive leaves are reselected. The
 # total is capped at soil_depth * dtheta per valid raster cell.
 regrid_case = dynamic / "regrid.par"
+# a small dam break (0.12 m on the two western columns, 0.09 m elsewhere) and
+# a fine threshold make the leaves change (without the rain, whose NoData-edge
+# preflag would keep this small raster at the finest level). Depths stay below
+# 0.125 m: a float32 step is then 7.5e-9 m, below the 2.5e-8 m soil cap per
+# cell this check measures (at 0.3 m it would be 3e-8 m).
+regrid_start = [[(0.12 if col < 2 else 0.09) if value != -9999 else -9999
+                 for col, value in enumerate(row)] for row in start]
+write_asc(dynamic / "regrid_start.asc", regrid_start, cellsize=1)
 regrid_case.write_text(case.read_text().replace(f"resroot {dynamic}/out",
-                                                  f"resroot {dynamic}/regrid") +
+                                                  f"resroot {dynamic}/regrid")
+                       .replace(f"startfile {dynamic}/start.asc",
+                                f"startfile {dynamic}/regrid_start.asc")
+                       .replace("sim_time 0.2", "sim_time 2")
+                       .replace(f"dynamicrainfile {ncfile}\n", "")
+                       .replace("epsilon 0.1", "epsilon 0.001") +
     "infiltration greenampt\ngreenampt_ks 10\ngreenampt_psi 100\n"
     "greenampt_porosity 0.45\ngreenampt_theta_init 0.2\n"
     "greenampt_soil_depth 0.0000001\n")

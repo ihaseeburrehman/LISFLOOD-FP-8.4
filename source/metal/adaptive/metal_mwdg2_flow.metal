@@ -123,10 +123,17 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
                       constant float4 &physics [[buffer(9)]],
                       uint index [[thread_position_in_grid]]) {
     if (index>=layout.x) return;
+    // frictioned bit 1: the leaf centre lies outside the raster (padding);
+    // dg2_update.cu does not update such leaves.
+    if (frictioned[index] & 2u) {
+        for(uint k=0;k<9;++k) rhs[index*9+k]=0.0f;
+        edgeRate[index]=0.0f;
+        return;
+    }
     // friction_implicit.cu updates a leaf's neighbour copies only when the
-    // leaf itself is above tol_h and tol_s: read the neighbours from the
-    // tree with friction applied (tree) or without (plainTree) accordingly.
-    if (!frictioned[index]) tree=plainTree;
+    // leaf itself is above tol_h and tol_s (bit 0): read the neighbours from
+    // the tree with friction applied (tree) or without (plainTree).
+    if (!(frictioned[index] & 1u)) tree=plainTree;
     uint node=active[index];
     uint4 cell=node_geometry(node,layout.y);
     float dx=physics.x*cell.z,dy=physics.y*cell.z,g=physics.z,tolerance=physics.w;
@@ -337,7 +344,7 @@ kernel void mwdg2_limit_slopes(device const float *u [[buffer(0)]],
                                constant float &maxDepth [[buffer(9)]],
                                uint index [[thread_position_in_grid]]) {
     if (index>=layout.x) return;
-    if (!frictioned[index]) tree=plainTree;
+    if (!(frictioned[index] & 1u)) tree=plainTree;
     uint node=active[index];
     uint4 cell=node_geometry(node,layout.y);
     uint out=index*6;
@@ -640,7 +647,7 @@ kernel void mwdg2_friction_own(device float *scales [[buffer(0)]],
     bool belowDepth=h<params.z;
     float ux=belowDepth?0.0f:scales[p+3]/h, uy=belowDepth?0.0f:scales[p+6]/h;
     bool belowSpeed=abs(ux)<params.w && abs(uy)<params.w;
-    frictioned[index]=!(belowDepth||belowSpeed);
+    frictioned[index]=(frictioned[index]&2u)|((belowDepth||belowSpeed)?0u:1u);
     if(belowDepth||belowSpeed) { scales[p+3]=0.0f; scales[p+6]=0.0f; return; }
     float n=manning[index],g=params.x,dt=params.y;
     float z0=scales[p+9],zx=scales[p+10],zy=scales[p+11];
@@ -724,7 +731,7 @@ kernel void hwfv1_update(device const float *view [[buffer(0)]],
                          constant float4 &params [[buffer(11)]],
                          uint index [[thread_position_in_grid]]) {
     if (index >= layout.x) return;
-    if (!frictioned[index]) tree = plainTree;
+    if (!(frictioned[index] & 1u)) tree = plainTree;
     uint node = active[index];
     uint4 cell = node_geometry(node, layout.y);
     float dx = physics.x*cell.z, dy = physics.y*cell.z, g = physics.z, tol = physics.w;

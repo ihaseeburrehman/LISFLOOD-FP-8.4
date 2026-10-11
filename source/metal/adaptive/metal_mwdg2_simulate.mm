@@ -11,6 +11,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -315,6 +316,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       Runtime runtime(verbose);
       AdaptiveMeshBuilder meshBuilder(runtime.device, runtime.library, runtime.queue);
       if (haar) meshBuilder.setEncodeKernel("hwfv1_encode_level");
+      meshBuilder.setValidSize(static_cast<uint32_t>(pars.xsz), static_cast<uint32_t>(pars.ysz));
       Losses losses;
       const bool lossesEnabled = losses.setup(runtime.device, filenames, states, pars,
           &arrays, pars.xsz, pars.ysz, pars.xsz, 0, 0, rasterCells, verbose);
@@ -360,36 +362,24 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       for (uint32_t y = 0; y < side; ++y) {
         for (uint32_t x = 0; x < side; ++x) {
           const size_t internal = size_t(y) * side + x;
+          // Padding beyond the raster repeats the edge cells. (CUDA pads with
+          // wall_height and no water; coarse leaves next to the raster edge
+          // then read ancestors that mix wall and water and a lake at rest
+          // starts to flow. Edge leaves see ghost cells as in CUDA, and DG2
+          // does not update padding leaves, so the padding values only enter
+          // through those ancestors and the multiresolution analysis.)
+          // NoData cells are walls without water.
           float h = 0.0f, qx = 0.0f, qy = 0.0f, z = wall;
-          if (pars.xsz > 0 && pars.ysz > 0) {
-            // Match CUDA's power-of-two raster padding: repeat edge samples
-            // instead of introducing an artificial wall/shoreline.
-            const uint32_t validX = std::min(x, static_cast<uint32_t>(pars.xsz - 1));
-            const uint32_t validY = std::min(y, static_cast<uint32_t>(pars.ysz - 1));
-            const size_t input = size_t(pars.ysz - 1 - validY) * pars.xsz + validX;
+          {
+            const size_t input = size_t(pars.ysz - 1 - std::min(y, uint32_t(pars.ysz - 1))) * pars.xsz +
+                                 std::min(x, uint32_t(pars.xsz - 1));
             z = static_cast<float>(arrays.DEM[input]);
-            const bool noDataCell = std::fabs(z - static_cast<float>(pars.nodata_elevation)) < 1.0f;
-            if (!noDataCell) {
+            if (std::fabs(z - static_cast<float>(pars.nodata_elevation)) < 1.0f) {
+              z = wall;
+            } else {
               h = static_cast<float>(std::max<NUMERIC_TYPE>(0, arrays.H[input]));
               qx = static_cast<float>(arrays.HU[input]);
               qy = static_cast<float>(arrays.HV[input]);
-            } else {
-              z = wall;
-            }
-            if (x < static_cast<uint32_t>(pars.xsz) &&
-                y < static_cast<uint32_t>(pars.ysz)) {
-              bool nearNoData = false;
-              const int dx4[4] = {-1, 1, 0, 0};
-              const int dy4[4] = {0, 0, -1, 1};
-              for (int face = 0; face < 4; ++face) {
-                const int nx = static_cast<int>(x) + dx4[face];
-                const int ny = static_cast<int>(y) + dy4[face];
-                if (nx < 0 || ny < 0 || nx >= pars.xsz || ny >= pars.ysz) continue;
-                const size_t neighbour = size_t(pars.ysz - 1 - ny) * pars.xsz + nx;
-                nearNoData |= std::fabs(static_cast<float>(arrays.DEM[neighbour]) -
-                    static_cast<float>(pars.nodata_elevation)) < 1.0f;
-              }
-              if (noDataCell || nearNoData) markProtectedParent(x, y);
             }
           }
           // projection kernel expects h,qx,qy,z and converts h to eta=h+z.
@@ -410,6 +400,29 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         }
       }
       for (const auto &src : bc.sources) markProtectedParent(src.x, src.y);
+      // Rain (a Metal extension: CUDA's adaptive solver has none) and
+      // drain_nodata act per NoData cell, so with either one the NoData edges
+      // stay at the finest level (the losses preflag below does the same).
+      if (states.rainfall == ON || states.dynamicrainfall == ON || pars.drain_nodata == ON)
+        for (uint32_t y = 0; y < static_cast<uint32_t>(pars.ysz); ++y)
+          for (uint32_t x = 0; x < static_cast<uint32_t>(pars.xsz); ++x) {
+            auto noData = [&](int cx, int cy) {
+              return std::fabs(static_cast<float>(arrays.DEM[size_t(pars.ysz - 1 - cy) * pars.xsz + cx]) -
+                               static_cast<float>(pars.nodata_elevation)) < 1.0f;
+            };
+            bool mark = noData(int(x), int(y));
+            const int dx4[4] = {-1, 1, 0, 0}, dy4[4] = {0, 0, -1, 1};
+            for (int f = 0; f < 4 && !mark; ++f) {
+              const int nx = int(x) + dx4[f], ny = int(y) + dy4[f];
+              if (nx >= 0 && ny >= 0 && nx < pars.xsz && ny < pars.ysz) mark = noData(nx, ny);
+            }
+            if (mark) markProtectedParent(x, y);
+          }
+      if (pars.refine_wall == ON)  // refine_high_wall.cu: north and east strips
+        for (int j = 0; j < pars.ref_thickness; ++j) {
+          for (int i = 0; i < pars.xsz; ++i) markProtectedParent(i, pars.ysz - 1 - j);
+          for (int i = 0; i < pars.ysz; ++i) markProtectedParent(pars.xsz - 1 - j, i);
+        }
       for (int i = 0; i < stage.Nstages; ++i)
         if (stage.stage_check[i] && stage.stage_grid_x[i] >= 0 && stage.stage_grid_y[i] >= 0 &&
             stage.stage_grid_x[i] < pars.xsz && stage.stage_grid_y[i] < pars.ysz)
@@ -428,7 +441,8 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
             {sizeof(lossPreflagLayout), sizeof(lossPreflagModes), sizeof(nodata)},
             nodeCount);
       }
-      uint32_t inputGeometry[4] = {side, side, 0, 0};
+      uint32_t inputGeometry[4] = {side, side, static_cast<uint32_t>(pars.xsz),
+                                   static_cast<uint32_t>(pars.ysz)};
       runtime.dispatch("mwdg2_project_input", {packed, modalRaster}, inputGeometry,
                        sizeof(inputGeometry), finestCount);
       const float *modal = static_cast<const float *>(modalRaster.contents);
@@ -498,6 +512,18 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       boundaryFlux = runtime.buffer(size_t(mesh.activeCount) * sizeof(float));
       id<MTLBuffer> frictionFlags = runtime.buffer(size_t(mesh.activeCount) * sizeof(uint32_t));
       id<MTLBuffer> bcCells = runtime.buffer(size_t(mesh.activeCount) * sizeof(int));
+      // frictionFlags bit 1: leaf centre outside the raster (dg2_update.cu skips it)
+      auto markPaddingLeaves = [&]() {
+        auto *f = static_cast<uint32_t *>(frictionFlags.contents);
+        for (uint32_t i = 0; i < mesh.activeCount; ++i) {
+          uint32_t x = 0, y = 0;
+          const uint32_t span = nodeSpan(mesh.activeHost[i], maxLevel, &x, &y);
+          const bool outside = 2 * x + span >= 2u * static_cast<uint32_t>(pars.xsz) ||
+                               2 * y + span >= 2u * static_cast<uint32_t>(pars.ysz);
+          f[i] = (f[i] & 1u) | (outside ? 2u : 0u);
+        }
+      };
+      markPaddingLeaves();
       id<MTLBuffer> bcDelta = runtime.buffer(size_t(mesh.activeCount) * sizeof(float));
       std::memcpy(bcCells.contents, bcCellHost.data(), bcCellHost.size() * sizeof(int));
       if (pars.limit_slopes == ON)
@@ -624,6 +650,13 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         for (uint32_t i = 0; i < mesh.activeCount; ++i) drained += volumes[i];
         boundCs.VolOutMT += static_cast<NUMERIC_TYPE>(drained);
       };
+      // LISFLOOD_MWDG2_PROFILE: wall time per phase, printed every 200 steps
+      const bool profile = std::getenv("LISFLOOD_MWDG2_PROFILE") != nullptr;
+      double phase[5] = {0, 0, 0, 0, 0};
+      auto clock = []() { return std::chrono::duration<double>(
+          std::chrono::steady_clock::now().time_since_epoch()).count(); };
+      double mark = clock();
+      auto lap = [&](int k) { if (profile) { const double now = clock(); phase[k] += now - mark; mark = now; } };
       while (solver.t < solver.Sim_Time) {
         @autoreleasepool {
         const double stepStartVolume = traceMass ? waterVolume(mesh,
@@ -750,6 +783,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
                            nodeCount);
           stage1Tree = neighbourTree;
         }
+        lap(0);
         LayoutArgs flowLayout{mesh.activeCount, maxLevel};
         double boundaryRateStage1 = 0.0, boundaryRateStage2 = 0.0;
         double rk1Signed = 0.0, rk1Negative = 0.0;
@@ -988,6 +1022,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         drainNoData(state[2]);
 
         double stepLossVolume = 0.0;
+        lap(1);
         if (lossesEnabled) {
           uint32_t lossLayout[4] = {mesh.activeCount, maxLevel,
                                     static_cast<uint32_t>(pars.xsz),
@@ -1021,6 +1056,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
           integratedLossTime += static_cast<double>(dt);
         }
 
+        lap(2);
         // Reinsert every evolved leaf on the finest grid, then encode it up
         // the full hierarchy before selecting the next adaptive topology.
         LayoutArgs expand{finestCount, maxLevel};
@@ -1054,6 +1090,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
               static_cast<long long>(solver.itCount),
               static_cast<double>(runtime.device.currentAllocatedSize) /
                   (1024.0 * 1024.0 * 1024.0));
+        lap(3);
         mesh = std::move(next);
         applyAdaptiveBoundaries(mesh, bc, maxLevel, pars.xsz, pars.ysz, bcCellHost);
         if (const char *dumpStep = std::getenv("LISFLOOD_DIAG_DUMP_STEP"))
@@ -1109,6 +1146,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         }
         std::memcpy(leafManning.contents, manning.data(), manning.size() * sizeof(float));
         std::memcpy(bcCells.contents, bcCellHost.data(), bcCellHost.size() * sizeof(int));
+        markPaddingLeaves();
         // RK workspaces are sized to the fixed hierarchy and reused across
         // regrids; only leaf-count-sized work buffers above need replacement.
         std::memcpy(state[0].contents, scales.contents, size_t(nodeCount) * 12 * sizeof(float));
@@ -1121,6 +1159,10 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
               static_cast<double>(runtime.device.currentAllocatedSize) /
                   (1024.0 * 1024.0 * 1024.0));
 
+        lap(4);
+        if (profile && solver.itCount % 200 == 199)
+          std::printf("MWDG2 profile (s) setup %.2f flow %.2f losses %.2f select %.2f after %.2f\n",
+                      phase[0], phase[1], phase[2], phase[3], phase[4]);
         solver.MinTstep = std::min(solver.MinTstep, static_cast<NUMERIC_TYPE>(dt));
         solver.Tstep = static_cast<NUMERIC_TYPE>(dt);
         solver.t += static_cast<NUMERIC_TYPE>(dt);

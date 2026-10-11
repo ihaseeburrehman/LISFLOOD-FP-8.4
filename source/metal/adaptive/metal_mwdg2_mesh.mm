@@ -269,7 +269,15 @@ AdaptiveMesh AdaptiveMeshBuilder::build(const uint8_t *significant,
       if(face==2) y=static_cast<int>(c.y)-1;
       if(face==3) x=static_cast<int>(c.x)-1;
       uint32_t id=0xffffffffu;
-      if(x>=0 && y>=0 && x<static_cast<int>(side) && y<static_cast<int>(side)) {
+      // find_neighbours.cu: N/E from the leaf's north-east finest cell, S/W
+      // from its south-west one; that cell on the last raster row/column (or
+      // the square's) has no neighbour on that face.
+      const int vw=static_cast<int>(validW_?validW_:side), vh=static_cast<int>(validH_?validH_:side);
+      const int xne=static_cast<int>(c.x+c.span-1), yne=static_cast<int>(c.y+c.span-1);
+      const bool border=(face==0 && (yne==vh-1 || yne==static_cast<int>(side)-1)) ||
+                        (face==1 && (xne==vw-1 || xne==static_cast<int>(side)-1)) ||
+                        (face==2 && c.y==0) || (face==3 && c.x==0);
+      if(!border && x>=0 && y>=0 && x<static_cast<int>(side) && y<static_cast<int>(side)) {
         id=owner[mortonDilate(static_cast<uint32_t>(x)) |
                  (mortonDilate(static_cast<uint32_t>(y))<<1)];
         NodeGeometry other=geometry(id,maxLevel);
