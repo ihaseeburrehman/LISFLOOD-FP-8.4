@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Metal against CUDA for the adaptive GPU solvers (MWDG2, HWFV1, ACC_NUGRID).
+
+    adaptive_parity.py make WORK              write every case and run_cuda.sh
+    adaptive_parity.py metal WORK BIN [CASE]  run the Metal binary on the cases
+    adaptive_parity.py compare WORK [CASE]    compare Metal with the CUDA outputs
+
+Each case folder holds the inputs, `case.par` (run in the folder by both back
+ends) and, after the runs, CUDA's `res/<case>-<k>.*` and Metal's
+`metal-<kkkk>.*` rasters. run_cuda.sh runs a CUDA build on every case (copy
+WORK to the HPC, run there, copy the `res` folders back).
+
+Compared at every saved output k >= 1 present on both sides (CUDA saves at the
+first step at or after k*saveint, Metal exactly at it; cases use steps that
+divide saveint). Printed per output: depth and flow-vector normalized L2
+difference (%), largest depth difference (m), and the water volume of each.
+"""
+import glob
+import os
+import subprocess
+import sys
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DAM = os.path.join(HERE, "fixtures", "mwdg2_cuda_z1_l5_e001")
+
+
+def grid(path, values, cellsize=1.0, nodata=-9999):
+    rows, cols = values.shape
+    with open(path, "w") as f:
+        f.write(f"ncols {cols}\nnrows {rows}\nxllcorner 0\nyllcorner 0\n"
+                f"cellsize {cellsize:g}\nNODATA_value {nodata}\n")
+        for row in values:
+            f.write(" ".join(f"{v:.6g}" for v in row) + "\n")
+
+
+def read(path):
+    return np.loadtxt(path, skiprows=6)
+
+
+def dam_inputs(folder, bed=None):
+    dem = read(os.path.join(DAM, "dem.asc")) if bed is None else bed
+    grid(os.path.join(folder, "dem.asc"), dem)
+    grid(os.path.join(folder, "start.asc"), read(os.path.join(DAM, "start.asc")))
+
+
+def hill_inputs(folder):
+    # sloping bed with a bump and a pond: wet/dry fronts and bed slopes
+    y, x = np.mgrid[0:32, 0:32]
+    dem = 0.05 * x + 2.0 * np.exp(-((x - 20) ** 2 + (y - 12) ** 2) / 20.0)
+    start = np.where((x < 10) & (y > 8) & (y < 24), 3.0 - dem, 0.0).clip(min=0)
+    grid(os.path.join(folder, "dem.asc"), dem)
+    grid(os.path.join(folder, "start.asc"), start)
+
+
+def pond_inputs(folder):
+    # a bowl with an off-centre pond; the water never reaches the domain edge
+    y, x = np.mgrid[0:32, 0:32]
+    dem = 0.01 * ((x - 16.0) ** 2 + (y - 16.0) ** 2)
+    start = np.where((x > 8) & (x < 15) & (y > 12) & (y < 20), 1.2 - dem, 0.0).clip(min=0)
+    grid(os.path.join(folder, "dem.asc"), dem)
+    grid(os.path.join(folder, "start.asc"), start)
+
+
+def lake_hill_inputs(folder):
+    # tests_8.4/fixtures/mwdg2_cuda_lake32_l5: a hill in a lake at rest
+    fix = os.path.join(HERE, "fixtures", "mwdg2_cuda_lake32_l5")
+    grid(os.path.join(folder, "dem.asc"), read(os.path.join(fix, "dem.asc")))
+    grid(os.path.join(folder, "start.asc"), read(os.path.join(fix, "start.asc")))
+
+
+COMMON = ["DEMfile dem.asc", "startfile start.asc", "max_ref_lvl 5",
+          "cuda", "qoutput", "raster_out", "output_precision 12"]
+
+# name: (inputs, solver lines, sim_time, saveint, initial_tstep, extra lines)
+CASES = {
+    "dam_fric_mwdg2": (dam_inputs, ["mwdg2", "epsilon 0.001", "limitslopes", "tol_Krivo 1"],
+                       0.1, 0.01, 0.001, ["fpfric 0.03"]),
+    "dam_fric_mwdg2_long": (dam_inputs, ["mwdg2", "epsilon 0.001", "limitslopes", "tol_Krivo 1"],
+                            20, 2, 0.03, ["fpfric 0.03"]),
+    "dam_fric_mwdg2_diag": (dam_inputs, ["mwdg2", "epsilon 0.001", "limitslopes", "tol_Krivo 1"],
+                            0.5, 0.001, 0.03, ["fpfric 0.03"]),
+    "dam_diag_nolim": (dam_inputs, ["mwdg2", "epsilon 0.001"], 0.5, 0.001, 0.03, ["fpfric 0.03"]),
+    "dam_diag_nofric": (dam_inputs, ["mwdg2", "epsilon 0.001", "limitslopes", "tol_Krivo 1"],
+                        0.5, 0.001, 0.03, ["fpfric 0"]),
+    "dam_diag_eps0": (dam_inputs, ["mwdg2", "epsilon 0", "limitslopes", "tol_Krivo 1"],
+                      0.5, 0.001, 0.03, ["fpfric 0.03"]),
+    "lake_hill_mwdg2": (lake_hill_inputs, ["mwdg2", "epsilon 0.001", "limitslopes", "tol_Krivo 1"],
+                        0.2, 0.1, 0.05, ["fpfric 0.03"]),
+    "dam_hwfv1": (dam_inputs, ["hwfv1", "epsilon 0.001"], 0.1, 0.01, 0.001, ["fpfric 0.03"]),
+    "dam_hwfv1_long": (dam_inputs, ["hwfv1", "epsilon 0.001"], 20, 2, 0.03, ["fpfric 0.03"]),
+    "hill_hwfv1": (hill_inputs, ["hwfv1", "epsilon 0.01"], 30, 3, 0.05, ["fpfric 0.03"]),
+    "hill_mwdg2": (hill_inputs, ["mwdg2", "epsilon 0.01"], 30, 3, 0.05, ["fpfric 0.03"]),
+    "pond_mwdg2": (pond_inputs, ["mwdg2", "epsilon 0.01"], 30, 3, 0.05, ["fpfric 0.03"]),
+    "pond_mwdg2_nofric": (pond_inputs, ["mwdg2", "epsilon 0.01"], 30, 3, 0.05, ["fpfric 0"]),
+    "pond_hwfv1": (pond_inputs, ["hwfv1", "epsilon 0.01"], 30, 3, 0.05, ["fpfric 0.03"]),
+    "pond_hwfv1_short": (pond_inputs, ["hwfv1", "epsilon 0.01"], 0.1, 0.005, 0.001, ["fpfric 0.03"]),
+    "pond_mwdg2_short": (pond_inputs, ["mwdg2", "epsilon 0.01"], 0.1, 0.005, 0.001, ["fpfric 0"]),
+}
+
+
+def make(work):
+    os.makedirs(work, exist_ok=True)
+    for name, (inputs, solver, sim, save, dt0, extra) in CASES.items():
+        folder = os.path.join(work, name)
+        os.makedirs(folder, exist_ok=True)
+        inputs(folder)
+        lines = COMMON + solver + extra + [
+            f"sim_time {sim:g}", f"saveint {save:g}", f"massint {save:g}",
+            f"initial_tstep {dt0:g}"]
+        with open(os.path.join(folder, "case.par"), "w") as f:
+            f.write("\n".join(lines + [f"resroot {name}", ""]))
+        with open(os.path.join(folder, "metal.par"), "w") as f:
+            f.write("\n".join(lines + ["resroot metal", ""]))
+    with open(os.path.join(work, "run_cuda.sh"), "w") as f:
+        f.write("#!/bin/sh\n# run_cuda.sh LISFLOOD_BINARY: CUDA run of every case\n"
+                "BIN=$1\ncd \"$(dirname \"$0\")\"\n"
+                "for c in */; do c=${c%/}; [ -f \"$c/case.par\" ] || continue\n"
+                "  (cd \"$c\" && mkdir -p res && \"$BIN\" case.par > cuda.log 2>&1; "
+                "echo \"$c rc=$?\")\ndone\n")
+    print("cases written to", work)
+
+
+def metal(work, binary, only=None):
+    for name in CASES:
+        if only and name != only:
+            continue
+        folder = os.path.join(work, name)
+        with open(os.path.join(folder, "metal.log"), "w") as log:
+            rc = subprocess.call([binary, "-v", "metal.par"], cwd=folder,
+                                 stdout=log, stderr=subprocess.STDOUT)
+        print(f"{name} metal rc={rc}")
+
+
+def compare(work, only=None):
+    worst = {}
+    for name in CASES:
+        if only and name != only:
+            continue
+        folder = os.path.join(work, name)
+        print(f"== {name}")
+        print("   k   depth L2%   flow L2%   max|dh| m   volume CUDA / Metal")
+        cuda = {int(p.rsplit("-", 1)[1][:-3]): p[:-3]
+                for p in glob.glob(os.path.join(folder, "res", f"{name}-*.wd"))}
+        for k in sorted(cuda):
+            m = os.path.join(folder, f"metal-{k:04d}")
+            if k < 1 or not os.path.exists(m + ".wd"):
+                continue
+            hc, hm = read(cuda[k] + ".wd"), read(m + ".wd")
+            qc = np.stack([read(cuda[k] + ".qx"), read(cuda[k] + ".qy")])
+            qm = np.stack([read(m + ".Qx"), read(m + ".Qy")])
+            dl2 = 100 * np.linalg.norm(hm - hc) / max(np.linalg.norm(hc), 1e-30)
+            ql2 = 100 * np.linalg.norm(qm - qc) / max(np.linalg.norm(qc), 1e-30)
+            print(f"{k:4d} {dl2:10.4f} {ql2:10.4f} {abs(hm - hc).max():11.3g}"
+                  f"   {hc.sum():.4f} / {hm.sum():.4f}")
+            worst[name] = max(worst.get(name, 0), dl2)
+    return worst
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "make":
+        make(sys.argv[2])
+    elif cmd == "metal":
+        metal(sys.argv[2], os.path.abspath(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else None)
+    elif cmd == "compare":
+        compare(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)
+    else:
+        print(__doc__)

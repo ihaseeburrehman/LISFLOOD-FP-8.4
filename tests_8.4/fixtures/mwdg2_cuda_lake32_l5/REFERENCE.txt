@@ -10,3 +10,10 @@ The regression compares the final depth and discharge rasters. CUDA depth is
 stationary; CUDA Qx and Qy are roundoff-level zero. The Metal test uses the
 same input and parameters and checks against this saved output with explicit
 float-vs-double tolerances.
+
+cuda-float-0002.* (11 October 2026): the same case run by the unmodified
+single-precision CUDA build of 8.4 (config.float.cmake, as released; HPC
+lf84/build_head84). Its depth is stationary and its discharge is round-off
+(|q| up to 3.7e-6 m2/s). run_metal_mwdg2_cuda_hill.sh compares against these
+files: depth within 1e-6 m, discharge within 1e-5 m2/s (single-precision
+round-off; the double-precision snapshot above has |q| near 1e-12).

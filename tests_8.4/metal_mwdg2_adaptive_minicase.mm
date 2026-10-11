@@ -97,8 +97,12 @@ public:
         [enc setBuffer:state offset:0 atIndex:0];[enc setBuffer:active offset:0 atIndex:1];
         [enc setBuffer:neighbours offset:0 atIndex:2];[enc setBuffer:rhs offset:0 atIndex:3];
         [enc setBuffer:state offset:0 atIndex:4];
-        uint32_t layout[2]={count,level};[enc setBytes:layout length:sizeof(layout) atIndex:5];
-        [enc setBytes:physics length:4*sizeof(float) atIndex:6];
+        id<MTLBuffer> edge=[device newBufferWithLength:count*4+4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> flags=[device newBufferWithLength:count*4+4 options:MTLResourceStorageModeShared];
+        [enc setBuffer:edge offset:0 atIndex:5];[enc setBuffer:state offset:0 atIndex:6];
+        [enc setBuffer:flags offset:0 atIndex:7];
+        uint32_t layout[2]={count,level};[enc setBytes:layout length:sizeof(layout) atIndex:8];
+        [enc setBytes:physics length:4*sizeof(float) atIndex:9];
         [enc dispatchThreadgroups:MTLSizeMake((count+63)/64,1,1)
             threadsPerThreadgroup:MTLSizeMake(64,1,1)];
         [enc endEncoding];[command commit];[command waitUntilCompleted];

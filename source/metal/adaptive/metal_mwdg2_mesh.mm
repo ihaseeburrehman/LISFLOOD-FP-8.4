@@ -121,7 +121,7 @@ AdaptiveMesh AdaptiveMeshBuilder::select(id<MTLBuffer> scales,
   // already encoded child polynomials.
   for (int level = static_cast<int>(maxLevel) - 1; level >= 0; --level) {
     uint32_t args[2] = {levelOffset(level), levelCount(level)};
-    dispatch("mwdg2_encode_level", {scales, details}, args, sizeof(args), args[1]);
+    dispatch(encodeKernel_.c_str(), {scales, details}, args, sizeof(args), args[1]);
   }
 
   // CUDA computes the normalizers over active leaf scaling coefficients (the
@@ -142,6 +142,7 @@ AdaptiveMesh AdaptiveMeshBuilder::select(id<MTLBuffer> scales,
   dispatch("mwdg2_reduce_scale_final", {partials, normBuffer}, &groups,
            sizeof(groups), 4, 4);
 
+  std::memcpy(lastNorms, normBuffer.contents, sizeof(lastNorms));
   id<MTLBuffer> componentMaxima = makeBuffer(device_,
       size_t(internalCount) * 4 * sizeof(float));
   dispatch("mwdg2_reduce_detail_maxima", {details, componentMaxima}, &internalCount,

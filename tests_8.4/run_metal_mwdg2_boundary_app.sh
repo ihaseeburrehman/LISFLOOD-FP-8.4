@@ -49,8 +49,8 @@ PY
 "$BIN" -v "$WORK/closed.par" > "$WORK/closed.log"
 "$BIN" -v "$WORK/open.par" > "$WORK/open.log"
 "$BIN" -v "$WORK/mass.par" > "$WORK/mass.log"
-grep -q 'reflecting boundaries' "$WORK/closed.log"
-grep -q 'north FREE boundary cells 2-3' "$WORK/open.log"
+grep -q 'boundary sides N,E,S,W types 0 0 0 0' "$WORK/closed.log"
+grep -q 'boundary sides N,E,S,W types 1 0 0 0' "$WORK/open.log"
 python3 - "$WORK" <<'PY'
 from pathlib import Path
 import sys
@@ -67,14 +67,16 @@ for row in mass_rows:
     if abs(float(fields[10])) > 5e-2:
         raise SystemExit(f'signed mean-volume conservation failed: Verror={fields[10]}')
 stage=(p/'open.stage').read_text().splitlines()
-if 'Output, depths:' not in stage or not any(line.strip().startswith('0.500') for line in stage):
-    raise SystemExit('stage time series header/0.5 s sample missing')
+# As CUDA, records are written after the first step at or past each time.
+times=[float(l.split()[0]) for l in stage[stage.index('Output, depths:')+2:] if l.strip()] if 'Output, depths:' in stage else []
+if not any(0.5 <= t < 0.53 for t in times):
+    raise SystemExit(f'stage time series header/0.5 s sample missing: {times}')
 # NoData water remains zero after loop-level drain and raster projection.
 frames=sorted(p.glob('open-*.wd'))
 if not frames: raise SystemExit('no output depth frames')
 for f in frames:
     raster=[[float(v) for v in row.split()] for row in f.read_text().splitlines()[6:]]
     if raster[0][0] != 0.0: raise SystemExit(f'NoData cell became wet in {f.name}')
-print('PASS: N-FREE edge selection, stage sampling, and drain_nodata NoData-cell clearing')
+print('PASS: N-FREE edge selection (CUDA cell range), stage sampling, and drain_nodata NoData-cell clearing')
 PY
 PASSED=1

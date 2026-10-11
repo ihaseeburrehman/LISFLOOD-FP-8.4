@@ -25,6 +25,8 @@ inline uint4 mini_geometry(uint node, uint maxLevel) {
 // Restrict the updated adaptive DG2 polynomial exactly onto every finest
 // cell. A linear polynomial remains linear under affine cell restriction.
 // Persistent MWDG2 state remains eta=h+z,qx,qy,z throughout the update.
+// The bed (modes 9-11) is not written: the finest level keeps the input bed,
+// as CUDA's scale coefficients do, so coarsening never smooths it.
 kernel void mwdg2_mini_expand_finest(device const float *hydro [[buffer(0)]],
                                      device const uint *owners [[buffer(1)]],
                                      device float *scales [[buffer(2)]],
@@ -45,22 +47,18 @@ kernel void mwdg2_mini_expand_finest(device const float *hydro [[buffer(0)]],
         uint p = owner * 12;
         uint q = outNode * 12;
         float eta = hydro[p] + mini_sqrt3 * (hydro[p+1] * xi + hydro[p+2] * yi);
-        float z = hydro[p+9] + mini_sqrt3 * (hydro[p+10] * xi + hydro[p+11] * yi);
         if (mode == 0) {
             scales[q] = eta;
             scales[q+3] = hydro[p+3] + mini_sqrt3 * (hydro[p+4] * xi + hydro[p+5] * yi);
             scales[q+6] = hydro[p+6] + mini_sqrt3 * (hydro[p+7] * xi + hydro[p+8] * yi);
-            scales[q+9] = z;
         } else if (mode == 1) {
             scales[q+1] = hydro[p+1] * invSpan;
             scales[q+4] = hydro[p+4] * invSpan;
             scales[q+7] = hydro[p+7] * invSpan;
-            scales[q+10] = hydro[p+10] * invSpan;
         } else {
             scales[q+2] = hydro[p+2] * invSpan;
             scales[q+5] = hydro[p+5] * invSpan;
             scales[q+8] = hydro[p+8] * invSpan;
-            scales[q+11] = hydro[p+11] * invSpan;
         }
     }
 }

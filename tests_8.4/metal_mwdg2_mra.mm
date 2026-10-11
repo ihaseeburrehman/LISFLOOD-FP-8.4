@@ -53,8 +53,11 @@ int main(int argc, char **argv) {
             [enc setBuffer:neighbours offset:0 atIndex:2];
             [enc setBuffer:rhs offset:0 atIndex:3];
             [enc setBuffer:scales offset:0 atIndex:4];
-            [enc setBytes:&layout length:sizeof(layout) atIndex:5];
-            [enc setBytes:&physics length:sizeof(physics) atIndex:6];
+            [enc setBuffer:make(count * sizeof(float)) offset:0 atIndex:5];
+            [enc setBuffer:scales offset:0 atIndex:6];
+            [enc setBuffer:make(count * sizeof(unsigned)) offset:0 atIndex:7];
+            [enc setBytes:&layout length:sizeof(layout) atIndex:8];
+            [enc setBytes:&physics length:sizeof(physics) atIndex:9];
             [enc dispatchThreadgroups:MTLSizeMake((count + 63) / 64, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [enc endEncoding];

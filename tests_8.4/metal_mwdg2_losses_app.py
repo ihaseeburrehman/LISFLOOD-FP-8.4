@@ -85,11 +85,12 @@ try:
         raise AssertionError(f"evaporation/mass accounting failed: {evap}")
     # LoadRain converts mm/hour to m/s. As in the fixed-grid Metal DG2 path,
     # each step adds rain over the previous step actually taken: steps are
-    # 0.001 s (CUDA's first step), 0.009 s and 0.01 s, so rain covers the
-    # first two: (0.00105*0.001 + 0.0015*0.009) m/s*s over 1500 m2 = 0.0218 m3.
-    if not math.isclose(rain[0], 150.0218, abs_tol=0.01) or not math.isclose(rain[1], 0.021825, abs_tol=0.0005):
+    # 0.001 s (CUDA's first step), 0.01 s and 0.009 s (no step is shortened
+    # for outputs), so rain covers the first two at the rates of t = 0.001 and
+    # 0.011 s: (0.00105*0.001 + 0.00155*0.01) m/s*s over 1500 m2 = 0.024825 m3.
+    if not math.isclose(rain[0], 150.0248, abs_tol=0.01) or not math.isclose(rain[1], 0.024825, abs_tol=0.0005):
         raise AssertionError(f"uniform rainfall/interpolation/mass accounting failed: {rain}")
-    if not math.isclose(combined[1], 0.021825 - 3.0, abs_tol=0.01):
+    if not math.isclose(combined[1], 0.024825 - 3.0, abs_tol=0.01):
         raise AssertionError(f"combined rainfall/loss mass accounting failed: {combined}")
     loss_rows = (root / "combined.loss").read_text().strip().splitlines()
     if loss_rows[0] != "time,integrated_time,loss_volume,water_volume" or len(loss_rows) != 4:
@@ -178,15 +179,20 @@ for time, current_dt in steps:
 if not mass_rows or not math.isclose(float(mass_rows[-1].split()[11]), expected_rain,
                                       rel_tol=0, abs_tol=1e-6):
     raise AssertionError(f"dynamic rainfall pulse/NoData mass accounting failed: {mass_rows[-1:]}")
+# As CUDA, the first mass record follows the first step ending at or after
+# 0.1 s; it holds the rain of every step that started before that time.
+first_rows = [row for row in mass_rows if float(row.split()[0]) >= 0.1 - 1e-6]
+first_time = float(first_rows[0].split()[0]) if first_rows else None
 first_expected = 0.0
 previous_dt = 0.01
 for time, current_dt in steps:
-    if time >= 0.1:
+    if first_time is None or time >= first_time - 1e-7:
         break
-    if time >= 0.09:
-        first_expected += 15 * (0.01 / 1000 / 0.09) * previous_dt
+    slice_index = 0 if time < 0.09 else 1 if time < 0.18 else 2
+    if slice_index:
+        first_expected += 15 * (depth_mm[slice_index] / 1000 / 0.09) * previous_dt
     previous_dt = current_dt
-at_first_output = [row for row in mass_rows if math.isclose(float(row.split()[0]), 0.1, abs_tol=1e-6)]
+at_first_output = first_rows[:1]
 if not at_first_output or not math.isclose(float(at_first_output[0].split()[11]),
                                            first_expected, rel_tol=0, abs_tol=1e-6):
     raise AssertionError(f"dynamic rainfall first output-time interpolation failed: {at_first_output}")

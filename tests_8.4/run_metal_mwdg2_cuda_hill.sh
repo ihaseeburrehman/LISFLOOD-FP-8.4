@@ -43,9 +43,10 @@ from pathlib import Path
 import sys
 import numpy as np
 work, fix = map(Path, sys.argv[1:])
-for suffix, atol in (('.wd', 1e-6), ('.Qx', 5e-7), ('.Qy', 5e-7)):
+# single-precision CUDA reference (REFERENCE.txt): discharge is round-off
+for suffix, atol in (('.wd', 1e-6), ('.Qx', 1e-5), ('.Qy', 1e-5)):
     got = np.loadtxt(work / f'metal-0002{suffix}', skiprows=6)
-    expected = np.loadtxt(fix / f'cuda-0002{suffix}', skiprows=6)
+    expected = np.loadtxt(fix / f'cuda-float-0002{suffix}', skiprows=6)
     error = np.abs(got - expected)
     rmse, maximum = float(np.sqrt(np.mean(error**2))), float(error.max())
     if not np.all(np.isfinite(got)) or maximum > atol:

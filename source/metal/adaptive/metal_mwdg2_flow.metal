@@ -116,10 +116,17 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
                       device const uint *neighbours [[buffer(2)]],
                       device float *rhs [[buffer(3)]],
                       device const float *tree [[buffer(4)]],
-                      constant uint2 &layout [[buffer(5)]],
-                      constant float4 &physics [[buffer(6)]],
+                      device float *edgeRate [[buffer(5)]],
+                      device const float *plainTree [[buffer(6)]],
+                      device const uint *frictioned [[buffer(7)]],
+                      constant uint2 &layout [[buffer(8)]],
+                      constant float4 &physics [[buffer(9)]],
                       uint index [[thread_position_in_grid]]) {
     if (index>=layout.x) return;
+    // friction_implicit.cu updates a leaf's neighbour copies only when the
+    // leaf itself is above tol_h and tol_s: read the neighbours from the
+    // tree with friction applied (tree) or without (plainTree) accordingly.
+    if (!frictioned[index]) tree=plainTree;
     uint node=active[index];
     uint4 cell=node_geometry(node,layout.y);
     float dx=physics.x*cell.z,dy=physics.y*cell.z,g=physics.z,tolerance=physics.w;
@@ -154,18 +161,36 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
                             scales[local+3],scales[local+6]);
     float meanBed=scales[local+9];
     if(other[0]==0xffffffffu) { nn=meanState; nn.z=0.0f; znn=meanBed; }
-    else if(other[0]==0xfffffffeu) nn.x=pow(n.z*n.z/g,1.0f/3.0f);
+    else if(other[0]==0xfffffffeu) { nn=meanState; nn.x=pow(meanState.z*meanState.z/g,1.0f/3.0f); znn=meanBed; }
     else {uint4 c=node_geometry(other[0],layout.y);float3 b=mw_basis(c,pN);nn=mw_state(tree,other[0],b);znn=mw_bed(tree,other[0],b);}
     if(other[1]==0xffffffffu) { ee=meanState; ee.y=0.0f; zee=meanBed; }
-    else if(other[1]==0xfffffffeu) ee.x=pow(e.y*e.y/g,1.0f/3.0f);
+    else if(other[1]==0xfffffffeu) { ee=meanState; ee.x=pow(meanState.y*meanState.y/g,1.0f/3.0f); zee=meanBed; }
     else {uint4 c=node_geometry(other[1],layout.y);float3 b=mw_basis(c,pE);ee=mw_state(tree,other[1],b);zee=mw_bed(tree,other[1],b);}
     if(other[2]==0xffffffffu) { ss=meanState; ss.z=0.0f; zss=meanBed; }
-    else if(other[2]==0xfffffffeu) ss.x=pow(s.z*s.z/g,1.0f/3.0f);
+    else if(other[2]==0xfffffffeu) { ss=meanState; ss.x=pow(meanState.z*meanState.z/g,1.0f/3.0f); zss=meanBed; }
     else {uint4 c=node_geometry(other[2],layout.y);float3 b=mw_basis(c,pS);ss=mw_state(tree,other[2],b);zss=mw_bed(tree,other[2],b);}
     if(other[3]==0xffffffffu) { ww=meanState; ww.y=0.0f; zww=meanBed; }
-    else if(other[3]==0xfffffffeu) ww.x=pow(w.y*w.y/g,1.0f/3.0f);
+    else if(other[3]==0xfffffffeu) { ww=meanState; ww.x=pow(meanState.y*meanState.y/g,1.0f/3.0f); zww=meanBed; }
     else {uint4 c=node_geometry(other[3],layout.y);float3 b=mw_basis(c,pW);ww=mw_state(tree,other[3],b);zww=mw_bed(tree,other[3],b);}
 
+    // dg2_update.cu updates only leaves whose own or a neighbour's mean depth
+    // (the ghost's for a boundary face) reaches tol_h; the others keep their
+    // state (zero residual here).
+    bool wet=meanState.x>=tolerance;
+    for(uint face=0;face<4;++face) {
+        float hMean;
+        if(other[face]==0xffffffffu) hMean=meanState.x;
+        else if(other[face]==0xfffffffeu) {
+            float qn=(face==0||face==2)?meanState.z:meanState.y;
+            hMean=pow(qn*qn/g,1.0f/3.0f);
+        } else hMean=tree[other[face]*12]-tree[other[face]*12+9];
+        wet=wet||hMean>=tolerance;
+    }
+    edgeRate[index]=0.0f;
+    if(!wet) {
+        for(uint k=0;k<9;++k) rhs[index*9+k]=0.0f;
+        return;
+    }
     float zne=max(zn,znn),zeeI=max(ze,zee),zse=max(zs,zss),zwe=max(zw,zww);
     float3 nStar=mw_star(n,zn,zne,tolerance),nnStar=mw_star(nn,znn,zne,tolerance);
     float3 eStar=mw_star(e,ze,zeeI,tolerance),eeStar=mw_star(ee,zee,zeeI,tolerance);
@@ -178,6 +203,9 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
     // CUDA evaluates the numerical flux directly from the hydrostatic star
     // states. The bed-source terms below provide the balance; adding a second
     // hydrostatic pressure correction here double-counts that source.
+    // volume rate out through domain-edge faces (closed, FREE or boundary)
+    edgeRate[index]=(other[0]>=0xfffffffeu?Fn.x*dx:0.0f)-(other[2]>=0xfffffffeu?Fs.x*dx:0.0f)
+                   +(other[1]>=0xfffffffeu?Fe.x*dy:0.0f)-(other[3]>=0xfffffffeu?Fw.x*dy:0.0f);
     float3 u0x=.5f*(eStar+wStar),u1x=(eStar-wStar)/(2.0f*mw_sqrt3);
     float3 u0y=.5f*(nStar+sStar),u1y=(nStar-sStar)/(2.0f*mw_sqrt3);
     residual[0]=-(Fe-Fw)/dx-(Fn-Fs)/dy;
@@ -302,11 +330,14 @@ kernel void mwdg2_limit_slopes(device const float *u [[buffer(0)]],
                                device const uint *neighbours [[buffer(2)]],
                                device float *limited [[buffer(3)]],
                                device const float *tree [[buffer(4)]],
-                               constant uint4 &layout [[buffer(5)]],
-                               constant float4 &physics [[buffer(6)]],
-                               constant float &maxDepth [[buffer(7)]],
+                               device const float *plainTree [[buffer(5)]],
+                               device const uint *frictioned [[buffer(6)]],
+                               constant uint4 &layout [[buffer(7)]],
+                               constant float4 &physics [[buffer(8)]],
+                               constant float &maxDepth [[buffer(9)]],
                                uint index [[thread_position_in_grid]]) {
     if (index>=layout.x) return;
+    if (!frictioned[index]) tree=plainTree;
     uint node=active[index];
     uint4 cell=node_geometry(node,layout.y);
     uint out=index*6;
@@ -345,11 +376,14 @@ kernel void mwdg2_limit_slopes(device const float *u [[buffer(0)]],
             // momentum in the corresponding flux branch below.
             float h=local[0].x-z.x;
             float eta=local[0].x;
-            if(other==0xfffffffeu && face==0)
-                h=pow(local[2].x*local[2].x/physics.z,1.0f/3.0f), eta=h+z.x;
+            bool freeFace=other==0xfffffffeu;
+            if(freeFace) {
+                float qn=(face==0||face==2)?local[2].x:local[1].x;
+                h=pow(qn*qn/physics.z,1.0f/3.0f), eta=h+z.x;
+            }
             remoteMean[face][0]=float3(eta,0,0);
-            remoteMean[face][1]=float3((face==1||face==3)?0.0f:local[1].x,0,0);
-            remoteMean[face][2]=float3((face==0||face==2)?0.0f:local[2].x,0,0);
+            remoteMean[face][1]=float3((!freeFace&&(face==1||face==3))?0.0f:local[1].x,0,0);
+            remoteMean[face][2]=float3((!freeFace&&(face==0||face==2))?0.0f:local[2].x,0,0);
             for(uint f=0;f<3;++f) remoteTrace[face][f]=remoteMean[face][f];
             remoteH[face]=h;
         }
@@ -589,6 +623,38 @@ kernel void mwdg2_cfl(device const float *scales [[buffer(0)]],
     localDt[index]=min(dtX,dtY);
 }
 
+// friction_implicit.cu for the leaves themselves: a leaf whose mean depth is
+// below tol_h or mean speed below tol_s only has its mean discharge zeroed (its
+// slopes are kept) and does not update its neighbour copies (flag 0); the
+// others get the full update below (flag 1). params = {g, dt, tol_h, tol_s}.
+kernel void mwdg2_friction_own(device float *scales [[buffer(0)]],
+                               device const uint *active [[buffer(1)]],
+                               device const float *manning [[buffer(2)]],
+                               device uint *frictioned [[buffer(3)]],
+                               constant uint &count [[buffer(4)]],
+                               constant float4 &params [[buffer(5)]],
+                               uint index [[thread_position_in_grid]]) {
+    if(index>=count) return;
+    uint p=active[index]*12;
+    float h=scales[p]-scales[p+9];
+    bool belowDepth=h<params.z;
+    float ux=belowDepth?0.0f:scales[p+3]/h, uy=belowDepth?0.0f:scales[p+6]/h;
+    bool belowSpeed=abs(ux)<params.w && abs(uy)<params.w;
+    frictioned[index]=!(belowDepth||belowSpeed);
+    if(belowDepth||belowSpeed) { scales[p+3]=0.0f; scales[p+6]=0.0f; return; }
+    float n=manning[index],g=params.x,dt=params.y;
+    float z0=scales[p+9],zx=scales[p+10],zy=scales[p+11];
+    float h0=scales[p]-z0,hx=scales[p+1]-zx,hy=scales[p+2]-zy;
+    float2 q0=mw_friction_point(h0,float2(scales[p+3],scales[p+6]),n,g,dt,params.z,params.w);
+    float2 qxm=mw_friction_point(h0-hx,float2(scales[p+3]-scales[p+4],scales[p+6]-scales[p+7]),n,g,dt,params.z,params.w);
+    float2 qxp=mw_friction_point(h0+hx,float2(scales[p+3]+scales[p+4],scales[p+6]+scales[p+7]),n,g,dt,params.z,params.w);
+    float2 qym=mw_friction_point(h0-hy,float2(scales[p+3]-scales[p+5],scales[p+6]-scales[p+8]),n,g,dt,params.z,params.w);
+    float2 qyp=mw_friction_point(h0+hy,float2(scales[p+3]+scales[p+5],scales[p+6]+scales[p+8]),n,g,dt,params.z,params.w);
+    scales[p+3]=q0.x; scales[p+6]=q0.y;
+    scales[p+4]=.5f*(qxp.x-qxm.x); scales[p+7]=.5f*(qxp.y-qxm.y);
+    scales[p+5]=.5f*(qyp.x-qym.x); scales[p+8]=.5f*(qyp.y-qym.y);
+}
+
 // CUDA's implicit Manning source is applied to the mean and the four DG2
 // directional Gauss pairs, then the momentum slopes are reconstructed.
 kernel void mwdg2_friction(device float *scales [[buffer(0)]],
@@ -611,4 +677,143 @@ kernel void mwdg2_friction(device float *scales [[buffer(0)]],
     scales[p+3]=q0.x; scales[p+6]=q0.y;
     scales[p+4]=.5f*(qxp.x-qxm.x); scales[p+7]=.5f*(qxp.y-qxm.y);
     scales[p+5]=.5f*(qyp.x-qym.x); scales[p+8]=.5f*(qyp.y-qym.y);
+}
+
+// ---------------------------------------------------------------------------
+// HWFV1 (cuda/adaptive with solver_type HWFV1): Haar wavelets on the cell
+// means and a first-order finite-volume update. The tree keeps the MWDG2
+// layout (12 floats per node) with all slope modes zero.
+
+// encode_and_thresh_flow (HWFV1): parent mean = average of the four children;
+// details alpha, beta, gamma (encode_details.cuh), stored in the alpha_0,
+// beta_0 and gamma_0 slots of the MWDG2 detail layout.
+kernel void hwfv1_encode_level(device float *scales [[buffer(0)]],
+                               device float *details [[buffer(1)]],
+                               constant uint2 &level [[buffer(2)]],
+                               uint index [[thread_position_in_grid]]) {
+    if (index >= level.y) return;
+    uint node = level.x + index;
+    for (uint field = 0; field < 4; ++field) {
+        float c0 = scales[(node*4+1)*12 + field*3], c1 = scales[(node*4+2)*12 + field*3];
+        float c2 = scales[(node*4+3)*12 + field*3], c3 = scales[(node*4+4)*12 + field*3];
+        scales[node*12 + field*3] = .25f*((c0 + c2) + (c1 + c3));
+        scales[node*12 + field*3 + 1] = scales[node*12 + field*3 + 2] = 0.0f;
+        device float *d = details + node*36 + field*9;
+        for (uint k = 0; k < 9; ++k) d[k] = 0.0f;
+        d[0] = .25f*((c0 - c2) + (c1 - c3));
+        d[3] = .25f*((c0 + c2) - (c1 + c3));
+        d[6] = .25f*((c0 - c2) - (c1 - c3));
+    }
+}
+
+// fv1_update.cu: leaves whose own or neighbour mean depth reaches tol_h are
+// updated; the others keep their state and initial_tstep as CFL value.
+// view: the leaf's own state after friction; tree: neighbour means (friction
+// applied, as CUDA's d_neighbours). params = {dt, initial_tstep, CFL, tol_q}.
+kernel void hwfv1_update(device const float *view [[buffer(0)]],
+                         device const uint *active [[buffer(1)]],
+                         device const uint *neighbours [[buffer(2)]],
+                         device float *out [[buffer(3)]],
+                         device const float *tree [[buffer(4)]],
+                         device float *localDt [[buffer(5)]],
+                         device float *edgeRate [[buffer(6)]],
+                         device const float *plainTree [[buffer(7)]],
+                         device const uint *frictioned [[buffer(8)]],
+                         constant uint2 &layout [[buffer(9)]],
+                         constant float4 &physics [[buffer(10)]],
+                         constant float4 &params [[buffer(11)]],
+                         uint index [[thread_position_in_grid]]) {
+    if (index >= layout.x) return;
+    if (!frictioned[index]) tree = plainTree;
+    uint node = active[index];
+    uint4 cell = node_geometry(node, layout.y);
+    float dx = physics.x*cell.z, dy = physics.y*cell.z, g = physics.z, tol = physics.w;
+    uint p = node*12;
+    for (uint k = 0; k < 12; ++k) out[p+k] = view[p+k];
+    localDt[index] = params.y;
+    edgeRate[index] = 0.0f;
+    float z = view[p+9], h = view[p] - z;
+    float3 U = float3(h, view[p+3], view[p+6]);
+    uint recordsStart = (layout.x*4u + 4u) & ~3u;
+    device const uint4 *segments = (device const uint4 *)(neighbours + recordsStart);
+    float3 Un[4]; float zn[4];
+    bool wet = h >= tol;
+    for (uint face = 0; face < 4; ++face) {
+        uint begin = neighbours[index*4 + face];
+        uint other = begin < neighbours[index*4 + face + 1]
+            ? mw_neighbor_at_local_level(segments[begin].x, cell.w, layout.y) : 0xffffffffu;
+        uint normal = (face == 0 || face == 2) ? 2u : 1u;  // N/S: qy, E/W: qx
+        if (other == 0xffffffffu) {            // add_ghost_cells: closed default
+            Un[face] = U; Un[face][normal] = 0.0f; zn[face] = z;
+        } else if (other == 0xfffffffeu) {     // FREE: critical depth, momentum kept
+            Un[face] = U; Un[face].x = pow(U[normal]*U[normal]/g, 1.0f/3.0f); zn[face] = z;
+        } else {
+            uint o = other*12;
+            zn[face] = tree[o+9];
+            Un[face] = float3(tree[o] - tree[o+9], tree[o+3], tree[o+6]);
+        }
+        wet = wet || Un[face].x >= tol;
+    }
+    if (!wet) return;
+    float eta = h + z;
+    float zN = max(z, zn[0]), zE = max(z, zn[1]), zS = max(z, zn[2]), zW = max(z, zn[3]);
+    float3 nNeg = mw_star(U, z, zN, tol), nPos = mw_star(Un[0], zn[0], zN, tol);
+    float3 eNeg = mw_star(U, z, zE, tol), ePos = mw_star(Un[1], zn[1], zE, tol);
+    float3 sNeg = mw_star(Un[2], zn[2], zS, tol), sPos = mw_star(U, z, zS, tol);
+    float3 wNeg = mw_star(Un[3], zn[3], zW, tol), wPos = mw_star(U, z, zW, tol);
+    float3 Fn = mw_hll(nNeg, nPos, 1, g, tol), Fe = mw_hll(eNeg, ePos, 0, g, tol);
+    float3 Fs = mw_hll(sNeg, sPos, 1, g, tol), Fw = mw_hll(wNeg, wPos, 0, g, tol);
+    uint edge[4];
+    for (uint face = 0; face < 4; ++face) {
+        uint begin = neighbours[index*4 + face];
+        edge[face] = begin < neighbours[index*4 + face + 1] ? segments[begin].x : 0xffffffffu;
+    }
+    edgeRate[index] = (edge[0] >= 0xfffffffeu ? Fn.x*dx : 0.0f) - (edge[2] >= 0xfffffffeu ? Fs.x*dx : 0.0f)
+                    + (edge[1] >= 0xfffffffeu ? Fe.x*dy : 0.0f) - (edge[3] >= 0xfffffffeu ? Fw.x*dy : 0.0f);
+    // get_bed_src_x / get_bed_src_y
+    float zStarW = zW - max(0.0f, -(eta - zW)), zStarE = zE - max(0.0f, -(eta - zE));
+    float zStarS = zS - max(0.0f, -(eta - zS)), zStarN = zN - max(0.0f, -(eta - zN));
+    float bedX = g*0.5f*(wPos.x + eNeg.x)*(zStarE - zStarW)/dx;
+    float bedY = g*0.5f*(sPos.x + nNeg.x)*(zStarN - zStarS)/dy;
+    float dt = params.x;
+    float qx = U.y, qy = U.z;
+    h  = h  - dt*(Fe.x - Fw.x)/dx;
+    qx = qx - dt*((Fe.y - Fw.y)/dx + bedX);
+    qy = qy - dt*(Fe.z - Fw.z)/dx;
+    h  = h  - dt*(Fn.x - Fs.x)/dy;
+    qx = qx - dt*(Fn.y - Fs.y)/dy;
+    qy = qy - dt*((Fn.z - Fs.z)/dy + bedY);
+    bool belowDepth = h < tol;
+    bool belowDischarge = abs(qx) < params.w && abs(qy) < params.w;
+    if (belowDepth || belowDischarge) { qx = 0.0f; qy = 0.0f; }
+    if (!belowDepth) {
+        float c = sqrt(g*h);
+        localDt[index] = min(params.z*dx/(abs(qx/h) + c), params.z*dy/(abs(qy/h) + c));
+    }
+    out[p] = h + z; out[p+3] = qx; out[p+6] = qy;
+}
+
+// add_ghost_cells.cu, prescribed boundaries on finest leaves at the domain
+// edge: HFIX/HVAR set the leaf's own mean depth to max(0, level - z0); QFIX/
+// QVAR set it to q*dt/dx_finest (as CUDA does). cell[i] = type*4 + side, or
+// -1 (sides N,E,S,W = 0..3; types as metal_adaptive_bc.h). delta[i] receives
+// the volume added (m3). params = {dt, dx_finest, cell area, unused}.
+kernel void adaptive_boundary_cells(device float *view [[buffer(0)]],
+                                    device const uint *active [[buffer(1)]],
+                                    device const int *cell [[buffer(2)]],
+                                    device float *delta [[buffer(3)]],
+                                    constant uint &count [[buffer(4)]],
+                                    constant float4 &inlet [[buffer(5)]],
+                                    constant float4 &params [[buffer(6)]],
+                                    uint index [[thread_position_in_grid]]) {
+    if (index >= count) return;
+    delta[index] = 0.0f;
+    int c = cell[index];
+    if (c < 0) return;
+    uint p = active[index]*12;
+    int type = c / 4, side = c % 4;
+    float z = view[p+9], h = view[p] - z, value = inlet[side];
+    float hNew = (type == 2 || type == 3) ? max(0.0f, value - z) : value*params.x/params.y;
+    view[p] = hNew + z;
+    delta[index] = (hNew - h)*params.z;
 }

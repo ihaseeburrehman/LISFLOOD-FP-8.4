@@ -66,12 +66,16 @@ public:
                       id<MTLBuffer> activeCoefficients = nil,
                       id<MTLBuffer> activeNodes = nil,
                       uint32_t activeCount = 0);
+  // "mwdg2_encode_level" (multiwavelets, MWDG2) or "hwfv1_encode_level" (Haar).
+  void setEncodeKernel(const char *name) { encodeKernel_ = name; }
+  float lastNorms[4] = {0, 0, 0, 0};  // eta, qx, qy, z normalizers of the last select
 
 private:
   id<MTLDevice> device_;
   id<MTLLibrary> library_;
   id<MTLCommandQueue> queue_;
   TreeScan scan_;
+  std::string encodeKernel_ = "mwdg2_encode_level";
   std::unordered_map<std::string, id<MTLComputePipelineState>> pipelines_;
   id<MTLComputePipelineState> pipeline(const char *name);
   void dispatch(const char *name, const std::vector<id<MTLBuffer>> &buffers,

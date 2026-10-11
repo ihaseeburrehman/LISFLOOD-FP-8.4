@@ -67,9 +67,11 @@ parsed = [[float(x) for x in row.split()] for row in rows]
 times = [row[0] for row in parsed]
 steps = [row[1] for row in parsed]
 volumes = [row[5] for row in parsed]
-if times != [0.001, 0.01, 0.02]:
+# As CUDA: no step is shortened to hit an output time; a record follows the
+# first step at or past each massint multiple (0.001, 0.011) and the end.
+if times != [0.001, 0.011, 0.02]:
     raise SystemExit(f'unexpected output schedule: {times}')
-if any(abs(x - y) > 1e-7 for x, y in zip(steps, [0.001, 0.009, 0.01])):
+if any(abs(x - y) > 1e-7 for x, y in zip(steps, [0.001, 0.01, 0.009])):
     raise SystemExit(f'unexpected/tiny duplicate timestep: {steps}')
 if any(not math.isclose(v, 150.0, rel_tol=0, abs_tol=2e-3) for v in volumes):
     raise SystemExit(f'lake-at-rest volume drift: {volumes}')
