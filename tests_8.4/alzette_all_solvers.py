@@ -6,7 +6,12 @@ and Green-Ampt.  It is intentionally sequential because all runs share one
 GPU.
 
 Usage:
-  alzette_all_solvers.py BINARY CASE_DIR WORK [metal|cuda]
+  alzette_all_solvers.py BINARY CASE_DIR WORK [metal|cuda] [options]
+
+Options: --solvers a,b,...  only these solvers;
+         --epsilon E        adaptive threshold for hwfv1/mwdg2/acc_nugrid
+                            (default 0: the finest mesh, as the original matrix);
+         --timeout S        seconds per run (default 1800).
 """
 import csv
 import math
@@ -100,6 +105,9 @@ def output_grids(out, backend, solver):
     return sorted(out.glob("r-*.wd"))
 
 
+OPTIONS = {"solvers": None, "epsilon": None, "timeout": 1800}
+
+
 def run(binary, work, backend, solver, loss):
     label = f"{backend}_{solver}_{loss}"
     out = work / label
@@ -113,7 +121,7 @@ def run(binary, work, backend, solver, loss):
         "DEMfile data/dem.asc\nstartfile data/start.wd\n"
         "manningfile data/manning.asc\ndynamicrainfile data/rain.nc\n"
         "bcifile Border.bci\nstagefile stage.txt\nresroot r\n"
-        f"dirroot {label}\n{backend}\n{SOLVERS[solver]}"
+        f"dirroot {label}\n{backend}\n{solver_lines(solver)}"
         "sim_time 21600\ninitial_tstep 10\nmassint 3600\nsaveint 3600\n"
         "nodata_elevation -9999\ndrain_nodata\nqoutput\noutput_precision 9\n"
         + LOSSES[loss]
@@ -126,20 +134,35 @@ def run(binary, work, backend, solver, loss):
     with (out / "run.log").open("w") as log:
         result = subprocess.run([str(binary), str(par)], cwd=work,
                                 stdout=log, stderr=subprocess.STDOUT,
-                                timeout=1800)
+                                timeout=OPTIONS["timeout"])
     elapsed = time.monotonic() - start
     grids = output_grids(out, backend, solver)
     return out, grids, elapsed, f"rc={result.returncode}"
 
 
+def solver_lines(solver):
+    lines = SOLVERS[solver]
+    if OPTIONS["epsilon"] is not None:
+        lines = lines.replace("epsilon 0\n", f"epsilon {OPTIONS['epsilon']}\n")
+    return lines
+
+
 def main():
-    binary, case, work = map(lambda p: Path(p).resolve(), sys.argv[1:4])
-    backend = sys.argv[4] if len(sys.argv) > 4 else "metal"
+    args = sys.argv[1:]
+    for key in ("solvers", "epsilon", "timeout"):
+        if "--" + key in args:
+            i = args.index("--" + key)
+            value = args[i + 1]
+            OPTIONS[key] = (value.split(",") if key == "solvers" else
+                            value if key == "epsilon" else int(value))
+            del args[i:i + 2]
+    binary, case, work = map(lambda p: Path(p).resolve(), args[0:3])
+    backend = args[3] if len(args) > 3 else "metal"
     work.mkdir(parents=True, exist_ok=True)
     copy_inputs(case, work)
     rows = []
     failures = []
-    for solver in SOLVERS:
+    for solver in OPTIONS["solvers"] or SOLVERS:
         baseline = None
         for loss in LOSSES:
             out, grids, elapsed, status = run(binary, work, backend, solver, loss)

@@ -100,3 +100,66 @@ kernel void mwdg2_mini_project_output(device const float *scales [[buffer(0)]],
     raster[2*cells + pixel] = scales[p+3];
     raster[3*cells + pixel] = scales[p+6];
 }
+
+// End-of-step expansion used for remeshing. CUDA refines a leaf by decoding
+// with zero details, which gives the children the parent's water level over
+// their own (finest) beds: on a bed that varies inside the leaf some children
+// get negative depths and others water that was not there (+/-10 m on the
+// Alzette slopes with HWFV1). Here a leaf keeps CUDA's restriction when every
+// finest cell stays at or below its water level, and otherwise gives every
+// finest cell the leaf's mean depth over its own bed (same volume, no negative
+// depths). Pass 1 flags such leaves; pass 2 writes the finest cells.
+kernel void mwdg2_expand_flags(device const float *hydro [[buffer(0)]],
+                               device const uint *owners [[buffer(1)]],
+                               device const float *scales [[buffer(2)]],
+                               device atomic_uint *flags [[buffer(3)]],
+                               constant uint2 &layout [[buffer(4)]],
+                               uint pixel [[thread_position_in_grid]]) {
+    uint side = 1u << layout.y;
+    uint cells = side * side;
+    if (pixel >= cells) return;
+    uint x = pixel % side, y = pixel / side;
+    uint code = mini_dilate(x) | (mini_dilate(y) << 1);
+    uint owner = owners[code];
+    uint4 cell = mini_geometry(owner, layout.y);
+    if (cell.z == 1) return;
+    float xi = 2.0f * (float(x) + 0.5f - float(cell.x)) / float(cell.z) - 1.0f;
+    float yi = 2.0f * (float(y) + 0.5f - float(cell.y)) / float(cell.z) - 1.0f;
+    uint p = owner * 12;
+    float eta = hydro[p] + mini_sqrt3 * (hydro[p+1] * xi + hydro[p+2] * yi);
+    float z = scales[((cells - 1) / 3 + code) * 12 + 9];
+    if (eta < z) atomic_store_explicit(&flags[owner], 1u, memory_order_relaxed);
+}
+
+kernel void mwdg2_expand_finest_positive(device const float *hydro [[buffer(0)]],
+                                         device const uint *owners [[buffer(1)]],
+                                         device float *scales [[buffer(2)]],
+                                         device const uint *flags [[buffer(3)]],
+                                         constant uint2 &layout [[buffer(4)]],
+                                         uint pixel [[thread_position_in_grid]]) {
+    uint side = 1u << layout.y;
+    uint cells = side * side;
+    if (pixel >= cells) return;
+    uint x = pixel % side, y = pixel / side;
+    uint code = mini_dilate(x) | (mini_dilate(y) << 1);
+    uint owner = owners[code];
+    uint4 cell = mini_geometry(owner, layout.y);
+    float xi = 2.0f * (float(x) + 0.5f - float(cell.x)) / float(cell.z) - 1.0f;
+    float yi = 2.0f * (float(y) + 0.5f - float(cell.y)) / float(cell.z) - 1.0f;
+    float invSpan = 1.0f / float(cell.z);
+    uint p = owner * 12, q = ((cells - 1) / 3 + code) * 12;
+    if (flags[owner]) {
+        float depth = hydro[p] - hydro[p+9];      // the leaf's mean depth
+        scales[q] = scales[q+9] + depth;
+        scales[q+1] = scales[q+10];
+        scales[q+2] = scales[q+11];
+    } else {
+        scales[q] = hydro[p] + mini_sqrt3 * (hydro[p+1] * xi + hydro[p+2] * yi);
+        scales[q+1] = hydro[p+1] * invSpan;
+        scales[q+2] = hydro[p+2] * invSpan;
+    }
+    scales[q+3] = hydro[p+3] + mini_sqrt3 * (hydro[p+4] * xi + hydro[p+5] * yi);
+    scales[q+6] = hydro[p+6] + mini_sqrt3 * (hydro[p+7] * xi + hydro[p+8] * yi);
+    scales[q+4] = hydro[p+4] * invSpan; scales[q+5] = hydro[p+5] * invSpan;
+    scales[q+7] = hydro[p+7] * invSpan; scales[q+8] = hydro[p+8] * invSpan;
+}

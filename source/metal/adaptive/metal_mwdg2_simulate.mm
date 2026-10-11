@@ -520,6 +520,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       projected = runtime.buffer(rasterCells * 4 * sizeof(float));
       leafManning = runtime.buffer(size_t(mesh.activeCount) * sizeof(float));
       boundaryFlux = runtime.buffer(size_t(mesh.activeCount) * sizeof(float));
+      id<MTLBuffer> expandFlags = runtime.buffer(size_t(nodeCount) * sizeof(uint32_t));
       id<MTLBuffer> frictionFlags = runtime.buffer(size_t(mesh.activeCount) * sizeof(uint32_t));
       id<MTLBuffer> bcCells = runtime.buffer(size_t(mesh.activeCount) * sizeof(int));
       // frictionFlags bit 1: leaf centre outside the raster (dg2_update.cu skips it)
@@ -617,6 +618,8 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       double initialVolume = waterVolume(mesh, tree, maxLevel,
           static_cast<uint32_t>(pars.xsz), static_cast<uint32_t>(pars.ysz), cellArea);
       const bool traceMass = std::getenv("LISFLOOD_MWDG2_TRACE_MASS") != nullptr;
+      const bool positiveExpand = std::getenv("LISFLOOD_ADAPTIVE_POSITIVE_EXPAND") != nullptr;
+      double traceUpdate = 0.0, traceRemesh = 0.0, traceLoss = 0.0, traceRain = 0.0;
       const double initialRasterVolume = DomainVol(&states, &pars, nullptr, &arrays, nullptr);
       solver.vol1 = static_cast<NUMERIC_TYPE>(initialVolume);
       if (verbose)
@@ -728,6 +731,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
                 {rainLayout, rainPhysics}, {sizeof(rainLayout), sizeof(rainPhysics)},
                 mesh.activeCount);
             boundCs.VolInMT += static_cast<NUMERIC_TYPE>(addedVolume);
+            traceRain += addedVolume;
             pars.RainTotalLoss += static_cast<NUMERIC_TYPE>(addedVolume);
           }
         }
@@ -1069,7 +1073,14 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         // Reinsert every evolved leaf on the finest grid, then encode it up
         // the full hierarchy before selecting the next adaptive topology.
         LayoutArgs expand{finestCount, maxLevel};
-        runtime.dispatch("mwdg2_mini_expand_finest", {state[2], mesh.owners, scales},
+        std::memset(expandFlags.contents, 0, size_t(nodeCount) * sizeof(uint32_t));
+        // CUDA's restriction by default (exact parity). The depth-preserving
+        // refinement (no eta < z on finest cells of a coarse wet leaf on a
+        // steep bed) is an opt-in diagnostic: LISFLOOD_ADAPTIVE_POSITIVE_EXPAND.
+        if (positiveExpand)
+          runtime.dispatch("mwdg2_expand_flags", {state[2], mesh.owners, scales, expandFlags},
+                           &expand, sizeof(expand), finestCount);
+        runtime.dispatch("mwdg2_expand_finest_positive", {state[2], mesh.owners, scales, expandFlags},
                          &expand, sizeof(expand), finestCount);
         const bool traceMeshMemory = verbose && (solver.itCount % 25 == 0);
         if (traceMeshMemory)
@@ -1110,6 +1121,20 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
             for (uint32_t node : mesh.activeHost) std::printf(" %u", node);
             std::printf("\n");
           }
+        if (traceMass) {
+          const double selectedVolume = waterVolume(mesh,
+              static_cast<const float *>(scales.contents), maxLevel,
+              static_cast<uint32_t>(pars.xsz), static_cast<uint32_t>(pars.ysz), cellArea);
+          // RK change (fluxes, rain, edges) and the change from losses,
+          // point sources and remeshing, summed over the run.
+          traceUpdate += stepRKVolume - stepStartVolume;
+          traceRemesh += selectedVolume - stepRKVolume + stepLossVolume;
+          traceLoss += stepLossVolume;
+          if (solver.itCount % 40 == 0)
+            std::fprintf(stderr, "MWDG2 mass budget step=%lld t=%.6g volume=%.9g update=%.9g remesh+sources=%.9g losses=%.9g rain=%.9g\n",
+                static_cast<long long>(solver.itCount), static_cast<double>(solver.t),
+                selectedVolume, traceUpdate, traceRemesh, traceLoss, traceRain);
+        }
         if (traceMass && solver.itCount < 20) {
           const double selectedVolume = waterVolume(mesh,
               static_cast<const float *>(scales.contents), maxLevel,

@@ -1,125 +1,145 @@
 # LISFLOOD-FP 8.4: how it was built and tested
 
-## Current handover: native adaptive Metal MWDG2, parity incomplete
+## Native Metal for every GPU solver (11 October 2026)
 
-The MWDG2 keyword now enters an Objective-C++ native adaptive Metal driver. On
-Apple Silicon, mesh selection/compaction, neighbor construction, CFL, DG2
-residuals, SSP-RK2 stages, positivity, friction, rainfall updates, loss kernels
-and adaptive re-encoding run on the Apple GPU. The application does not route
-this path through dense DG2 or CPU. Host code handles raster preparation and
-output, orchestration, and scalar CFL/event scheduling.
+All seven GPU solver keywords now run natively on Apple Silicon:
+FV1, FV2, DG2 and ACC on the uniform grid, ACC_NUGRID on its static
+non-uniform mesh, and HWFV1 and MWDG2 on an adaptive mesh. Each applies
+infiltration, evaporation and Green-Ampt, and accepts boundary files, point
+sources and stage files as its CUDA counterpart does.
 
-Validated application features include uniform and per-cell infiltration,
-Green-Ampt with soil-depth cap, evaporation, interpolated uniform rainfall,
-time-varying NetCDF rainfall, NoData skipping, standard rasters, mass records,
-and CUDA-schema `.loss` CSV output. `sh tests_8.4/run_metal_mwdg2_app.sh BIN`
-exercises these alongside rectangular and mixed-mesh lake-at-rest cases,
-including a full-precision still-water check. Component suites cover MRA,
-selection, scan, mesh grading/neighbors, and an adaptive RK2 case.
-
-Native Metal accepts `limitslopes` and `tol_Krivo`. Focused CUDA comparisons
-of a level-5 still-water hill and a moving-water dam (to 1 s, and depth to
-2,000 s against single-precision CUDA) agree within 3 %; see below. They do
-not establish basin-scale parity.
-Alzette with the limiter
-previously developed non-finite stage-2 momentum and a collapsed timestep
-(observed at 36.125425 s); the corrected code still needs the complete Alzette
-rerun. Native Metal currently
-rejects user boundary files and point sources (including the Alzette `FREE`
-boundary), rainfall masks, channels/SGC/structures/routing, porosity, and
-lat/long metrics. CUDA's adaptive solver has no rainfall input, so Metal rain
-is an extension, checked against the fixed-grid Metal DG2 rain semantics. CUDA retains double
-precision Green-Ampt state; Metal uses float hi/lo state, and coefficient,
-regridding and long-run trajectory parity are not established. The six-hour
-Alzette Metal run and like-for-like CUDA comparison are not complete. Do not
-describe MWDG2 or the 8.4 basin matrix as fully validated until those gaps are
-resolved and the six-hour outputs are checked.
-
-#### Controlled CUDA/Metal MWDG2 comparison
-
-The `tests_8.4/fixtures/mwdg2_cuda_lake32_l5` case is a 32x32 level-5 hill
-with a still-water free surface, mixed adaptive mesh, slope limiting, and
-matched 0.05 s steps to 0.2 s. Against the saved CUDA output, Metal has exact
-depth agreement and maximum Qx/Qy differences of 1.32e-7 and 1.85e-7 m2/s.
-Reproduce with `sh tests_8.4/run_metal_mwdg2_cuda_hill.sh BIN`. This test
-exposed and fixed a Metal limiter state-representation error: CUDA stores the
-limited depth slopes in its temporary flow state and restores eta=h+z when it
-re-inserts the adaptive state; Metal must retain the limited eta coefficients
-in its persistent tree. The Metal source also removed hydrostatic pressure
-corrections that are absent from CUDA's DG2 operator, and corrected raster
-projection and topography-only significance propagation.
-
-**Moving-water dam (11 October 2026).** The 32x32 L5 dam (`epsilon 0.001`,
-`limitslopes`, `tol_Krivo 1`, no friction, no boundary file) was compared with
-CUDA after three corrections to the Metal step, each read from
-`cuda_adaptive_simulate.cu`:
-
-1. CUDA reads a leaf's own coefficients from its assembled solution (after
-   friction and slope limiting), but its neighbours' from the scale-coefficient
-   tree loaded before them (`load_soln_and_nghbr_coeffs`; `limit_slopes` writes
-   only `d_assem_sol`). Metal limited in place, so neighbours saw limited
-   slopes. `mwdg2_rhs` and `mwdg2_limit_slopes` now take the tree as a separate
-   buffer. With the limiter on, the two sides of a face then use different
-   traces, so CUDA, and now Metal, do not conserve mass exactly (upstream
-   behaviour; 0.46 m3 of 3,440 m3 in `run_metal_mwdg2_limiter_app.sh`).
-2. The SSP-RK2 average uses the limited stage-1 state: CUDA's
-   `copy_to_buf_assem_sol` copy is overwritten by the stage-1 update, so it has
-   no effect. The bed coefficients are taken from the tree in `mwdg2_rk`.
-3. Rain (a Metal extension: CUDA adaptive MWDG2 has no rainfall) is integrated
-   over the previous step actually taken, not over the next CFL proposal; the
-   latter over-counted rain when a step was shortened to hit an output time.
-
-Two facts about CUDA that matter for comparisons: it always starts with a
-0.001 s step (`initial_tstep` is not read), and with no boundary file its edge
-is not a wall: the ghost copies the depth and zeroes the normal discharge, so
-water leaves wherever the edge cell has outward flow (the dam box loses about
-60 % of its water in the first 100 s, on both back ends). CUDA zeroes the
-boundary leaf's own slopes only in its built-in test cases, not in LISFLOOD
-runs (`test_case == 0`).
-
-| comparison (`run_metal_mwdg2_cuda_*.sh`) | before | after |
+| keyword | Metal implementation | ported from |
 |---|---|---|
-| 3 fixed 1 ms steps, step-1 depth max error | 5.0e-6 m | 1.8e-7 m |
-| 100 fixed steps, flow normalized L2 error | 0.191 % | 0.003 % |
-| 100 fixed steps, volume difference | 0.143 m3 | 0.0006 m3 |
-| 1 s (CFL steps), depth / flow normalized L2 | 0.038 % / 0.138 % | 0.041 % / 0.146 % |
+| `hwfv1` | `source/metal/adaptive`: Haar wavelets on the cell means (`hwfv1_encode_level`), first-order update (`hwfv1_update`) | `cuda/adaptive` with `solver_type HWFV1` (`fv1_update.cu`, `encode_and_thresh_flow.cu`) |
+| `mwdg2` | `source/metal/adaptive`: multiwavelets, DG2 residual (`mwdg2_rhs`), SSP-RK2, limiter | `cuda/adaptive` (`dg2_update.cu`, `limit_slopes.cu`) |
+| `acc_nugrid` | `source/metal/acc_nugrid`: mesh, neighbour records and interfaces built once on the host; discharge, depth, time step, rain and losses on the GPU | `cuda/acc_nugrid` (`compute_q.cu`, `update_h.cu`, `find_nonuniform_neighbours.cu`, `find_interfaces.cu`) |
 
-**2,000 s.** The earlier CUDA reference (`/tmp/mwdg2_cuda_2000_checkpoints`,
-21 % depth error) came from a double-precision CUDA build
-(`config.default.cmake`). The same case was rerun with the single-precision
-release build (HPC job 37253843, `lf84/mwdg2_float2000`):
+Both adaptive solvers share one driver (`metal_mwdg2_simulate.mm`); the mesh
+is selected on the GPU every step (`metal_mwdg2_mesh.mm`).
 
-| t (s) | CUDA single vs CUDA double: depth / flow | Metal vs CUDA single: depth / flow | volume (m3): CUDA double / CUDA single / Metal |
-|---|---|---|---|
-| 100 | 0.26 % / 29 % | 3.24 % / 104 % | 1870.4 / 1870.0 / 1896.7 |
-| 500 | 0.55 % / 104 % | 1.70 % / 177 % | 1859.8 / 1864.8 / 1891.4 |
-| 1000 | 2.83 % / 142 % | 1.62 % / 145 % | 1837.4 / 1864.3 / 1890.8 |
-| 2000 | 3.61 % / 114 % | 1.37 % / 182 % | 1801.5 / 1864.1 / 1889.6 |
+### How Metal follows CUDA
 
-The frictionless box sloshes at 0.1-0.4 m2/s for the whole run; after a few
-hundred seconds the flow field's phase is set by rounding, and CUDA in single
-precision differs from CUDA in double precision as much as Metal does. A 3 %
-flow criterion at 2,000 s cannot be met by CUDA against itself and is not
-used. Metal depth agrees with single-precision CUDA within 1.4-3.2 %
-(previous Metal: 17-21 % against the double reference). Steps: Metal 29,638,
-CUDA 29,073 (double) / 29,508 (single). The remaining 1.4 % volume difference
-arises in the first 100 s, while most water leaves through the edges; it is
-not yet explained. Outputs: `build/mwdg2_2000_v3`,
-`build/mwdg2_tmp_evidence/` (both ignored by git).
+Read from the CUDA sources and confirmed case by case against the
+single-precision A100 build of 8.4:
 
-The CUDA Alzette job 36660527 stalled in its MWDG2 run at 11.372408 seconds
-with `dt=6.282032e-8` seconds. Separate diagnostic jobs also showed timestep
-collapse. Diagnose that CUDA stability/time-stagnation problem before
-resubmitting the six-hour CUDA matrix; verify every final timestamp and hourly
-output. The completed dense Metal Alzette matrix is not a substitute for this
-adaptive solver comparison.
+- **Neighbours.** A leaf reads its own coefficients after friction and slope
+  limiting, but its neighbours from the tree loaded before them
+  (`load_soln_and_nghbr_coeffs` before `limit_slopes`). Friction is applied to
+  the neighbour copies only when the reading leaf itself is above `tol_h` and
+  `tol_s` (`friction_implicit.cu`); such a leaf only has its mean discharge
+  zeroed. `tol_s = 1e-9`.
+- **SSP-RK2** averages with the limited stage-1 state (the
+  `copy_to_buf_assem_sol` copy is overwritten by stage 1).
+- **Wet leaves.** Only leaves whose own or a neighbour's mean depth reaches
+  `tol_h` are updated. FREE ghosts are built from the cell means.
+- **Time step.** The first step is 0.001 s (`initial_tstep` is not read); a
+  dry leaf caps the next step at `initial_tstep`; no step is shortened to hit
+  an output time (outputs follow the first step at or after each time).
+- **Domain edge.** The raster's last row and column are the edge
+  (`find_neighbours.cu`: north/east from the leaf's north-east finest cell,
+  south/west from its south-west one); DG2 does not update leaves centred in
+  the padding. With no boundary file the edge ghost copies the depth and
+  zeroes the normal discharge, so water leaves wherever the edge cell has
+  outward flow; the `.mass` balance counts this flow.
+- **Boundaries and sources** (`classes/Boundary.h`, `PointSources.h`): one
+  segment per side, cells `int((lower-origin)/dx)` to
+  `int((upper-origin)/dx)-1`; HFIX/HVAR set the edge cell's depth to
+  `max(0, level-z)`, QFIX/QVAR to `q dt/dx`; point sources set or raise the
+  finest cell's level before each remeshing; boundary, source and stage cells
+  stay finest. `refine_wall`/`ref_thickness` keep the north and east strips
+  finest.
+- **ACC_NUGRID** builds its mesh from the DEM and its DG2 slope files with the
+  multiwavelet transform, its neighbour records (one per neighbouring face;
+  the face length is the neighbour's cell size) and interfaces exactly as the
+  CUDA kernels. NoData and padding are `nodata_elevation` walls (default
+  1e7 m), as `read_raster_file` sets them. Its uniform-rain row stepping,
+  dynamic-rain tile mapping and stage/velocity/VTK outputs follow CUDA; its
+  `.mass` holds real volumes (CUDA's holds zeros).
+
+Where Metal deliberately differs: the remeshing keeps the input bed on the
+finest level (it never smooths it); the padding repeats the raster's edge
+cells (see the defects below); rain is integrated over the step actually
+taken.
+
+### Results against CUDA
+
+Same cases on both back ends (`tests_8.4/adaptive_parity.py`; CUDA:
+`build_head84`, single precision, A100). Depth difference: normalized L2 over
+the raster at each output.
+
+| case | solver | Metal vs CUDA |
+|---|---|---|
+| dam break, friction, limiter, 0.5 s (29 steps) | MWDG2 | 0.004 % at worst, same steps |
+| same, 0.1 s of 1 ms steps | MWDG2 | below 0.0001 % |
+| dam break, 20 s | HWFV1 | 0.02 %, same 405 steps |
+| wet/dry hill, 30 s | HWFV1 | 0.06 %, same 601 steps |
+| HFIX inflow + FREE outflow / QVAR inflow / point sources / QFIX + infiltration, 30 s | HWFV1 | 0.10 / 0.11 / 0.06 / 0.015 % at the end |
+| same four, 30 s | MWDG2 | 0.2-2.3 % at the end |
+| lake at rest on a hill | MWDG2 | depth identical; discharge round-off (3e-6 m2/s) on both |
+| dam break, compressed mesh, 20 s | ACC_NUGRID | identical 28-leaf mesh, 0.13 % |
+| CUDA's own acc_nugrid loss suite (`tests_8.4/acc_nugrid.py`) | ACC_NUGRID | 106 of 106 checks |
+
+On wet/dry hills MWDG2 and ACC_NUGRID agree with CUDA to round-off for the
+first 30-40 steps and then drift. Adding 1e-5 m to one start cell moves
+Metal against itself by as much (MWDG2 frictionless bowl: 8-14 %; ACC_NUGRID
+hill: 18-33 %), so these flows are sensitive on both back ends; the 2,000 s
+frictionless sloshing dam differs between CUDA in single and double precision
+as much as between Metal and CUDA.
+
+`python3 tests_8.4/adaptive_parity.py check WORK BIN` reruns eight of these
+cases and compares them with the saved CUDA outputs in
+`tests_8.4/fixtures/adaptive_parity` (no GPU cluster needed).
+
+### Found in CUDA while matching it (to report, not copied unless stated)
+
+- MWDG2/HWFV1 with no boundary file: the edge is not a wall (copied).
+- MWDG2 with `limitslopes`: the two sides of a face use different traces,
+  so mass is not conserved exactly (copied; 0.013 % in the limiter test).
+- MWDG2/HWFV1: `initial_tstep` is not read (first step 0.001 s); no rainfall
+  input; with `epsilon 0` the written depth raster is the domain mean.
+- MWDG2/HWFV1 on rectangular rasters: padding is `wall_height` without water
+  (`read_raster_file`), so coarse leaves next to the raster edge read
+  ancestors that mix wall and water and a lake at rest starts to flow; the
+  input projection also duplicates node row `2^L - ysz` (row 76 for the
+  Alzette basin). Metal pads with the edge cells and does not copy the row.
+- HWFV1 (`fv1_update.cu`) updates padding cells, which take water from the
+  raster edge that the edge cell never loses (copied for parity).
+- When a dry coarse leaf is refined, its children get the parent's water
+  level over their own beds, giving small positive and negative depths
+  (seen as +/-0.02 m on the bowl test). Metal copies it for parity;
+  `LISFLOOD_ADAPTIVE_POSITIVE_EXPAND=1` instead gives each child the
+  parent's mean depth over its own bed (no negative depths, same volume) but
+  changes the MWDG2 steps, so it is a diagnostic, not the default.
+- MWDG2/HWFV1 scale `epsilon` by the largest bed and water level in the
+  padded raster, which includes the `wall_height` given to NoData and padding
+  cells (`preflag_topo`, `get_max_scale_coeffs`). With `wall_height 10000`,
+  `epsilon 0.001` allows 10 m of bed or level variation inside a leaf. On
+  the Alzette 100 m basin (Metal HWFV1, closed outlet, no rain, 1 h; budget
+  from `LISFLOOD_MWDG2_TRACE_MASS=1`) that coarsens across river banks:
+  children of wet leaves get depths down to -12 m and the flux update loses
+  39 % of the water, because face fluxes are not conservative where leaf
+  sizes change (a coarse leaf reads the mean of its finer neighbours, the
+  fine leaves read the coarse leaf). With `epsilon 1e-4` the error is +1.4 %
+  and depths reach -1.2 m; with `1e-5` or `0` it is +0.4 % (friction applied
+  differently by wet and dry readers) and no depth is below -0.003 m.
+  Remeshing itself changes the volume by under 20 m3. Small cases match CUDA's
+  total volume to 0.1 %; a CUDA Alzette run at `epsilon 0.001`
+  (`build/alzette_hwfv1_mass.sbatch`) is still to be done. Use an `epsilon`
+  of the wanted level tolerance divided by `wall_height`.
+- ACC_NUGRID: a fine cell's face record uses the coarse neighbour's size as
+  the face length, so the two sides of a coarse/fine face do not balance;
+  with sloping beds the scheme gains water and becomes unstable (closed hill:
+  80 -> 829 m3 on CUDA). Its `.mass` file holds zeros; dynamic rain is mapped
+  from the south edge; the uniform-rain row stepping scales the time twice
+  after a row change; it needs a stage file.
+- The Alzette outlet segment (`N 75641 75666 FREE`) is narrower than one cell
+  and maps to an empty range in the CUDA adaptive and non-uniform readers.
 
 `README.md` describes 8.4 and how to build and use it; this file records how
 8.4 was developed and tested, and the results.
 **8.4 adds two things to 8.3:** floodplain infiltration, evaporation and
-Green-Ampt for GPU solvers; and Metal implementations for every GPU solver
-selection. Metal MWDG2 now has an adaptive driver, while ACC_NUGRID and HWFV1
-remain dense compatibility paths (see "Metal back end" below).
+Green-Ampt for GPU solvers; and native Metal implementations of every GPU
+solver.
 
 ## Why
 
@@ -275,8 +295,8 @@ fault. It now waits; results are unchanged.
 
 ## Metal back end: all seven GPU solver selections (Apple Silicon)
 
-8.3 ran only FV1 on Metal. 8.4 adds FV2 and ACC plus a native adaptive MWDG2
-path and dense finest-level paths for ACC_NUGRID and HWFV1. A `.par` file with `cuda` (or `metal`)
+8.3 ran only FV1 on Metal. 8.4 adds FV2, DG2, ACC, ACC_NUGRID, HWFV1 and
+MWDG2. A `.par` file with `cuda` (or `metal`)
 and any of the seven GPU solver keywords runs on the Mac's GPU when
 LISFLOOD-FP is built on macOS; the
 build compiles one metallib per uniform operator
@@ -309,32 +329,9 @@ build compiles one metallib per uniform operator
 - With `-v` the Metal solvers print one `t= dt=` line per time step, as the
   CUDA solvers do (the 8.4 tests rebuild the expected depths from it).
 
-### ACC_NUGRID and HWFV1 dense compatibility; MWDG2 native adaptive path
+### ACC_NUGRID, HWFV1 and MWDG2
 
-The `acc_nugrid`, `hwfv1` and `mwdg2` keywords dispatch to Metal on macOS.
-ACC_NUGRID uses the Metal ACC operator and HWFV1 uses the Metal hydrostatic
-FV1/HLL operator; both remain dense finest-level compatibility paths without
-adaptive compression. MWDG2 uses the native adaptive Metal tree and RKDG2
-driver described in the current handover above. Its raster losses and uniform
-or NetCDF dynamic rainfall are applied on the GPU, and loss-enabled runs emit
-the CUDA-style `.loss` diagnostic. User-provided boundary files and point
-sources, `limitslopes`, and several routing/channel features are explicitly
-rejected. See the handover for tested scope and remaining CUDA parity gaps.
-
-CUDA MWDG2 constructs modal coefficients directly from the input rasters.
-Ordinary Metal DG2 instead expects `generateDG2DEM` and `generateDG2start`
-outputs. For MWDG2 only, missing `1x`/`1y` files now select a conservative
-piecewise-constant projection: the mean comes from the raster and unresolved
-slopes start at zero. Supplied modal files are still used. This removed the
-preprocessing failure without changing the existing `dg2` path.
-
-Validation on the Apple M1 Max used
-`python3 tests_8.4/metal_adaptive.py build/macos/lisflood`. All three paths built,
-ran a 16 x 16 moving-water case with infiltration for 120 s, wrote all three
-expected depth rasters, and kept every depth finite and nonnegative (HWFV1
-range 0.100--0.133 m; MWDG2 0.099--0.144 m; ACC_NUGRID 0.100--0.133 m).
-This older smoke run used dense compatibility drivers and is not evidence for
-the current native MWDG2 tree or equality with compressed CUDA output.
+See "Native Metal for every GPU solver" at the top of this file.
 
 The full 100 m Alzette six-hour matrix, including separate uniform infiltration,
 evaporation and Green-Ampt runs for all seven keywords, is recorded in
@@ -426,13 +423,22 @@ Kept here so that whoever extends 8.4 does not meet them again.
 | 13 | Test-checker mistakes: a pattern for T012 also matched the Green-Ampt runs; FV1's `.mass` volume includes the ghost cells; the GPU's first `.mass` row holds the whole volume; ACC writes output 0 after its first step | false failures | fixed in `tests_8.4/check.py` (Verror not checked where the volume includes ghost cells) |
 | 14 | Long runs on a laptop stop when it sleeps | runs stalled overnight | run with `caffeinate -i` |
 | 15 | On the ECMWF HPC, `sbatch` drops empty arguments, and scratch is purged when unused | jobs got wrong arguments; data at risk | pass `all`, never `""`; archive results to `$PERM` |
+| 16 | The adaptive and non-uniform CUDA solvers read many inputs and keywords themselves, with their own rules (boundary ranges, padding, NoData walls, first step, output times) | Metal results differed in ways the LISFLOOD documentation does not explain | read each CUDA reader and kernel, and confirm every rule with a small case run on both back ends (`tests_8.4/adaptive_parity.py`) |
+| 17 | Agreement with CUDA after many steps on wet/dry flows looked poor (up to 20 %) | long runs drifted while short runs matched | measure the flow's own sensitivity: the same back end with 1e-5 m added to one start cell drifts by as much; compare single and double precision CUDA too |
+| 18 | A function-local 12x12 filter matrix in the Metal MWDG2 kernels was rebuilt on every call | 0.3 s per step on the Alzette tree | a constant table with the same values; GPU copies instead of CPU memcpy (5.7 times faster) |
+| 19 | CUDA reference outputs made by a modified double-precision debug build | a 21 % "failure" of Metal MWDG2 | references from the unmodified single-precision release build only |
+| 20 | HWFV1 on Alzette lost 39 % of its water in an hour at `epsilon 0.001` | a mesh, flux or rain fault was suspected | a per-step budget (`LISFLOOD_MWDG2_TRACE_MASS=1`) split the flux update, remeshing, losses and rain: only the flux update changes the volume, and only with coarse leaves; the mesh dump (`LISFLOOD_DIAG_DUMP_STEP`) showed the threshold is scaled by the 10,000 m wall height, so `epsilon 1e-5` is the equivalent of a 0.1 m tolerance |
 
 ## Handover: what remains
 
-CUDA and Metal solver selections support infiltration, evaporation and
-Green-Ampt, with the adaptive-Metal MWDG2 limits listed above. Metal MWDG2
-also accepts uniform and dynamic NetCDF rainfall. Metal ACC_NUGRID and HWFV1
-remain dense compatibility paths. The sub-grid channel model remains CPU-only.
+Every GPU solver runs on CUDA and natively on Metal, with infiltration,
+evaporation and Green-Ampt. What remains: report the CUDA defects listed at
+the top; a faster MWDG2 Metal step for large basins (about 30 ms per step on
+the 512 x 512 Alzette tree; each kernel still waits for the previous one,
+`LISFLOOD_MWDG2_PROFILE=1` prints where the time goes); and the CUDA runs of
+the rectangular-raster comparison cases (`rectlake_*`, `rectdam_*` in
+`tests_8.4/adaptive_parity.py`), which were written but not yet run on the
+A100. The sub-grid channel model remains CPU-only, on both back ends.
 
 ### Completed: losses in CUDA MWDG2 and HWFV1 (9 October 2026)
 
@@ -513,58 +519,26 @@ small-tree guard and loss-disabled equality with CUDA 8.3. The final clean
 A100 run passed all 106 checks; details and remaining limits are in
 `tests_8.4/ACC_NUGRID_RESULTS.md`.
 
-### Native adaptive MWDG2 on Metal: current status
+### Native adaptive and non-uniform Metal solvers: tests
 
-The native driver is wired into LISFLOOD and has app-level tests for rectangular
-and mixed-mesh lake-at-rest cases, CFL-driven steps, uniform/grid infiltration,
-Green-Ampt and its cap across a changing tree, evaporation, uniform and dynamic
-rain, NoData handling, combined mass accounting, standard output and `.loss`
-CSV. The GPU runs mesh selection, compaction, neighbor construction, flow/RK,
-friction, losses and rainfall; host code handles input/output, orchestration,
-and scalar schedule/CFL work.
+- `sh tests_8.4/run_metal_mwdg2_app.sh BIN`: lake at rest on rectangular and
+  mixed meshes, CFL steps, uniform and grid infiltration, Green-Ampt with its
+  soil cap across remeshing, evaporation, uniform and NetCDF rain, NoData,
+  `.mass` and `.loss`.
+- `run_metal_mwdg2_{boundary_app,limiter_app}.sh BIN`: FREE edge, stage
+  output, `drain_nodata`; slope limiter.
+- `run_metal_mwdg2_cuda_{hill,parity,trajectory,1s}.sh BIN`: saved CUDA
+  outputs (lake at rest; 3, 100 and 1000 steps of a dam break).
+- `run_metal_mwdg2_{input,selection,mra,scan,mesh,live_step,adaptive_minicase}.sh
+  DIR`: the components (input projection, selection, transforms, scan, mesh
+  and neighbours, one step, an adaptive mini-case).
+- `python3 tests_8.4/adaptive_parity.py check WORK BIN`: MWDG2, HWFV1 (with
+  boundaries, sources and losses) and ACC_NUGRID against saved CUDA outputs.
+- `python3 tests_8.4/acc_nugrid.py BIN BIN WORK`: CUDA's ACC_NUGRID loss
+  suite, 106 checks (with the Metal binary as both arguments on a Mac, which
+  has no 8.3 ACC_NUGRID to compare against).
 
-`limitslopes`/`tol_Krivo` are implemented and accepted, with focused Metal
-app coverage. A controlled 32x32 L5 dam fixture compares CUDA and Metal
-rasters for three RK2 steps (0.003 s total) at epsilon=0.001, with identical
-initial active leaf IDs (184). Through step 3, maximum depth error is
-2.45e-5 m; maximum Qx error grows from 2.13e-5 at step 1 to 4.17e-5 at
-step 2 and 1.17e-3 at step 3. Qy maximum error stays below 2.75e-8. The
-regression and CUDA snapshots are in
-`tests_8.4/run_metal_mwdg2_cuda_parity.sh` and
-`tests_8.4/fixtures/mwdg2_cuda_z1_l5_e001/`. This short raster-level
-comparison does not establish long-run coefficient or trajectory parity.
-
-The same dam fixture was followed for 100 fixed steps, for 1 s and for
-2,000 s; see "Moving-water dam" in the current handover above. The short
-trajectory diagnostic is `tests_8.4/run_metal_mwdg2_cuda_trajectory.sh`.
-
-The 32x32/L5 lake-at-rest hill case is now compared directly against saved
-CUDA output in `tests_8.4/run_metal_mwdg2_cuda_hill.sh`. After fixing the Metal
-limiter's persistent eta representation, removing pressure corrections not
-present in CUDA, and correcting topography significance and raster projection,
-the case selects the same 16-leaf tree and remains stationary through 0.2 s:
-depth agrees exactly at the saved precision, with maximum Qx/Qy differences
-below 1.9e-7 m2/s. This closes that specific hill case; it does not establish
-moving-water trajectory, coefficient, or basin-scale parity.
-
-Short moving-water comparisons agree closely; at 2,000 s Metal depth is
-within 1.4-3.2 % of single-precision CUDA, while the sloshing flow field
-differs as much as CUDA single from CUDA double. The Alzette validation below
-remains unresolved, so these results do not establish basin-scale validation.
-
-Production gaps remain: user boundary files and point sources, rainfall masks,
-channels/SGC/structures/routing, porosity and lat/long metrics are rejected.
-CUDA uses double precision for cumulative Green-Ampt F while Metal uses two
-float components. Full adaptive leaf-set and long-trajectory parity remain
-unverified. CUDA adaptive MWDG2 has no rainfall input at all, so Metal
-rain follows the fixed-grid Metal DG2 semantics rather than adaptive CUDA
-output. A 10-second Alzette smoke run completed, but does not validate basin
-behavior: it used the full finest mesh, had a signed leaf-volume change of
-about -466 m3, and reconstructed negative depths totaling about 769,349 m3.
-The prepared Alzette `N 75641 75666 FREE` segment maps to an empty range under
-the current input index conversion, so that run used reflecting boundaries.
-The six-hour Alzette run and matched CUDA basin comparison remain unresolved;
-the CUDA reference itself previously collapsed its timestep near 11 seconds.
+All pass on the Apple M1 Max (11 October 2026).
 
 ### Where things are, and keeping 8.3 untouched
 
@@ -603,14 +577,10 @@ this source and out of the release. In general:
    grids from the soil map and soil moisture (Geoportal or WRF `SMOIS`).
    Possible later: recovery between rain events (SWMM-style, drying rate
    from evapotranspiration).
-3. Done: every GPU solver keyword runs on Metal, and infiltration, evaporation
-   and Green-Ampt work in each GPU path. MWDG2 now has a native adaptive Metal
-   driver plus rain and losses, with the unsupported modes and parity gaps
-   listed above; ACC_NUGRID and HWFV1 remain dense compatibility paths.
+3. Done: every GPU solver runs natively on Metal, with infiltration,
+   evaporation and Green-Ampt, boundary files and point sources.
 4. Done: infiltration, evaporation and Green-Ampt in CUDA MWDG2, HWFV1 and
-   non-uniform-grid ACC. Continue MWDG2 CUDA parity, implement remaining
-   boundary/source support, and complete basin validation before claiming full
-   solver support.
+   non-uniform-grid ACC.
 
 Known limits, as in the CPU solvers: water shallower than `DepthThresh` does
 not drain; infiltration is a constant rate (step 2 addresses this).
