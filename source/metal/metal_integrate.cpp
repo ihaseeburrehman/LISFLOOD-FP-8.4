@@ -5,6 +5,7 @@
 #include "fv2/metal_fv2_simulate.h"
 #include "dg2/metal_dg2_simulate.h"
 #include "adaptive/metal_mwdg2_simulate.h"
+#include "acc_nugrid/metal_acc_nugrid_simulate.h"
 #include "../swe/fields.h"
 
 bool metal_is_available() { return lis::metal::fv1::Simulator::is_available(); }
@@ -72,13 +73,8 @@ void run_metal_mwdg2(Fnames &filenames, Files *files, States &states, Pars &pars
 void run_metal_acc_nugrid(Fnames &filenames, Files *files, States &states,
                           Pars &pars, Solver &solver, BoundCs &boundCs,
                           Stage &stage, Arrays &arrays, int verbose) {
-  fprintf(stderr, "NOTICE: Metal ACC_NUGRID uses the dense finest-level mesh; "
-                  "epsilon does not compress the mesh.\n");
-  if (verbose) {
-    printf("\nUsing the Metal GPU for ACC_NUGRID in dense finest-level mode\n");
-    printf("  adaptive threshold epsilon=%g (mesh compression is disabled)\n\n",
-           (double)solver.epsilon);
-  }
-  lis::metal::acc::simulate(filenames, files, states, pars, solver, boundCs,
-                            stage, arrays, verbose);
+  if (verbose)
+    printf("\nUsing the Metal GPU for ACC on the static non-uniform grid\n\n");
+  lis::metal::acc_nugrid::simulate(filenames, files, states, pars, solver,
+                                   boundCs, stage, arrays, verbose);
 }

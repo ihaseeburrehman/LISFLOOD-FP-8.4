@@ -100,12 +100,73 @@ CASES = {
 }
 
 
+BDY = "q1\n3 seconds\n0 0\n0.5 10\n0.2 40\nh1\n2 seconds\n1.0 0\n2.5 30\n"
+FILES = {  # extra files per case group (boundary conditions, point sources)
+    "bcfree": {"bc.bci": "W 0 32 HFIX 3.0\nE 0 32 FREE\n"},
+    "bcqvar": {"bc.bci": "S 8 24 QVAR q1\nN 0 32 FREE\n", "bc.bdy": BDY},
+    "ps": {"bc.bci": "P 10.5 16.5 QFIX 0.5\nP 20.5 20.5 HVAR h1\n", "bc.bdy": BDY},
+    "bcinf": {"bc.bci": "W 4 28 QFIX 0.3\nE 0 32 FREE\n"},
+}
+BC_LINES = {"bcfree": ["bcifile bc.bci"], "bcqvar": ["bcifile bc.bci", "bdyfile bc.bdy"],
+            "ps": ["bcifile bc.bci", "bdyfile bc.bdy"],
+            "bcinf": ["bcifile bc.bci", "infiltration 0.00001"]}
+for solver in ("mwdg2", "hwfv1"):
+    for group in FILES:
+        CASES[f"{group}_{solver}"] = (hill_inputs, [solver, "epsilon 0.01"], 30, 3, 0.05,
+                                      ["fpfric 0.03"] + BC_LINES[group])
+
+
+def with_slopes(inputs):
+    # acc_nugrid also reads <DEM>1x and <DEM>1y (DG2 bed slopes): zero here
+    def make_inputs(folder):
+        inputs(folder)
+        flat = np.zeros_like(read(os.path.join(folder, "dem.asc")))
+        grid(os.path.join(folder, "dem.asc1x"), flat)
+        grid(os.path.join(folder, "dem.asc1y"), flat)
+    return make_inputs
+
+
+RAIN = "rain\n3 seconds\n0 0\n60 15\n0 30\n"
+NUG = ["acc_nugrid", "L 5"]
+CASES.update({
+    "nug_hill": (with_slopes(hill_inputs), NUG + ["epsilon 0.01"], 30, 3, 1.0, ["fpfric 0.03"]),
+    "nug_dam": (with_slopes(dam_inputs), NUG + ["epsilon 0.01"], 20, 2, 1.0, ["fpfric 0.03"]),
+    "nug_bcfree": (with_slopes(hill_inputs), NUG + ["epsilon 0.01"], 30, 3, 1.0,
+                   ["fpfric 0.03", "bcifile bc.bci"]),
+    "nug_ps": (with_slopes(hill_inputs), NUG + ["epsilon 0.01"], 30, 3, 1.0,
+               ["fpfric 0.03", "bcifile bc.bci", "bdyfile bc.bdy"]),
+    "nug_raininf": (with_slopes(hill_inputs), NUG + ["epsilon 0.01"], 30, 3, 1.0,
+                    ["fpfric 0.03", "rainfall rain.txt", "infiltration 0.00001"]),
+})
+STAGE = "2\n8.5 16.5\n24.5 8.5\n"   # cuda acc_nugrid needs a stage file
+FILES.update({"nug_hill": {"stage.txt": STAGE}, "nug_dam": {"stage.txt": STAGE},
+              "nug_bcfree": {"bc.bci": "W 0 32 HFIX 3.0\nE 0 32 FREE 0.01\n", "stage.txt": STAGE},
+              "nug_ps": {"bc.bci": "P 10.5 16.5 QFIX 0.5\nP 20.5 20.5 HVAR h1\n", "bc.bdy": BDY,
+                         "stage.txt": STAGE},
+              "nug_raininf": {"rain.txt": RAIN, "stage.txt": STAGE}})
+for name in ("nug_hill", "nug_dam", "nug_bcfree", "nug_ps", "nug_raininf"):
+    CASES[name][5].append("stagefile stage.txt")
+
+
+def read_vtk(path):
+    """leaf count and the z0 and h cell values of a write_soln_vtk file"""
+    lines = open(path).read().split("\n")
+    def block(name):
+        i = lines.index(f"SCALARS {name} float 1") + 2
+        n = int(next(l for l in lines if l.startswith("CELL_DATA")).split()[1])
+        return np.array([float(v) for v in lines[i:i + n]])
+    return block("z0"), block("h")
+
+
 def make(work):
     os.makedirs(work, exist_ok=True)
     for name, (inputs, solver, sim, save, dt0, extra) in CASES.items():
         folder = os.path.join(work, name)
         os.makedirs(folder, exist_ok=True)
         inputs(folder)
+        for fname, text in FILES.get(name if name in FILES else name.rsplit("_", 1)[0], {}).items():
+            with open(os.path.join(folder, fname), "w") as f:
+                f.write(text)
         lines = COMMON + solver + extra + [
             f"sim_time {sim:g}", f"saveint {save:g}", f"massint {save:g}",
             f"initial_tstep {dt0:g}"]
@@ -139,6 +200,23 @@ def compare(work, only=None):
         if only and name != only:
             continue
         folder = os.path.join(work, name)
+        if name.startswith("nug_"):
+            print(f"== {name} (VTK leaves at each save: count, depth L2 %, max |dh| m, volume ratio)")
+            for k in range(1, 100):
+                c, m = os.path.join(folder, f"{name}-{k:04d}.vtk"), os.path.join(folder, f"metal-{k:04d}.vtk")
+                if not (os.path.exists(c) and os.path.exists(m)):
+                    break
+                zc, hc = read_vtk(c)
+                zm, hm = read_vtk(m)
+                if len(hc) != len(hm):
+                    print(f"{k:4d} leaf counts differ: CUDA {len(hc)} Metal {len(hm)}")
+                    worst[name] = 100.0
+                    continue
+                dl2 = 100 * np.linalg.norm(hm - hc) / max(np.linalg.norm(hc), 1e-30)
+                print(f"{k:4d} leaves {len(hc)} bed equal {np.array_equal(zc, zm)} depth L2 {dl2:.4f}"
+                      f" max|dh| {abs(hm - hc).max():.3g} sum {hc.sum():.4f} / {hm.sum():.4f}")
+                worst[name] = max(worst.get(name, 0), dl2)
+            continue
         print(f"== {name}")
         print("   k   depth L2%   flow L2%   max|dh| m   volume CUDA / Metal")
         cuda = {int(p.rsplit("-", 1)[1][:-3]): p[:-3]

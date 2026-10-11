@@ -127,7 +127,17 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
         DEPENDS ${METALLIB_MWDG2} ${METALLIB_MWDG2_SELECTION}
                 ${METALLIB_TREE} ${METALLIB_MWDG2_INPUT} ${METALLIB_MWDG2_RECON}
         COMMENT "Linking native adaptive Metal MWDG2 kernels")
-    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2} ${METALLIB_LOSSES} ${METALLIB_TREE} ${METALLIB_MWDG2} ${METALLIB_MWDG2_SELECTION} ${METALLIB_MWDG2_INPUT} ${METALLIB_MWDG2_RECON} ${METALLIB_MWDG2_NATIVE})
+    set(METALLIB_ACC_NUGRID ${CMAKE_BINARY_DIR}/metal_acc_nugrid.metallib)
+    add_custom_command(
+        OUTPUT ${METALLIB_ACC_NUGRID}
+        COMMAND xcrun -sdk macosx metal -fno-fast-math
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/acc_nugrid/metal_acc_nugrid.metal
+                -o ${CMAKE_BINARY_DIR}/metal_acc_nugrid.air
+        COMMAND xcrun -sdk macosx metallib ${CMAKE_BINARY_DIR}/metal_acc_nugrid.air
+                -o ${METALLIB_ACC_NUGRID}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/acc_nugrid/metal_acc_nugrid.metal
+        COMMENT "Compiling Metal ACC non-uniform grid kernels")
+    add_custom_target(metal_shaders DEPENDS ${METALLIB} ${METALLIB_ACC} ${METALLIB_FV2} ${METALLIB_DG2} ${METALLIB_LOSSES} ${METALLIB_TREE} ${METALLIB_MWDG2} ${METALLIB_MWDG2_SELECTION} ${METALLIB_MWDG2_INPUT} ${METALLIB_MWDG2_RECON} ${METALLIB_MWDG2_NATIVE} ${METALLIB_ACC_NUGRID})
 
     add_library(lisflood-metal STATIC
         ${CMAKE_CURRENT_SOURCE_DIR}/metal_integrate.cpp
@@ -138,7 +148,8 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
         ${CMAKE_CURRENT_SOURCE_DIR}/losses/metal_losses.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/adaptive/metal_mwdg2_scan.mm
         ${CMAKE_CURRENT_SOURCE_DIR}/adaptive/metal_mwdg2_mesh.mm
-        ${CMAKE_CURRENT_SOURCE_DIR}/adaptive/metal_mwdg2_simulate.mm)
+        ${CMAKE_CURRENT_SOURCE_DIR}/adaptive/metal_mwdg2_simulate.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/acc_nugrid/metal_acc_nugrid_simulate.mm)
     add_dependencies(lisflood-metal metal_shaders)
     target_include_directories(lisflood-metal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR})
     target_link_libraries(lisflood-metal PUBLIC ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK} lisflood-base)
