@@ -1,5 +1,8 @@
 #ifdef __APPLE__
 #include "metal_mwdg2_mesh.h"
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #import <Foundation/Foundation.h>
 #include <algorithm>
 #include <cmath>
@@ -117,6 +120,12 @@ AdaptiveMesh AdaptiveMeshBuilder::select(id<MTLBuffer> scales,
   if (nodeCount != finestOffset + finestCount)
     throw std::invalid_argument("MWDG2 node count does not match maximum tree level");
 
+  static double prof[6] = {0, 0, 0, 0, 0, 0};
+  static long calls = 0;
+  const bool profile = std::getenv("LISFLOOD_MWDG2_PROFILE") != nullptr;
+  auto now = []() { return std::chrono::duration<double>(
+      std::chrono::steady_clock::now().time_since_epoch()).count(); };
+  double t0 = now();
   // CUDA encoding order: finest-to-coarsest, so each parent sees its four
   // already encoded child polynomials.
   for (int level = static_cast<int>(maxLevel) - 1; level >= 0; --level) {
@@ -124,6 +133,7 @@ AdaptiveMesh AdaptiveMeshBuilder::select(id<MTLBuffer> scales,
     dispatch(encodeKernel_.c_str(), {scales, details}, args, sizeof(args), args[1]);
   }
 
+  if (profile) { double t = now(); prof[0] += t - t0; t0 = t; }
   // CUDA computes the normalizers over active leaf scaling coefficients (the
   // initial mesh is finest-level). Keep the reduction on Metal and retain the
   // CUDA floor of 1.0, including its observed qy <- qx0 behavior.
@@ -156,6 +166,7 @@ AdaptiveMesh AdaptiveMeshBuilder::select(id<MTLBuffer> scales,
            {componentMaxima, normBuffer, flowNormalized}, &internalCount,
            sizeof(internalCount), internalCount);
 
+  if (profile) { double t = now(); prof[1] += t - t0; t0 = t; }
   id<MTLBuffer> significant = makeBuffer(device_, nodeCount);
   // Finest-level significance entries have no detail threshold pass, but
   // regularise_upward reads them as child flags. Match CUDA zero_details and
@@ -216,8 +227,16 @@ AdaptiveMesh AdaptiveMeshBuilder::select(id<MTLBuffer> scales,
     dispatch("mwdg2_propagate_extra_significance", {significant, flowNormalized},
              &args, sizeof(args), args.parentCount);
   }
-  return build(static_cast<const uint8_t *>(significant.contents), maxLevel,
-               nodeCount, finestCount);
+  if (profile) { double t = now(); prof[2] += t - t0; t0 = t; }
+  AdaptiveMesh built = build(static_cast<const uint8_t *>(significant.contents), maxLevel,
+                             nodeCount, finestCount);
+  if (profile) {
+    prof[3] += now() - t0;
+    if (++calls % 200 == 0)
+      std::printf("mesh select profile (s): encode %.2f normalise %.2f threshold %.2f build %.2f\n",
+                  prof[0], prof[1], prof[2], prof[3]);
+  }
+  return built;
 }
 
 AdaptiveMesh AdaptiveMeshBuilder::build(const uint8_t *significant,

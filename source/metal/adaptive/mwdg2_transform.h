@@ -1,20 +1,28 @@
 #pragma once
-#include "mwdg2_filters.h"
-inline float mwdg2_coefficient(unsigned row, unsigned column) {
-const float mwdg2_filter[12][12] = {
-    {HH0_11, HH0_12, HH0_13, HH2_11, HH2_12, HH2_13, HH1_11, HH1_12, HH1_13, HH3_11, HH3_12, HH3_13},
-    {HH0_21, HH0_22, HH0_23, HH2_21, HH2_22, HH2_23, HH1_21, HH1_22, HH1_23, HH3_21, HH3_22, HH3_23},
-    {HH0_31, HH0_32, HH0_33, HH2_31, HH2_32, HH2_33, HH1_31, HH1_32, HH1_33, HH3_31, HH3_32, HH3_33},
-    {GA0_11, GA0_12, GA0_13, GA2_11, GA2_12, GA2_13, GA1_11, GA1_12, GA1_13, GA3_11, GA3_12, GA3_13},
-    {GA0_21, GA0_22, GA0_23, GA2_21, GA2_22, GA2_23, GA1_21, GA1_22, GA1_23, GA3_21, GA3_22, GA3_23},
-    {GA0_31, GA0_32, GA0_33, GA2_31, GA2_32, GA2_33, GA1_31, GA1_32, GA1_33, GA3_31, GA3_32, GA3_33},
-    {GB0_11, GB0_12, GB0_13, GB2_11, GB2_12, GB2_13, GB1_11, GB1_12, GB1_13, GB3_11, GB3_12, GB3_13},
-    {GB0_21, GB0_22, GB0_23, GB2_21, GB2_22, GB2_23, GB1_21, GB1_22, GB1_23, GB3_21, GB3_22, GB3_23},
-    {GB0_31, GB0_32, GB0_33, GB2_31, GB2_32, GB2_33, GB1_31, GB1_32, GB1_33, GB3_31, GB3_32, GB3_33},
-    {GC0_11, GC0_12, GC0_13, GC2_11, GC2_12, GC2_13, GC1_11, GC1_12, GC1_13, GC3_11, GC3_12, GC3_13},
-    {GC0_21, GC0_22, GC0_23, GC2_21, GC2_22, GC2_23, GC1_21, GC1_22, GC1_23, GC3_21, GC3_22, GC3_23},
-    {GC0_31, GC0_32, GC0_33, GC2_31, GC2_32, GC2_33, GC1_31, GC1_32, GC1_33, GC3_31, GC3_32, GC3_33}
+// MWDG2 multiwavelet filter matrix (encode rows 0-2: scale modes, rows 3-11:
+// details; columns: child * 3 + mode). The values are those of the
+// expressions in mwdg2_filters.h (from cuda/adaptive/mra/Filters.h) as the
+// Metal compiler evaluates them, written as exact hexadecimal floats so the
+// table is a compile-time constant (a function-local array built from the
+// expressions was rebuilt on every call and dominated the adaptive step).
+#ifdef __METAL_VERSION__
+constant float mwdg2_filter[12][12] = {
+#else
+static const float mwdg2_filter[12][12] = {
+#endif
+{0x1p-1f, 0x0p+0f, 0x0p+0f, 0x1p-1f, 0x0p+0f, 0x0p+0f, 0x1p-1f, 0x0p+0f, 0x0p+0f, 0x1p-1f, 0x0p+0f, 0x0p+0f},
+    {-0x1.bb67aep-2f, 0x1p-2f, 0x0p+0f, 0x1.bb67aep-2f, 0x1p-2f, 0x0p+0f, -0x1.bb67aep-2f, 0x1p-2f, 0x0p+0f, 0x1.bb67aep-2f, 0x1p-2f, 0x0p+0f},
+    {-0x1.bb67aep-2f, 0x0p+0f, 0x1p-2f, -0x1.bb67aep-2f, 0x0p+0f, 0x1p-2f, 0x1.bb67aep-2f, 0x0p+0f, 0x1p-2f, 0x1.bb67aep-2f, 0x0p+0f, 0x1p-2f},
+    {-0x1.11aceep-2f, -0x1.da0516p-2f, -0x1.da0516p-2f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x1.11aceep-2f, -0x1.da0516p-2f, -0x1.da0516p-2f},
+    {0x0p+0f, 0x0p+0f, -0x1.6a09e6p-1f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x1.6a09e6p-1f},
+    {0x0p+0f, -0x1.6a09e6p-1f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x1.6a09e6p-1f, 0x0p+0f},
+    {0x0p+0f, 0x0p+0f, 0x0p+0f, 0x1.11aceep-2f, -0x1.da0516p-2f, 0x1.da0516p-2f, -0x1.11aceep-2f, -0x1.da0516p-2f, 0x1.da0516p-2f, 0x0p+0f, 0x0p+0f, 0x0p+0f},
+    {0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x1.6a09e6p-1f, 0x0p+0f, 0x0p+0f, -0x1.6a09e6p-1f, 0x0p+0f, 0x0p+0f, 0x0p+0f},
+    {0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x1.6a09e6p-1f, 0x0p+0f, 0x0p+0f, -0x1.6a09e6p-1f, 0x0p+0f, 0x0p+0f, 0x0p+0f, 0x0p+0f},
+    {0x1p-1f, 0x0p+0f, 0x0p+0f, -0x1p-1f, 0x0p+0f, 0x0p+0f, -0x1p-1f, 0x0p+0f, 0x0p+0f, 0x1p-1f, 0x0p+0f, 0x0p+0f},
+    {-0x1.4f2ec4p-3f, -0x1.2246d6p-2f, 0x1.83091ep-2f, 0x1.4f2ec4p-3f, -0x1.2246d6p-2f, -0x1.83091ep-2f, -0x1.4f2ec4p-3f, -0x1.2246d6p-2f, -0x1.83091ep-2f, 0x1.4f2ec4p-3f, -0x1.2246d6p-2f, 0x1.83091ep-2f},
+    {-0x1.4f2ec4p-3f, 0x1.83091ep-2f, -0x1.2246d6p-2f, -0x1.4f2ec4p-3f, -0x1.83091ep-2f, -0x1.2246d6p-2f, 0x1.4f2ec4p-3f, -0x1.83091ep-2f, -0x1.2246d6p-2f, 0x1.4f2ec4p-3f, 0x1.83091ep-2f, -0x1.2246d6p-2f}
 };
-return mwdg2_filter[row][column];
+inline float mwdg2_coefficient(unsigned row, unsigned column) {
+    return mwdg2_filter[row][column];
 }
-#undef C

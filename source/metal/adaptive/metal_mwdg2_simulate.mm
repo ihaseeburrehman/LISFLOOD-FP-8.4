@@ -133,6 +133,16 @@ public:
     }
   }
 
+  // GPU copy of whole buffers (the 12-float trees), instead of a CPU memcpy
+  void copy(id<MTLBuffer> dst, id<MTLBuffer> src, size_t bytes) {
+    @autoreleasepool {
+      id<MTLCommandBuffer> command = [queue commandBuffer];
+      id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+      [blit copyFromBuffer:src sourceOffset:0 toBuffer:dst destinationOffset:0 size:bytes];
+      [blit endEncoding]; [command commit]; [command waitUntilCompleted];
+    }
+  }
+
   void dispatch(const char *name, const std::vector<id<MTLBuffer>> &buffers,
                 const void *constant, size_t size, uint32_t count,
                 uint32_t width = 64) {
@@ -717,7 +727,6 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
             runtime.dispatch("mwdg2_apply_rain", {scales, mesh.active, rainRates, lossDem},
                 {rainLayout, rainPhysics}, {sizeof(rainLayout), sizeof(rainPhysics)},
                 mesh.activeCount);
-            std::memcpy(state[0].contents, scales.contents, size_t(nodeCount) * 12 * sizeof(float));
             boundCs.VolInMT += static_cast<NUMERIC_TYPE>(addedVolume);
             pars.RainTotalLoss += static_cast<NUMERIC_TYPE>(addedVolume);
           }
@@ -746,7 +755,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         // limited view. Neighbours read the tree with friction applied but not
         // limited (stage1Tree).
         uint32_t activeCount = mesh.activeCount;
-        std::memcpy(state[0].contents, scales.contents, size_t(nodeCount) * 12 * sizeof(float));
+        runtime.copy(state[0], scales, size_t(nodeCount) * 12 * sizeof(float));
         // Boundaries::update_all_inlets at the step's end time, then
         // add_ghost_cells on each stage's own leaf state.
         bc.update(static_cast<float>(solver.t) + dt);
@@ -777,7 +786,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
           runtime.dispatch("mwdg2_friction_own", {state[0], mesh.active, leafManning, frictionFlags},
                            {&activeCount, frictionParams}, {sizeof(activeCount), sizeof(frictionParams)},
                            mesh.activeCount);
-          std::memcpy(neighbourTree.contents, scales.contents, size_t(nodeCount) * 12 * sizeof(float));
+          runtime.copy(neighbourTree, scales, size_t(nodeCount) * 12 * sizeof(float));
           runtime.dispatch("mwdg2_friction", {neighbourTree, allNodes, nodeManning},
                            {&nodeCount, frictionParams}, {sizeof(nodeCount), sizeof(frictionParams)},
                            nodeCount);
@@ -919,7 +928,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
           runtime.dispatch(haar ? "hwfv1_encode_level" : "mwdg2_encode_level",{scales,details},encodeArgs,
                            sizeof(encodeArgs),encodeArgs[1]);
         }
-        std::memcpy(state[1].contents,scales.contents,size_t(nodeCount)*12*sizeof(float));
+        runtime.copy(state[1], scales, size_t(nodeCount) * 12 * sizeof(float));
         applyBoundaryCells(state[1]);
         applyCudaSlopeLimiter(state[1], scales);
         runtime.dispatch("mwdg2_rhs", {state[1], mesh.active, mesh.neighbours, rhs[1], scales, boundaryFlux, scales, frictionFlags},
@@ -1149,7 +1158,6 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         markPaddingLeaves();
         // RK workspaces are sized to the fixed hierarchy and reused across
         // regrids; only leaf-count-sized work buffers above need replacement.
-        std::memcpy(state[0].contents, scales.contents, size_t(nodeCount) * 12 * sizeof(float));
 
         // Verbose memory telemetry makes adaptive buffer lifetime regressions
         // visible on long runs without requiring Instruments.
