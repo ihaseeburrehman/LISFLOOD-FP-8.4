@@ -1015,6 +1015,7 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 
 	if (read_integer_param(param_name, line_number, param_value_ptr, "output_precision", &Parptr->output_precision, verbose, mode))
 	{
+		Parptr->output_precision_set = ON;
 		if (verbose == ON) printf("Output precision changed to %i\n", Parptr->output_precision);
 		return;
 	}
@@ -1041,6 +1042,16 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
         return;
     }
 
+	if (read_empty_param(param_name, line_number, param_value_ptr, "raster_out", verbose, mode))
+	{
+		Parptr->raster_out = ON;
+		return;
+	}
+	if (read_empty_param(param_name, line_number, param_value_ptr, "cumulative", verbose, mode))
+	{
+		Parptr->cumulative = ON;
+		return;
+	}
 	if (read_empty_param(param_name, line_number, param_value_ptr, "refine_wall", verbose, mode))
 	{
 		Parptr->refine_wall = ON;

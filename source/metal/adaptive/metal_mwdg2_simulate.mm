@@ -667,11 +667,14 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       };
       // LISFLOOD_MWDG2_PROFILE: wall time per phase, printed every 200 steps
       const bool profile = std::getenv("LISFLOOD_MWDG2_PROFILE") != nullptr;
+      bool cumuStarted = false;
+      // cuda/adaptive raster_out writes its grids with 8 decimals (float build)
+      if (pars.raster_out == ON && pars.output_precision_set != ON) pars.output_precision = 8;
       double phase[5] = {0, 0, 0, 0, 0};
       auto clock = []() { return std::chrono::duration<double>(
           std::chrono::steady_clock::now().time_since_epoch()).count(); };
       double mark = clock();
-      auto lap = [&](int k) { if (profile) { const double now = clock(); phase[k] += now - mark; mark = now; } };
+      auto lap = [&](int k) { const double now = clock(); phase[k] += now - mark; mark = now; };
       while (solver.t < solver.Sim_Time) {
         @autoreleasepool {
         const double stepStartVolume = traceMass ? waterVolume(mesh,
@@ -1254,6 +1257,21 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
           if (arrays.maxH) arrays.maxH[i] = std::max(arrays.maxH[i], arrays.H[i]);
         }
 
+        if (pars.cumulative == ON && solver.t >= pars.MassTotal) {
+          // cuda/adaptive write_cumulative_data: one line per mass interval
+          char cumuPath[512];
+          std::snprintf(cumuPath, sizeof(cumuPath), "%s.cumu", filenames.resrootname);
+          FILE *cumu = std::fopen(cumuPath, cumuStarted ? "a" : "w");
+          if (cumu) {
+            if (!cumuStarted)
+              std::fprintf(cumu, "simtime,runtime_mra,runtime_solver,runtime_total,dt,reduction\n");
+            const double mra = phase[0] + phase[3], flow = phase[1] + phase[2] + phase[4];
+            std::fprintf(cumu, "%f,%f,%f,%f,%f,%f\n", double(solver.t), mra, flow, mra + flow,
+                double(dt), (100.0 - 100.0 * mesh.activeCount / (double(pars.xsz) * pars.ysz)) / 100.0);
+            std::fclose(cumu);
+            cumuStarted = true;
+          }
+        }
         if (solver.t >= pars.MassTotal) {
           // The shared raster statistics routine clamps negative projected
           // depths and resets both the previous volume and interval fluxes.

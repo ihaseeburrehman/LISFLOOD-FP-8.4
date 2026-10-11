@@ -711,6 +711,8 @@ struct Pars{
     NUMERIC_TYPE nodata_elevation; // DEM elevation used for NODATA values
     NUMERIC_TYPE wall_height; // adaptive GPU wall height for NoData cells
     int refine_wall, ref_thickness; // adaptive GPU: finest strip along the north/east walls
+    int raster_out, cumulative;     // adaptive GPU outputs as cuda/adaptive (8-decimal grids, .cumu)
+    int output_precision_set;
     int drain_nodata; // remove water from DEM NODATA cells
     int limit_slopes; /**< DG2 slope limiter enabled when limit_slopes = ON */
 

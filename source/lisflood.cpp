@@ -150,6 +150,9 @@ int main(int argc, char *argv[])
     Params.nodata_elevation = DEM_NO_DATA;
     Params.wall_height = C(0.0);
     Params.refine_wall = OFF;
+    Params.raster_out = OFF;
+    Params.cumulative = OFF;
+    Params.output_precision_set = OFF;
     Params.ref_thickness = 0;
     Params.drain_nodata = OFF;
 

@@ -59,7 +59,12 @@ single-precision A100 build of 8.4:
 Where Metal deliberately differs: the remeshing keeps the input bed on the
 finest level (it never smooths it); the padding repeats the raster's edge
 cells (see the defects below); rain is integrated over the step actually
-taken.
+taken; in the MWDG2 input a NoData corner of a basin cell takes the cell's
+own values and NoData cells stay walls (CUDA averages the wall height in;
+`LISFLOOD_ADAPTIVE_CUDA_NODATA_INPUT=1` restores it); losses are booked as
+the water that actually left the stored level (the state holds z + h in
+float32, so on a high bed a small step can round away and is carried to the
+next one).
 
 ### Results against CUDA
 
@@ -126,6 +131,13 @@ cases and compares them with the saved CUDA outputs in
   total volume to 0.1 %; a CUDA Alzette run at `epsilon 0.001`
   (`build/alzette_hwfv1_mass.sbatch`) is still to be done. Use an `epsilon`
   of the wanted level tolerance divided by `wall_height`.
+- MWDG2 input (`read_and_project_modes_dg2.cu`): each cell's modes come
+  from four corner samples (its own and its east, north-east and southern
+  neighbours'), with NoData read as `wall_height`. A basin cell beside
+  NoData gets a bed thousands of metres high and NoData cells beside water
+  get water; on the Alzette basin this gives a -60 m cell (Metal, copied)
+  and is the likely cause of CUDA's collapse there. The corner sampling also
+  shifts and smooths the start depths by half a cell (kept: parity).
 - ACC_NUGRID: a fine cell's face record uses the coarse neighbour's size as
   the face length, so the two sides of a coarse/fine face do not balance;
   with sloping beds the scheme gains water and becomes unstable (closed hill:
@@ -428,6 +440,8 @@ Kept here so that whoever extends 8.4 does not meet them again.
 | 18 | A function-local 12x12 filter matrix in the Metal MWDG2 kernels was rebuilt on every call | 0.3 s per step on the Alzette tree | a constant table with the same values; GPU copies instead of CPU memcpy (5.7 times faster) |
 | 19 | CUDA reference outputs made by a modified double-precision debug build | a 21 % "failure" of Metal MWDG2 | references from the unmodified single-precision release build only |
 | 20 | HWFV1 on Alzette lost 39 % of its water in an hour at `epsilon 0.001` | a mesh, flux or rain fault was suspected | a per-step budget (`LISFLOOD_MWDG2_TRACE_MASS=1`) split the flux update, remeshing, losses and rain: only the flux update changes the volume, and only with coarse leaves; the mesh dump (`LISFLOOD_DIAG_DUMP_STEP`) showed the threshold is scaled by the 10,000 m wall height, so `epsilon 1e-5` is the equivalent of a 0.1 m tolerance |
+| 21 | HWFV1 on Alzette booked 113,000 m3 of infiltration but kept the water | the losses looked applied | compare the booked volume with the stored water: the adaptive state holds z + h in float32 and a 2 mm/h step rounds away on a 300 m bed; the residual now carries it and only removed water is booked (test: losses on a 300 m bed) |
+| 22 | MWDG2 on Alzette had a -60 m cell from the start | an unstable flow was suspected | the first output already differed from the start file: CUDA's corner-sampled input averages the NoData wall height into basin cells; NoData corners now use the cell's own values (test: lake at rest beside NoData) |
 
 ## Handover: what remains
 
