@@ -148,6 +148,7 @@ int main(int argc, char *argv[])
     Params.limit_slopes = OFF;
 	Params.output_precision = 3;
     Params.nodata_elevation = DEM_NO_DATA;
+    Params.wall_height = C(0.0);
     Params.drain_nodata = OFF;
 
 	// Define initial values for boundary conditions
@@ -188,6 +189,7 @@ int main(int argc, char *argv[])
 	ParSolver.fricSolver2D = ON; //GAMA: uses the 2D friction scheme as default
 	ParSolver.maxH = C(0.0);
 	ParSolver.krivodonova_threshold = C(10.0);
+	ParSolver.tol_Krivo = C(0.0);
 	ParSolver.SpeedThresh = C(1e-6);
 	ParSolver.epsilon = C(0.001); // adaptation
 	ParSolver.L = 0; // adaptation

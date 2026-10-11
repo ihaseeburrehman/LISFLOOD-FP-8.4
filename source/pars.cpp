@@ -711,9 +711,10 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 	}
 
 	// Options to change maximum resolution level defaults used if not set
-	if (read_integer_param(param_name, line_number, param_value_ptr, "L", &Solverptr->L, verbose, mode))
+	if (read_integer_param(param_name, line_number, param_value_ptr, "max_ref_lvl", &Solverptr->L, verbose, mode) ||
+		read_integer_param(param_name, line_number, param_value_ptr, "L", &Solverptr->L, verbose, mode))
 	{
-		if (verbose == ON) printf("Maximum resolution level changed to %" NUM_FMT" \n", Solverptr->L);
+		if (verbose == ON) printf("Maximum resolution level changed to %d\n", Solverptr->L);
 		return;
 	}
 
@@ -1006,6 +1007,11 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 		if (verbose == ON) printf("Krivodonova threshold changed to %" NUM_FMT" \n", Solverptr->krivodonova_threshold);
 		return;
 	}
+	if (read_numeric_param(param_name, line_number, param_value_ptr, "tol_Krivo", &Solverptr->tol_Krivo, verbose, mode))
+	{
+		if (verbose == ON) printf("Adaptive MWDG2 Krivodonova threshold changed to %" NUM_FMT" \n", Solverptr->tol_Krivo);
+		return;
+	}
 
 	if (read_integer_param(param_name, line_number, param_value_ptr, "output_precision", &Parptr->output_precision, verbose, mode))
 	{
@@ -1026,6 +1032,12 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
     if (read_numeric_param(param_name, line_number, param_value_ptr, "nodata_elevation", &Parptr->nodata_elevation, verbose, mode))
     {
         if (verbose == ON) printf("DEM elevation set to %" NUM_FMT " for nodata values\n", Parptr->nodata_elevation);
+        return;
+    }
+
+    if (read_numeric_param(param_name, line_number, param_value_ptr, "wall_height", &Parptr->wall_height, verbose, mode))
+    {
+        if (verbose == ON) printf("Adaptive GPU wall height set to %" NUM_FMT "\n", Parptr->wall_height);
         return;
     }
 

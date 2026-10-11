@@ -131,7 +131,7 @@ typedef struct PointSources
 		const char* input_filename
 	)
 	{
-		char bcifilename[32] = {'\0'};
+		char bcifilename[128] = {'\0'};
 		char buf[128]        = {'\0'};
 		char str[255]        = {'\0'};
 
@@ -153,7 +153,7 @@ typedef struct PointSources
 				return 0;
 			}
 
-			sscanf(str, "%s %s", buf, bcifilename);
+			sscanf(str, "%127s %127s", buf, bcifilename);
 		}
 
 		fclose(fp);
@@ -199,7 +199,7 @@ typedef struct PointSources
 	{
 		if (num_srcs == 0) return;
 		
-		char bcifilename[32] = {'\0'};
+		char bcifilename[128] = {'\0'};
 		char buf[128]        = {'\0'};
 		char str[255]        = {'\0'};
 
@@ -221,7 +221,7 @@ typedef struct PointSources
 				return;
 			}
 
-			sscanf(str, "%s %s", buf, bcifilename);
+			sscanf(str, "%127s %127s", buf, bcifilename);
 		}
 
 		fclose(fp);

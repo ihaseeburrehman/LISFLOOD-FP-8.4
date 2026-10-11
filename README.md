@@ -1,7 +1,8 @@
 # LISFLOOD-FP 8.4
 
-8.4 adds **GPU infiltration and evaporation** and **expanded Apple Metal
-support** to 8.3. Infiltration can use a uniform rate, a per-cell rate grid,
+LISFLOOD-FP 8.4 extends uniform and spatially distributed constant-rate
+infiltration to GPU solvers and introduces Green-Ampt infiltration, alongside
+GPU evaporation. It also expands Apple Metal support. Infiltration can use a uniform rate, a per-cell rate grid,
 or Green-Ampt; evaporation uses a time series and can accompany either
 infiltration model. The table below separates loss support from solver and
 mesh support.
@@ -19,13 +20,24 @@ selection**, not every CPU solver in LISFLOOD-FP.
 | ACC | Available | None | All three loss options | Unavailable | New native uniform-grid solver and losses |
 | ACC_NUGRID | Static non-uniform mesh | None | All three loss options | Unavailable | Dense ACC compatibility mode and losses; no mixed-size mesh |
 | HWFV1 | Adaptive mesh | None | All three loss options | Unavailable | Dense FV1 compatibility mode and losses; no adaptation |
-| MWDG2 | Adaptive mesh | None | All three loss options | Unavailable | Dense DG2 compatibility mode and losses; no adaptation |
+| MWDG2 | Adaptive mesh | None | All three loss options | Unavailable | Native adaptive Metal MWDG2 with losses and raster rainfall; limits below |
 
 **All three loss options** means constant-rate infiltration (uniform or
 gridded), Green-Ampt infiltration, and evaporation. Uniform-rate and
 Green-Ampt infiltration are alternatives; evaporation can be combined with
-either. A supported keyword does not imply identical meshes or results across
-backends. Native Metal adaptation for the last three rows remains unfinished.
+either. MWDG2 also accepts uniform and NetCDF dynamic rainfall on Metal. Its
+Metal path is adaptive, but not yet validated on a basin: prescribed
+boundary conditions and point sources are rejected, and Alzette validation
+remains incomplete. The level-5 mixed-mesh lake-at-rest case matches CUDA's
+depth raster exactly and keeps discharge differences below 2e-7 m2/s. On a
+moving-water dam, 100 fixed steps agree with CUDA within 0.003 % (flow
+normalized L2), and at 2,000 s the depth agrees with single-precision CUDA
+within 1.4-3.2 %; the sloshing flow field there differs as much as CUDA single
+from CUDA double precision (README_8.4.md). Green-Ampt also uses
+single-precision GPU state.
+ACC_NUGRID and HWFV1 still use dense Metal compatibility paths without adaptive
+compression. A supported keyword does not imply identical meshes or results
+across backends.
 The 28-run dense Metal Alzette matrix completed; the CUDA MWDG2 basin run
 stalled, so the complete cross-backend matrix is not yet validated. See
 `README_8.4.md` for the evidence and handover.
@@ -168,23 +180,18 @@ the loss keywords and the solver's required input files. The three remaining
 GPU solver keywords are accepted through the dense compatibility modes below.
 
 With `cuda` (or `metal`) in the `.par` file, FV1, FV2, DG2, ACC, ACC_NUGRID,
-HWFV1 and MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers and
-Metal ACC follows the CPU ACC solver. HWFV1 and MWDG2 use their corresponding
-Metal FV1 and DG2 update operators on the complete finest-level DEM grid. This
-overcomes Metal's lack of the CUB sort/scan primitives used to build the CUDA
-adaptive tree, but it does not compress the mesh: `epsilon`, `grading` and
-`refine_wall` do not change the Metal mesh. A notice is printed at startup so
-this limitation cannot be mistaken for a native adaptive run.
-ACC_NUGRID likewise uses the dense Metal ACC operator at the finest level;
-`L` and `epsilon` are accepted but do not make a mixed-size Metal mesh.
-Outputs follow the uniform Metal path; the adaptive-only `.cumu` and `.loss`
-files are not produced because the mesh does not change.
+HWFV1 and MWDG2 run on the Apple GPU. Metal FV2 and DG2 follow the CUDA solvers;
+Metal ACC follows the CPU ACC solver. ACC_NUGRID and HWFV1 still use dense
+finest-level compatibility paths. MWDG2 now constructs and updates a native
+adaptive Metal tree, but its supported feature set and CUDA parity remain
+incomplete; the README_8.4 handover lists explicit rejections and test limits.
 
 MWDG2 accepts ordinary adaptive DEM and start rasters. If DG2 modal `1x`/`1y`
-files are absent, it uses the conservative piecewise-constant projection
-(zero initial unresolved slopes); the RKDG2 kernel then evolves all modes.
-Infiltration, evaporation and Green-Ampt use the same Metal loss kernels as
-FV1/DG2. See `README_8.4.md` for implementation details and validation scope.
+files are absent, it uses a conservative piecewise-constant projection (zero
+initial unresolved slopes). It supports uniform and NetCDF dynamic rainfall,
+infiltration, evaporation and Green-Ampt in its current native path. User
+boundary files, point sources and rainfall masks are rejected; `limitslopes`
+and `tol_Krivo` are supported.
 
 `lisflood -version` and normal startup print one minimal version line:
 `LISFLOOD-FP 8.4`.
@@ -302,10 +309,10 @@ ends with `QUICK TEST PASSED`. See `tests/README.md` for the full suite,
 ## Use
 
 As 8.2. Put `cuda` in the `.par` file, or pass `-cuda`, to run on the GPU; on a
-Mac `metal` / `-metal` means the same, and FV1, FV2, DG2, ACC, ACC_NUGRID,
-HWFV1 and MWDG2 run on the Apple GPU. The three non-uniform/adaptive solver
-keywords currently use the dense finest-level mode described above. Add the
-keywords above for infiltration and evaporation.
+Mac `metal` / `-metal` means the same, and the seven GPU solver selections run
+on the Apple GPU. ACC_NUGRID and HWFV1 remain dense; MWDG2 uses its native
+adaptive implementation with the limits described above. Add the keywords
+above for infiltration, evaporation and rainfall.
 
 ## Licence
 

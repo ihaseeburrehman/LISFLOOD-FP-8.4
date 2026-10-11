@@ -41,6 +41,19 @@ public:
   /** volume removed since the previous call (m3) */
   double take_interval_volume();
 
+  // Adaptive MWDG2 applies its per-raster nonlinear losses and then restricts
+  // them to active leaves. These buffers preserve soil memory across mesh
+  // regridding and provide the CUDA-style rounding compensation state.
+  id<MTLBuffer> residual_buffer() const { return residual; }
+  id<MTLBuffer> rate_buffer() const { return rate; }
+  id<MTLBuffer> ks_buffer() const { return ks; }
+  id<MTLBuffer> psi_buffer() const { return psi; }
+  id<MTLBuffer> dtheta_buffer() const { return dtheta; }
+  id<MTLBuffer> fmax_buffer() const { return fmax; }
+  bool uses_rate_grid() const { return has_rate_grid; }
+  bool uses_greenampt() const { return greenampt; }
+  bool uses_soil_depth() const { return has_fmax; }
+
 private:
   bool on = false;
   bool greenampt = false, infiltration = false, evaporation = false;

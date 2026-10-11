@@ -709,6 +709,7 @@ struct Pars{
 	int maxintcount; // counts number of maxint saves
 	int output_precision;
     NUMERIC_TYPE nodata_elevation; // DEM elevation used for NODATA values
+    NUMERIC_TYPE wall_height; // adaptive GPU wall height for NoData cells
     int drain_nodata; // remove water from DEM NODATA cells
     int limit_slopes; /**< DG2 slope limiter enabled when limit_slopes = ON */
 
@@ -759,6 +760,7 @@ struct Solver{
 	int fricSolver2D; //GAMA: Solves the friction term using the vectorial (2D) scheme
 	NUMERIC_TYPE maxH; /**< maximum H in the domain at the current time */
 	NUMERIC_TYPE krivodonova_threshold; /**< DG2 slope detector */
+	NUMERIC_TYPE tol_Krivo; /**< CUDA adaptive MWDG2 Krivodonova detector */
 	NUMERIC_TYPE SpeedThresh; /**< FV1/DG2 threshold for friction application */
     NUMERIC_TYPE DG2DepthThresh; /**< Threshold above which DG2 L1 operator is activated */
     NUMERIC_TYPE DG2ThinDepthTstep; /**< Tstep assigned to cells with thin depths */
