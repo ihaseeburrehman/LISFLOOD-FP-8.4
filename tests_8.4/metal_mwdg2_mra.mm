@@ -58,6 +58,7 @@ int main(int argc, char **argv) {
             [enc setBuffer:make(count * sizeof(unsigned)) offset:0 atIndex:7];
             [enc setBytes:&layout length:sizeof(layout) atIndex:8];
             [enc setBytes:&physics length:sizeof(physics) atIndex:9];
+            const float wave[4]={0,0,0,0};[enc setBytes:wave length:sizeof(wave) atIndex:10];
             [enc dispatchThreadgroups:MTLSizeMake((count + 63) / 64, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
             [enc endEncoding];

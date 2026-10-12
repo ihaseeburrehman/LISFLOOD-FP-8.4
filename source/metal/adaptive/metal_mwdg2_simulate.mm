@@ -173,7 +173,7 @@ void requireSupported(const Fnames &filenames, const States &states, const Pars 
 // finest leaves on the raster edge within each side's cell range.
 void applyAdaptiveBoundaries(AdaptiveMesh &mesh, const AdaptiveBoundaries &bc,
                              uint32_t maxLevel, int xsz, int ysz,
-                             std::vector<int> &cells) {
+                             std::vector<int> &cells, uint32_t westInflow = 0) {
   cells.assign(mesh.activeCount, -1);
   auto *packed = static_cast<uint32_t *>(mesh.neighbours.contents);
   const uint32_t recordsStart = (mesh.activeCount * 4 + 4u) & ~3u;
@@ -191,6 +191,10 @@ void applyAdaptiveBoundaries(AdaptiveMesh &mesh, const AdaptiveBoundaries &bc,
       if (b.type == BC_FREE) {
         for (uint32_t j = packed[i * 4 + side]; j < packed[i * 4 + side + 1]; ++j)
           if (segments[j][0] == 0xffffffffu) segments[j][0] = 0xfffffffeu;
+      } else if (westInflow && side == SIDE_W && (b.type == BC_HFIX || b.type == BC_HVAR)) {
+        // a benchmark inflow sets the ghost, not the edge cell (CUDA)
+        for (uint32_t j = packed[i * 4 + side]; j < packed[i * 4 + side + 1]; ++j)
+          if (segments[j][0] == 0xffffffffu) segments[j][0] = westInflow;
       } else {
         cells[i] = b.type * 4 + side;
       }
@@ -300,8 +304,19 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
       AdaptiveBoundaries bc;
       bc.read(filenames.bcifilename, filenames.bdyfilename, pars.blx, pars.bly, pars.dx,
               pars.xsz, pars.ysz);
+      // cuda/adaptive hard-codes the west HFIX/HVAR inflow of two of its
+      // benchmarks, chosen by the DEMfile name as given (read_sim_params.cpp):
+      // Monai's non-reflective wave and the Oregon Seaside wavemaker.
+      const bool westSpecial = bc.side[SIDE_W].type == BC_HFIX || bc.side[SIDE_W].type == BC_HVAR;
+      const uint32_t westInflow =
+          westSpecial && !std::strncmp("monai.dem", filenames.demfilename, 9) ? 0xfffffffdu :
+          westSpecial && !std::strncmp("oregon-seaside-0p02m.dem", filenames.demfilename, 24) ? 0xfffffffcu : 0u;
+      if (westInflow && verbose)
+        std::printf("Adaptive west inflow as cuda/adaptive's %s benchmark\n",
+                    westInflow == 0xfffffffdu ? "Monai (non-reflective wave)" : "Oregon Seaside (wavemaker)");
       bool prescribedCells = false;
-      for (const auto &side : bc.side) prescribedCells |= side.type >= BC_HFIX;
+      for (int k = 0; k < 4; ++k)
+        prescribedCells |= bc.side[k].type >= BC_HFIX && !(westInflow && k == SIDE_W);
       FILE *stageOutput = openStageOutput(filenames, states, stage, pars, arrays);
       ::DynamicRain<std::allocator<NUMERIC_TYPE>> dynamicRain(
           filenames.dynamicrainfilename, verbose);
@@ -506,7 +521,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
                                              maxLevel, nodeCount,
                                              static_cast<float>(solver.epsilon));
       std::vector<int> bcCellHost;
-      applyAdaptiveBoundaries(mesh, bc, maxLevel, pars.xsz, pars.ysz, bcCellHost);
+      applyAdaptiveBoundaries(mesh, bc, maxLevel, pars.xsz, pars.ysz, bcCellHost, westInflow);
       if (verbose) std::printf("Metal MWDG2 native adaptive leaves: %u / %u finest cells\n",
                                mesh.activeCount, finestCount);
       if (std::getenv("LISFLOOD_MWDG2_DUMP_LEAVES")) {
@@ -769,6 +784,9 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         // add_ghost_cells on each stage's own leaf state.
         bc.update(static_cast<float>(solver.t) + dt);
         float bcInlet[4] = {bc.side[0].inlet, bc.side[1].inlet, bc.side[2].inlet, bc.side[3].inlet};
+        // benchmark west inflow: {inlet, dt, finest dx, end-of-step time}
+        float waveArgs[4] = {bc.side[SIDE_W].inlet, dt, static_cast<float>(pars.dx),
+                             static_cast<float>(solver.t + dt)};
         float bcParams[4] = {dt, static_cast<float>(pars.dx),
                              static_cast<float>(pars.dx * pars.dy), 0.0f};
         auto applyBoundaryCells = [&](id<MTLBuffer> view) {
@@ -815,8 +833,8 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
                                static_cast<float>(solver.cfl), 0.0f};
           runtime.dispatch("hwfv1_update",
               {state[0], mesh.active, mesh.neighbours, state[2], stage1Tree, rhs[1], boundaryFlux, scales, frictionFlags},
-              {&flowLayout, &flowPhysics, hwParams},
-              {sizeof(flowLayout), sizeof(flowPhysics), sizeof(hwParams)}, mesh.activeCount);
+              {&flowLayout, &flowPhysics, hwParams, waveArgs},
+              {sizeof(flowLayout), sizeof(flowPhysics), sizeof(hwParams), sizeof(waveArgs)}, mesh.activeCount);
           boundaryRateStage1 = boundaryRateStage2 = edgeRate();
           runtime.dispatch("mwdg2_positivity", {state[2], mesh.active, localDt},
               {&activeCount, &depthTolerance}, {sizeof(activeCount), sizeof(depthTolerance)},
@@ -838,7 +856,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         applyCudaSlopeLimiter(state[0], stage1Tree);
 
         runtime.dispatch("mwdg2_rhs", {state[0], mesh.active, mesh.neighbours, rhs[0], stage1Tree, boundaryFlux, scales, frictionFlags},
-            {&flowLayout, &flowPhysics}, {sizeof(flowLayout), sizeof(flowPhysics)}, mesh.activeCount);
+            {&flowLayout, &flowPhysics, waveArgs}, {sizeof(flowLayout), sizeof(flowPhysics), sizeof(waveArgs)}, mesh.activeCount);
         if (solver.t == 0.0 && std::getenv("LISFLOOD_MWDG2_TRACE_INITIAL_RHS")) {
           const float *deriv = static_cast<const float *>(rhs[0].contents);
           const uint32_t *packed = static_cast<const uint32_t *>(mesh.neighbours.contents);
@@ -909,7 +927,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
           for (uint32_t face = 0; face < 4; ++face) {
             for (uint32_t part = packed[i*4+face]; part < packed[i*4+face+1]; ++part) {
               const uint32_t other = neighbour[part*4];
-              if (other == 0xffffffffu) continue;
+              if (other >= 0xfffffffcu) continue;
               const float *c = tree + other*12;
               std::fprintf(stderr, " [%u h=%g qx=%g qy=%g z=%g]", other,
                   c[0]-c[9], c[3], c[6], c[9]);
@@ -941,7 +959,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         applyBoundaryCells(state[1]);
         applyCudaSlopeLimiter(state[1], scales);
         runtime.dispatch("mwdg2_rhs", {state[1], mesh.active, mesh.neighbours, rhs[1], scales, boundaryFlux, scales, frictionFlags},
-            {&flowLayout, &flowPhysics}, {sizeof(flowLayout), sizeof(flowPhysics)}, mesh.activeCount);
+            {&flowLayout, &flowPhysics, waveArgs}, {sizeof(flowLayout), sizeof(flowPhysics), sizeof(waveArgs)}, mesh.activeCount);
         boundaryRateStage2 = edgeRate();
         StageArgs rk2{dt, 0.5f};
         runtime.dispatch("mwdg2_rk", {state[0], state[1], rhs[1], mesh.active, state[2], scales},
@@ -1123,7 +1141,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
                   (1024.0 * 1024.0 * 1024.0));
         lap(3);
         mesh = std::move(next);
-        applyAdaptiveBoundaries(mesh, bc, maxLevel, pars.xsz, pars.ysz, bcCellHost);
+        applyAdaptiveBoundaries(mesh, bc, maxLevel, pars.xsz, pars.ysz, bcCellHost, westInflow);
         if (const char *dumpStep = std::getenv("LISFLOOD_DIAG_DUMP_STEP"))
           if (solver.itCount + 2 == std::atoll(dumpStep)) {  // mesh of that (1-based) step
             std::printf("DIAG_LEAVES step %lld maxes %.9g %.9g %.9g %.9g n %u:",

@@ -1,0 +1,4 @@
+Gauge depths of the Monai Valley benchmark (testing/UoS/monai/monai.par of
+LISFLOOD-FP, unchanged apart from the solver line and dirroot) written by
+CUDA 8.4 (build_head84, single precision, NVIDIA A100, ECMWF), job 37527764,
+12 October 2026: mwdg2.stage (MWDG2, 7 s) and hwfv1.stage (HWFV1, 3 s).

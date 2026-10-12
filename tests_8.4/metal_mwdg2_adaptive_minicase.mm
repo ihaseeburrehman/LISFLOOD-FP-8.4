@@ -103,6 +103,7 @@ public:
         [enc setBuffer:flags offset:0 atIndex:7];
         uint32_t layout[2]={count,level};[enc setBytes:layout length:sizeof(layout) atIndex:8];
         [enc setBytes:physics length:4*sizeof(float) atIndex:9];
+        const float wave[4]={0,0,0,0};[enc setBytes:wave length:sizeof(wave) atIndex:10];
         [enc dispatchThreadgroups:MTLSizeMake((count+63)/64,1,1)
             threadsPerThreadgroup:MTLSizeMake(64,1,1)];
         [enc endEncoding];[command commit];[command waitUntilCompleted];

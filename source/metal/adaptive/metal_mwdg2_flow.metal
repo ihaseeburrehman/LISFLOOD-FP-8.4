@@ -28,9 +28,57 @@ inline float3 mw_state(device const float *scales, uint node, float3 basis) {
 // ancestor at the current leaf's level. Coarse leaves therefore use the
 // common parent polynomial along the entire face, rather than extrapolating
 // whichever fine segment happened to be stored first.
+// Domain-edge markers in the neighbour records: 0xffffffff closed (CUDA's
+// default edge), 0xfffffffe FREE, and two west inflows that cuda/adaptive
+// hard-codes for its benchmarks, chosen there by the DEM file name
+// (add_ghost_cells.cu): Monai's non-reflective wave and Oregon's wavemaker.
+constant uint MW_GHOST_WAVE = 0xfffffffdu;
+constant uint MW_GHOST_MAKER = 0xfffffffcu;
+constant uint MW_GHOST_MIN = 0xfffffffcu;
+
+// operators/non_reflective_wave.cuh (still depth 0.13535 m, as in CUDA)
+inline float2 mw_non_reflective_wave(float hInlet, float dt, float dxl, float hp,
+                                     float up, float hb, float ub, float g) {
+    int k = 0, cond = 0;
+    float Delta = 1e-6f, xa = -dxl / 2.0f, p0 = dxl / 2.0f, p1 = p0 - dxl / 2.0f, dp = 0.0f;
+    float f0 = (p0 - xa) + dt * ((ub - (p0 - xa) / dxl * (ub - up)) - sqrt(g * (hb - (p0 - xa) / dxl * (hb - hp))));
+    while (k <= 100 && cond == 0) {
+        float df = 1.0f + dt * ((up - ub) / dxl - 0.5f * pow(g * (hb - (p0 - xa) / dxl * (hb - hp)), -0.5f) * (g * (hp - hb) / dxl));
+        if (abs(df) <= 0.0f) { cond = 1; dp = p1 - p0; p1 = p0; }
+        else { dp = f0 / df; p1 = p0 - dp; }
+        float f1 = (p1 - xa) + dt * ((ub - (p1 - xa) / dxl * (ub - up)) - sqrt(g * (hb - (p1 - xa) / dxl * (hb - hp))));
+        float relerr = abs(dp) / abs(p1);
+        if (relerr < Delta) cond = 2;
+        if (abs(f1) < Delta) cond = 3;
+        if (relerr <= Delta && abs(f1) < Delta) cond = 4;
+        p0 = p1; f0 = f1; ++k;
+    }
+    float hr = hb - (hb - hp) * (p1 - xa) / dxl;
+    float ur = ub - (ub - up) * (p1 - xa) / dxl;
+    float betaMinus = ur - 2.0f * sqrt(g * hr);
+    float betaPlus = 2.0f * sqrt(g * (hInlet + 0.13535f)) + hInlet * sqrt(g / 0.13535f);
+    return float2(1.0f / 16.0f / g * (betaPlus - betaMinus) * (betaPlus - betaMinus),
+                  0.5f * (betaPlus + betaMinus));
+}
+
+// Ghost (h, qx, qy) of a west-edge benchmark inflow from the leaf's means.
+// wave = {west inlet level, dt, finest dx, time at the end of the step}.
+inline float3 mw_inflow_ghost(uint marker, float3 mean, float meanBed,
+                              float4 wave, float g, float tolerance) {
+    if (marker == MW_GHOST_WAVE) {
+        float up = mean.x > tolerance ? mean.y / mean.x : 0.0f;
+        float2 out = mw_non_reflective_wave(wave.x, wave.y, wave.z, mean.x, up, 0.13535f, 0.0f, g);
+        return float3(out.x - meanBed, out.x * out.y, mean.z);
+    }
+    // wavemaker speed (bc2amr.f, as cuda/adaptive)
+    float s = 0.6f * exp(-0.25f * (wave.w - 14.75f) * (wave.w - 14.75f));
+    float v0 = mean.x > tolerance ? mean.y / mean.x : 0.0f;
+    return float3(mean.x, (2.0f * s - v0) * mean.x, mean.z);
+}
+
 inline uint mw_neighbor_at_local_level(uint other, uint localLevel,
                                       uint maxLevel) {
-    if (other >= 0xfffffffeu) return other;
+    if (other >= MW_GHOST_MIN) return other;
     while (node_geometry(other, maxLevel).w > localLevel)
         other = (other - 1u) / 4u;
     return other;
@@ -121,6 +169,7 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
                       device const uint *frictioned [[buffer(7)]],
                       constant uint2 &layout [[buffer(8)]],
                       constant float4 &physics [[buffer(9)]],
+                      constant float4 &wave [[buffer(10)]],
                       uint index [[thread_position_in_grid]]) {
     if (index>=layout.x) return;
     // frictioned bit 1: the leaf centre lies outside the raster (padding);
@@ -178,6 +227,7 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
     else {uint4 c=node_geometry(other[2],layout.y);float3 b=mw_basis(c,pS);ss=mw_state(tree,other[2],b);zss=mw_bed(tree,other[2],b);}
     if(other[3]==0xffffffffu) { ww=meanState; ww.y=0.0f; zww=meanBed; }
     else if(other[3]==0xfffffffeu) { ww=meanState; ww.x=pow(meanState.y*meanState.y/g,1.0f/3.0f); zww=meanBed; }
+    else if(other[3]>=MW_GHOST_MIN) { ww=mw_inflow_ghost(other[3],meanState,meanBed,wave,g,tolerance); zww=meanBed; }
     else {uint4 c=node_geometry(other[3],layout.y);float3 b=mw_basis(c,pW);ww=mw_state(tree,other[3],b);zww=mw_bed(tree,other[3],b);}
 
     // dg2_update.cu updates only leaves whose own or a neighbour's mean depth
@@ -187,6 +237,8 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
     for(uint face=0;face<4;++face) {
         float hMean;
         if(other[face]==0xffffffffu) hMean=meanState.x;
+        else if(other[face]>=MW_GHOST_MIN && other[face]<0xfffffffeu)
+            hMean=mw_inflow_ghost(other[face],meanState,meanBed,wave,g,tolerance).x;
         else if(other[face]==0xfffffffeu) {
             float qn=(face==0||face==2)?meanState.z:meanState.y;
             hMean=pow(qn*qn/g,1.0f/3.0f);
@@ -211,8 +263,8 @@ kernel void mwdg2_rhs(device const float *scales [[buffer(0)]],
     // states. The bed-source terms below provide the balance; adding a second
     // hydrostatic pressure correction here double-counts that source.
     // volume rate out through domain-edge faces (closed, FREE or boundary)
-    edgeRate[index]=(other[0]>=0xfffffffeu?Fn.x*dx:0.0f)-(other[2]>=0xfffffffeu?Fs.x*dx:0.0f)
-                   +(other[1]>=0xfffffffeu?Fe.x*dy:0.0f)-(other[3]>=0xfffffffeu?Fw.x*dy:0.0f);
+    edgeRate[index]=(other[0]>=MW_GHOST_MIN?Fn.x*dx:0.0f)-(other[2]>=MW_GHOST_MIN?Fs.x*dx:0.0f)
+                   +(other[1]>=MW_GHOST_MIN?Fe.x*dy:0.0f)-(other[3]>=MW_GHOST_MIN?Fw.x*dy:0.0f);
     float3 u0x=.5f*(eStar+wStar),u1x=(eStar-wStar)/(2.0f*mw_sqrt3);
     float3 u0y=.5f*(nStar+sStar),u1y=(nStar-sStar)/(2.0f*mw_sqrt3);
     residual[0]=-(Fe-Fw)/dx-(Fn-Fs)/dy;
@@ -370,7 +422,9 @@ kernel void mwdg2_limit_slopes(device const float *u [[buffer(0)]],
         uint recordsStart=(faceCount+4u)&~3u;
         device const uint4 *segments=(device const uint4 *)(neighbours+recordsStart);
         uint other=mw_neighbor_at_local_level(segments[begin].x,cell.w,layout.y);
-        if(other<0xfffffffeu) {
+        // (the benchmark inflow ghosts are limited as closed edges: neither
+        // cuda/adaptive benchmark uses limitslopes)
+        if(other<MW_GHOST_MIN) {
             for(uint f=0;f<3;++f) remoteMean[face][f]=mw_component(tree,other,f);
             uint4 otherCell=node_geometry(other,layout.y);
             float3 b=mw_basis(otherCell,points[face]);
@@ -736,6 +790,7 @@ kernel void hwfv1_update(device const float *view [[buffer(0)]],
                          constant uint2 &layout [[buffer(9)]],
                          constant float4 &physics [[buffer(10)]],
                          constant float4 &params [[buffer(11)]],
+                         constant float4 &wave [[buffer(12)]],
                          uint index [[thread_position_in_grid]]) {
     if (index >= layout.x) return;
     if (!(frictioned[index] & 1u)) tree = plainTree;
@@ -761,6 +816,8 @@ kernel void hwfv1_update(device const float *view [[buffer(0)]],
             Un[face] = U; Un[face][normal] = 0.0f; zn[face] = z;
         } else if (other == 0xfffffffeu) {     // FREE: critical depth, momentum kept
             Un[face] = U; Un[face].x = pow(U[normal]*U[normal]/g, 1.0f/3.0f); zn[face] = z;
+        } else if (other >= MW_GHOST_MIN) {    // benchmark west inflow
+            Un[face] = mw_inflow_ghost(other, U, z, wave, g, tol); zn[face] = z;
         } else {
             uint o = other*12;
             zn[face] = tree[o+9];
@@ -782,8 +839,8 @@ kernel void hwfv1_update(device const float *view [[buffer(0)]],
         uint begin = neighbours[index*4 + face];
         edge[face] = begin < neighbours[index*4 + face + 1] ? segments[begin].x : 0xffffffffu;
     }
-    edgeRate[index] = (edge[0] >= 0xfffffffeu ? Fn.x*dx : 0.0f) - (edge[2] >= 0xfffffffeu ? Fs.x*dx : 0.0f)
-                    + (edge[1] >= 0xfffffffeu ? Fe.x*dy : 0.0f) - (edge[3] >= 0xfffffffeu ? Fw.x*dy : 0.0f);
+    edgeRate[index] = (edge[0] >= MW_GHOST_MIN ? Fn.x*dx : 0.0f) - (edge[2] >= MW_GHOST_MIN ? Fs.x*dx : 0.0f)
+                    + (edge[1] >= MW_GHOST_MIN ? Fe.x*dy : 0.0f) - (edge[3] >= MW_GHOST_MIN ? Fw.x*dy : 0.0f);
     // get_bed_src_x / get_bed_src_y
     float zStarW = zW - max(0.0f, -(eta - zW)), zStarE = zE - max(0.0f, -(eta - zE));
     float zStarS = zS - max(0.0f, -(eta - zS)), zStarN = zN - max(0.0f, -(eta - zN));
