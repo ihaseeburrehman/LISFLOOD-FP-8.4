@@ -149,17 +149,32 @@ cases and compares them with the saved CUDA outputs in
 
 `README.md` describes 8.4 and how to build and use it; this file records how
 8.4 was developed and tested, and the results.
-**8.4 adds two things to 8.3:** floodplain infiltration, evaporation and
-Green-Ampt for GPU solvers; and native Metal implementations of every GPU
-solver.
+**The intended 8.4 contribution over the 8.3 release baseline** is to make
+floodplain water losses available in the GPU solvers (uniform infiltration,
+cell-varying infiltration, evaporation and Green-Ampt), and to provide native
+Metal implementations of the GPU solver family. This describes the release
+baseline and this code line; it is not a claim that no LISFLOOD-FP research
+extension has ever implemented Green-Ampt.
+
+For example, the 2023 LISFLOOD-FP-vGA thesis describes a separate research
+extension with spatial Green-Ampt and a Parlange explicit approximation. Its
+existence means Green-Ampt is not new to every LISFLOOD-derived code. It is not
+the standard 8.2/8.3 release implementation, and it does not establish that
+its equation, parameter handling or published test outputs are ground truth
+for this 8.4 implementation. Our CUDA/Metal path instead solves the ponded
+Green-Ampt step with an implicit per-step update. Cross-model comparisons must
+align the equation, wetting assumptions, parameters, time step and water
+balance before interpreting a difference as a defect.
 
 ## Why
 
-In 8.2 and 8.3 only the classic CPU solvers (and the sub-grid solver) remove
-water by infiltration and evaporation (`infevap.cpp`). All GPU solvers, and the
-CPU FV1/FV2/DG2 solvers, read the keywords and silently ignore them. For a
-flood such as the July 2021 Alzette event, water that soaks into the ground
-cannot be represented on the GPU at all.
+In the 8.2/8.3 release sources checked for this branch, the classic CPU solvers
+(and the sub-grid solver) remove water by the existing uniform-rate
+infiltration and evaporation path (`infevap.cpp`). The standard GPU solvers,
+and CPU FV1/FV2/DG2, do not provide the 8.4 loss behavior. Separate research
+extensions can differ from this release baseline. For a flood such as the
+July 2021 Alzette event, water that soaks into the ground cannot be represented
+on the GPU at all in that baseline.
 
 ## What 8.4 does
 
@@ -255,6 +270,55 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 | `infiltration greenampt` and a rate in one file | stops with an error |
 | Alzette FV1, 6 h: none / constant 2 mm/h / Green-Ampt (Ks 10 mm/h, theta_init 0.30 everywhere) | stored water after 6 h 27.4 / 24.4 / 12.6 million m3; removed 0 / 3.2 / 16.0 million m3; time step, maximum depth unchanged, no cell deeper. Of the 14.8 million m3 less water than without infiltration, 12.5 million are in cells already under water at the start (5.7 in rivers and the lake deeper than 0.5 m, 6.8 on floodplain flooded 1 cm to 0.5 m by the previous day), which were given the same dry initial moisture as everywhere else; only 2.3 million in cells dry at the start |
 | cost | about 11-20 % more run time (Green-Ampt: none measurable on Alzette) |
+
+### Independent Green-Ampt equation check (14 October 2026)
+
+To avoid treating either this implementation or another LISFLOOD extension as
+truth, CUDA FV1 was run on the ECMWF NVIDIA A100 against the continuous
+Green-Ampt equation. The flat 10 x 10 grid had 1 m cells, 0.09 m initial
+ponding, and Rawls sandy-loam parameters reported in the LISFLOOD-FP-vGA
+thesis: Ks 10.9 mm/h, suction 110.1 mm, saturated moisture 0.412 and initial
+moisture 0.041. With no rain, ponding falls as infiltration proceeds. At the
+1, 2 and 3 hour outputs, GPU depth differs from the independently solved
+continuous equation by 0.0095, 0.0076 and 0.0066 mm; the maximum over all ten
+hourly outputs is 0.0096 mm. The first 0.532 s snapshot differs by 0.143 mm;
+it is listed separately because it is the first finite step from F=0. Both are
+dry by hour 4 (the continuous solution dries at 3.3704 h). The run log
+confirms `GPU enabled` and `Using CUDA
+device`; it completed in 4 s of solver loop time. Recheck saved outputs with
+`python3 tests_8.4/greenampt_implicit_reference.py WORK` (the checker also
+requires CUDA-device evidence in `run.log`).
+
+This is a controlled equation test, not a watershed validation. The thesis's
+separate LISFLOOD-FP-vGA test is not a clean target for direct output matching:
+it uses a Parlange approximation and describes wetting-time handling, and its
+reported test-1 endpoint water volume (0.018 m3) does not reconcile with its
+plotted cumulative infiltration endpoint (about 0.0416 m for a 1 m2 cell and
+0.09 m initial ponding). So we record the difference as an unresolved
+reference-definition issue rather than changing 8.4 to force agreement. A
+rainfall-runoff case with complete inputs, a consistent published water
+budget, and observation data is still needed for hydrological validation.
+
+### Independent field-curve check (14 October 2026)
+
+As a second external check, `tests_8.4/greenampt_field_check.py` compares the
+classical Green-Ampt equation with the TA1 cumulative-infiltration observations
+published by Zheng et al. (2025), Table 1. The study reports Ks = 0.0136 cm/min
+and moisture contents 0.03 and 0.46. To avoid fitting and scoring on the same
+data, only the 10-minute measurement calibrates A = psi (theta_sat - theta_init);
+the other six measurements are held out. This gives equivalent suction
+psi = 23.791 cm and, on the held-out observations, MAPE 1.68%, maximum relative
+error 4.03%, RMSE 0.0702 cm and R2 = 0.9913. The script passes its declared
+gates of 2% MAPE and 5% maximum relative error.
+
+This is empirical evidence for the equation's cumulative-infiltration curve,
+not a full LISFLOOD-FP simulation or watershed validation: it does not test
+rainfall-runoff routing, surface ponding dynamics, GPU parity, or basin water
+budgets. The suction is calibrated from the first point, and the study's
+hydraulic setup is not reproduced as a LISFLOOD case. It complements the A100
+controlled GPU equation test above, but a published catchment case with
+available forcing, terrain, and observed hydrographs is still needed to
+validate the coupled flood model.
 
 FV1 and ACC remove exactly rate x dt. CUDA FV2 and DG2 remove it too, but
 their results differ from the exact answer by about +-0.1-0.2 % of the loss (in
