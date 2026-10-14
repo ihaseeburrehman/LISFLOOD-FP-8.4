@@ -3,6 +3,10 @@
 #include "cuda_util.cuh"
 #include <cub/cub.cuh>
 #include <limits>
+#include <cstdlib>
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#endif
 
 namespace lis
 {
@@ -98,6 +102,26 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 
 	MassStats h_cumulative_mass;
 	cuda::copy(&h_cumulative_mass, d_cumulative_mass, sizeof(MassStats));
+#if defined(LISFLOOD_CUDA_MPI)
+	int initialized = 0;
+	MPI_Initialized(&initialized);
+	if (initialized) {
+		if (std::getenv("LISFLOOD_CUDA_MPI_TRACE")) {
+			int rank = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+			fprintf(stderr, "MPI trace rank=%d local in=%g out=%g cumulative_in=%g cumulative_out=%g\n",
+				rank, (double)h_instantaneous_mass.in, (double)h_instantaneous_mass.out,
+				(double)h_cumulative_mass.in, (double)h_cumulative_mass.out);
+			fflush(stderr);
+		}
+		MassStats global_instantaneous{}, global_cumulative{};
+		MPI_Allreduce(&h_instantaneous_mass, &global_instantaneous, 2,
+			sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		MPI_Allreduce(&h_cumulative_mass, &global_cumulative, 2,
+			sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		h_instantaneous_mass = global_instantaneous;
+		h_cumulative_mass = global_cumulative;
+	}
+#endif
 
 	NUMERIC_TYPE time = cumulative_time;
 
@@ -112,7 +136,7 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 		: net_source_flux - volume_change;
 	interval_loss = 0.0;
 
-	return { 
+	return {
 		solver.t,
 		cuda::dt,
 		solver.itCount,

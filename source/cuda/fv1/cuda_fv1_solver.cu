@@ -3,6 +3,10 @@
 #include "cuda_hll.cuh"
 #include "cuda_solver.cuh"
 #include <algorithm>
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#include <vector>
+#endif
 
 namespace lis
 {
@@ -10,6 +14,59 @@ namespace cuda
 {
 namespace fv1
 {
+
+#if defined(LISFLOOD_CUDA_MPI)
+namespace {
+int mpi_row_begin = 1, mpi_row_end = 1, mpi_rank = 0, mpi_size = 1;
+}
+
+void configure_mpi_partition(int row_begin, int row_end, int rank, int size)
+{
+	mpi_row_begin = row_begin; mpi_row_end = row_end; mpi_rank = rank; mpi_size = size;
+	checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_row_begin, &row_begin, sizeof(int)));
+	checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_row_end, &row_end, sizeof(int)));
+	const int active = 1;
+	checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_partition_active, &active, sizeof(int)));
+	const int north = rank == 0 ? 1 : 0;
+	const int south = rank == size-1 ? 1 : 0;
+	checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_owns_north_ghost, &north, sizeof(int)));
+	checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_owns_south_ghost, &south, sizeof(int)));
+	int active_check = 0, begin_check = 0, end_check = 0;
+	checkCudaErrors(cudaMemcpyFromSymbol(&active_check, cuda::fv1_partition_active, sizeof(int)));
+	checkCudaErrors(cudaMemcpyFromSymbol(&begin_check, cuda::fv1_row_begin, sizeof(int)));
+	checkCudaErrors(cudaMemcpyFromSymbol(&end_check, cuda::fv1_row_end, sizeof(int)));
+	printf("CUDA FV1 MPI rank %d/%d owns rows [%d,%d), device partition=%d\n",
+		rank, size, begin_check, end_check, active_check);
+	fflush(stdout);
+}
+
+void exchange_mpi_halos(Flow& U, int pitch)
+{
+	const int n = 3 * pitch;
+	std::vector<NUMERIC_TYPE> send(n), recv(n);
+	auto pack = [&](int row) {
+		cuda::copy(send.data(), U.H + row*pitch, pitch*sizeof(NUMERIC_TYPE));
+		cuda::copy(send.data()+pitch, U.HU + row*pitch, pitch*sizeof(NUMERIC_TYPE));
+		cuda::copy(send.data()+2*pitch, U.HV + row*pitch, pitch*sizeof(NUMERIC_TYPE));
+	};
+	auto unpack = [&](int row) {
+		cuda::copy(U.H + row*pitch, recv.data(), pitch*sizeof(NUMERIC_TYPE));
+		cuda::copy(U.HU + row*pitch, recv.data()+pitch, pitch*sizeof(NUMERIC_TYPE));
+		cuda::copy(U.HV + row*pitch, recv.data()+2*pitch, pitch*sizeof(NUMERIC_TYPE));
+	};
+	const MPI_Datatype type = sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
+	pack(mpi_row_begin);
+	MPI_Sendrecv(send.data(), n, type, mpi_rank > 0 ? mpi_rank-1 : MPI_PROC_NULL, 42,
+		recv.data(), n, type, mpi_rank+1 < mpi_size ? mpi_rank+1 : MPI_PROC_NULL,
+		42, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	if (mpi_rank+1 < mpi_size) unpack(mpi_row_end);
+	pack(mpi_row_end-1);
+	MPI_Sendrecv(send.data(), n, type, mpi_rank+1 < mpi_size ? mpi_rank+1 : MPI_PROC_NULL, 43,
+		recv.data(), n, type, mpi_rank > 0 ? mpi_rank-1 : MPI_PROC_NULL,
+		43, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	if (mpi_rank > 0) unpack(mpi_row_begin-1);
+}
+#endif
 
 __global__ void zero_ghost_cells_north_south
 (
@@ -74,6 +131,10 @@ __global__ void update_dt_per_element
 	{
 		for (int i=global_i; i<cuda::pitch; i+=blockDim.x*gridDim.x)
 		{
+			if (!cuda::fv1_owns_cfl_row(j)) {
+				dt[j*cuda::pitch + i] = cuda::solver_params.max_dt;
+				continue;
+			}
 			NUMERIC_TYPE H = U.H[j*cuda::pitch + i];
 
 			if (H > cuda::solver_params.DepthThresh)
@@ -113,6 +174,7 @@ void update_uniform_rain_func
 	{
 		for (int i = global_i; i < cuda::pitch; i += blockDim.x * gridDim.x)
 		{
+			if (!cuda::fv1_owns_row(j)) continue;
 			NUMERIC_TYPE cell_rain;
 
 			cell_rain = rain_rate * cuda::dt;
@@ -217,6 +279,7 @@ apply_friction
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
+			if (!cuda::fv1_owns_row(j)) continue;
 			NUMERIC_TYPE H = U.H[j*cuda::pitch + i];
 			NUMERIC_TYPE& HU = U.HU[j*cuda::pitch + i];
 			NUMERIC_TYPE& HV = U.HV[j*cuda::pitch + i];
@@ -325,7 +388,7 @@ update_flow_variables_x
 			NUMERIC_TYPE Zstar_e;
 
 			// only update flow variables if (i, j) is inside the domain
-			if (i <= cuda::geometry.xsz && j <= cuda::geometry.ysz)
+			if (i <= cuda::geometry.xsz && j <= cuda::geometry.ysz && cuda::fv1_owns_row(j))
 			{
 				Zstar_e = Zstar_x[j*cuda::pitch + i];
 
@@ -358,7 +421,7 @@ update_flow_variables_x
 
 			__syncthreads();
 
-			if (threadIdx.x != 0 && i <= cuda::geometry.xsz && j <= cuda::geometry.ysz)
+			if (threadIdx.x != 0 && i <= cuda::geometry.xsz && j <= cuda::geometry.ysz && cuda::fv1_owns_row(j))
 			{
 				FlowVector& F_w = F[threadIdx.y][threadIdx.x-1];
 				FlowVector U0 = Uold[j*cuda::pitch + i];
@@ -416,7 +479,8 @@ update_flow_variables_y
 			NUMERIC_TYPE Z_pos;
 			NUMERIC_TYPE Zstar_s;
 
-			if (i <= cuda::geometry.xsz && j <= cuda::geometry.ysz)
+			if (i <= cuda::geometry.xsz && j <= cuda::geometry.ysz &&
+					(cuda::fv1_owns_row(j) || cuda::fv1_owns_row(j+1)))
 			{
 				Zstar_s = Zstar_y[j*cuda::pitch + i];
 
@@ -448,12 +512,14 @@ update_flow_variables_y
 
 				F_s = HLL::y(Ustar_neg, Ustar_pos);
 				F[threadIdx.y][threadIdx.x] = F_s;
-				update_mass_stats_y(mass_stats, F_s.H, i, j);
+				if ((j == 0 && cuda::fv1_owns_row(1)) ||
+						(j > 0 && cuda::fv1_owns_row(j)))
+					update_mass_stats_y(mass_stats, F_s.H, i, j);
 			}
 
                         __syncthreads();
 
-			if (threadIdx.y != 0 && i <= cuda::geometry.xsz && j <= cuda::geometry.ysz)
+			if (threadIdx.y != 0 && i <= cuda::geometry.xsz && j <= cuda::geometry.ysz && cuda::fv1_owns_row(j))
 			{
 				FlowVector& F_n = F[threadIdx.y-1][threadIdx.x];
 				FlowVector U0 = Uint[j*cuda::pitch + i];
@@ -500,7 +566,8 @@ DEM(DEM),
 Zstar_x(Zstar_x),
 Zstar_y(Zstar_y),
 manning(manning),
-grid_size(grid_size)
+	grid_size(grid_size),
+	raster_pitch(geometry.xsz + 2)
 {
 	Flow::allocate_device(U1, geometry);
 	Flow::allocate_device(U2, geometry);
@@ -531,6 +598,10 @@ lis::cuda::fv1::Flow& lis::cuda::fv1::Solver::update_flow_variables
 	if (friction)
 	{
 		apply_friction<<<grid_size, cuda::block_size>>>(Uold, manning);
+#if defined(LISFLOOD_CUDA_MPI)
+		cuda::sync();
+		exchange_mpi_halos(Uold, raster_pitch);
+#endif
 		update_ghost_cells();
 	}
 

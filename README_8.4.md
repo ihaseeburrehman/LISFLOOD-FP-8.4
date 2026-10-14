@@ -271,6 +271,47 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 | Alzette FV1, 6 h: none / constant 2 mm/h / Green-Ampt (Ks 10 mm/h, theta_init 0.30 everywhere) | stored water after 6 h 27.4 / 24.4 / 12.6 million m3; removed 0 / 3.2 / 16.0 million m3; time step, maximum depth unchanged, no cell deeper. Of the 14.8 million m3 less water than without infiltration, 12.5 million are in cells already under water at the start (5.7 in rivers and the lake deeper than 0.5 m, 6.8 on floodplain flooded 1 cm to 0.5 m by the previous day), which were given the same dry initial moisture as everywhere else; only 2.3 million in cells dry at the start |
 | cost | about 11-20 % more run time (Green-Ampt: none measurable on Alzette) |
 
+### Experimental multi-GPU CUDA FV1 (14 October 2026)
+
+CUDA FV1 can run with MPI ranks on separate NVIDIA GPUs when configured with
+`-DLISFLOOD_ENABLE_CUDA_MPI=ON`. The option is off by default. Each rank owns
+a contiguous band of raster rows, updates that band on its assigned CUDA GPU,
+and exchanges one row of flow state with its neighbours. State rasters are
+replicated on each rank; output snapshots are assembled across ranks. This is
+an experimental single-node path for **FV1 only**. It does not distribute
+raster memory, and host-staged halo exchange and collectives add overhead.
+
+Use `tests_8.4/cuda_fv1_mpi_alzette.sbatch` as the ECMWF example. The allocation
+requests four A100s, and the case file must contain both `cuda` and `fv1`;
+`fv1` alone runs the CPU implementation. The example uses `mpirun` with four
+ranks, and checks that MPI reports ranks 0–3 before running. Build with CUDA,
+MPI C++ and the normal LISFLOOD dependencies loaded:
+
+```sh
+cmake -S source -B build-mpi -DLISFLOOD_ENABLE_CUDA_MPI=ON
+cmake --build build-mpi -j
+```
+
+On 14 October, ECMWF job 38422144 ran a six-hour, 100 m Alzette case with
+hourly outputs on one A100 and four A100s. Both the loss-free and Green-Ampt
+cases passed. Logs report rank 0/4 through rank 3/4 on distinct A100s and
+non-overlapping row bands. The checker compares every depth, Qx, Qy, elevation
+and maximum-depth raster, plus mass rows. All saved rasters matched exactly
+(maximum absolute difference 0); maximum scaled mass difference was
+`5.424e-7` without losses and `0` with Green-Ampt. The small case took about
+2 s on one GPU and 3 s on four GPUs, so this validates parallel execution and
+numerical parity, not a speedup. Run the checker with
+`python3 tests_8.4/compare_cuda_fv1_mpi.py SINGLE_DIR MULTI_DIR`.
+
+The implementation also reduces the global CFL step, mass and loss totals,
+keeps the row ownership consistent for rain, boundaries, NoData draining and
+maximum-depth output, and synchronizes snapshot scheduling across ranks. The
+snapshot schedule fix was found from a live MPI stack trace: non-root ranks
+were entering a gather one output early while rank 0 had advanced to halo
+exchange. `MPI_Finalize` is called when FV1 initializes MPI itself. The Alzette
+regression covers dynamic rainfall and Green-Ampt; other boundary/source and
+loss combinations still need dedicated multi-GPU tests before broader claims.
+
 ### Independent Green-Ampt equation check (14 October 2026)
 
 To avoid treating either this implementation or another LISFLOOD extension as

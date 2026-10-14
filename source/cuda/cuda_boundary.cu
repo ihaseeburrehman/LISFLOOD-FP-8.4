@@ -104,6 +104,7 @@ __global__ void update_point_sources
 
 	for (int i=global_i; i<cuda::boundaries.PS_count; i+=blockDim.x*gridDim.x)
 	{
+		if (!cuda::fv1_owns_row(cuda::boundaries.PS_idx[i] / cuda::pitch)) continue;
 		NUMERIC_TYPE& Hvalue = H[cuda::boundaries.PS_idx[i]];
 
 		switch (cuda::boundaries.PS_type[i])
@@ -145,6 +146,7 @@ __global__ void update_point_sources_Q
 
 	for (int i = global_i; i < cuda::boundaries.PS_count; i += blockDim.x * gridDim.x)
 	{
+		if (!cuda::fv1_owns_row(cuda::boundaries.PS_idx[i] / cuda::pitch)) continue;
 		NUMERIC_TYPE& Hvalue = H[cuda::boundaries.PS_idx[i]];
 
 		switch (cuda::boundaries.PS_type[i])
@@ -183,6 +185,7 @@ __global__ void update_point_sources_H
 
 	for (int i = global_i; i < cuda::boundaries.PS_count; i += blockDim.x * gridDim.x)
 	{
+		if (!cuda::fv1_owns_row(cuda::boundaries.PS_idx[i] / cuda::pitch)) continue;
 		NUMERIC_TYPE& Hvalue = H[cuda::boundaries.PS_idx[i]];
 
 		switch (cuda::boundaries.PS_type[i])
@@ -277,6 +280,7 @@ drain_nodata_water
 
 	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
 	{
+		if (!cuda::fv1_owns_row(j)) continue;
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
 

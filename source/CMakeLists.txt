@@ -7,6 +7,8 @@ endif()
 
 project(lisflood-fp)
 
+option(LISFLOOD_ENABLE_CUDA_MPI "Enable the experimental CUDA FV1 MPI multi-GPU path" OFF)
+
 set(_CONFIG config.default.cmake CACHE FILEPATH "CMake config file")
 include(${_CONFIG})
 
@@ -75,6 +77,11 @@ if (CMAKE_CUDA_COMPILER)
 	set_property(TARGET lisflood PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 	
 	add_compile_definitions(CUDA THRUST_IGNORE_CUB_VERSION_CHECK)
+	if (LISFLOOD_ENABLE_CUDA_MPI)
+		find_package(MPI REQUIRED COMPONENTS CXX)
+		target_link_libraries(lisflood PRIVATE MPI::MPI_CXX)
+		target_compile_definitions(lisflood PRIVATE LISFLOOD_CUDA_MPI=1)
+	endif()
     
 	target_sources(lisflood PRIVATE
 		cuda/cuda_boundary.cu

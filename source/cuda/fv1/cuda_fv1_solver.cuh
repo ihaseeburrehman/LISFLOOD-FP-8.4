@@ -13,6 +13,11 @@ namespace cuda
 namespace fv1
 {
 
+#if defined(LISFLOOD_CUDA_MPI)
+void configure_mpi_partition(int row_begin, int row_end, int rank, int size);
+void exchange_mpi_halos(struct Flow& U, int pitch);
+#endif
+
 class Solver : public cuda::Solver<Flow>
 {
 public:
@@ -65,6 +70,7 @@ private:
 	NUMERIC_TYPE* manning;
 	bool friction;
 	const dim3 grid_size;
+	const int raster_pitch;
 };
 
 }

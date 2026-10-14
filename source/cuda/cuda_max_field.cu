@@ -1,6 +1,11 @@
 #include "cuda_max_field.cuh"
 #include "cuda_solver.cuh"
 #include "io.h"
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#include <vector>
+#include <algorithm>
+#endif
 
 namespace lis
 {
@@ -22,6 +27,7 @@ update_max_field
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
+			if (!cuda::fv1_owns_row(j)) continue;
 			NUMERIC_TYPE& maxHvalue = maxH[j*cuda::pitch+i];
 			maxHvalue = FMAX(maxHvalue, H[j*cuda::pitch+i]);
 		}
@@ -119,10 +125,23 @@ void lis::cuda::MaxField::write()
 	char filename[800];
 	snprintf(filename, 800*sizeof(char), "%s%s", resrootname, ".max");
 
-	FILE* file = fopen_or_die(filename, "wb");
-	
 	NUMERIC_TYPE* h_maxH = GhostRaster::allocate_pinned(geometry);
 	cuda::copy(h_maxH, maxH, lis::GhostRaster::elements(geometry)*sizeof(NUMERIC_TYPE));
+#if defined(LISFLOOD_CUDA_MPI)
+	int initialized = 0, rank = 0;
+	MPI_Initialized(&initialized);
+	if (initialized) {
+		MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+		const int count = lis::GhostRaster::elements(geometry);
+		std::vector<NUMERIC_TYPE> global(count);
+		MPI_Allreduce(h_maxH, global.data(), count,
+			sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE,
+			MPI_MAX, MPI_COMM_WORLD);
+		if (rank == 0) std::copy(global.begin(), global.end(), h_maxH);
+	}
+	if (initialized && rank != 0) { free_pinned(h_maxH); return; }
+#endif
+	FILE* file = fopen_or_die(filename, "wb");
 	AsciiRaster::write(file, h_maxH, geometry, pitch, offset, NULLVAL,0,
 			precision);
 

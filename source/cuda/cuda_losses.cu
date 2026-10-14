@@ -10,6 +10,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#endif
 
 namespace lis
 {
@@ -146,6 +149,7 @@ apply_losses_fv1
 
 	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
 	{
+		if (!cuda::fv1_owns_row(j)) continue;
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
 			int idx = j*cuda::pitch + i;
@@ -712,6 +716,15 @@ double lis::cuda::Losses::total_volume()
 	if (d_volume == nullptr) return 0.0;
 	double v;
 	copy(&v, d_volume, sizeof(double));
+#if defined(LISFLOOD_CUDA_MPI)
+	int initialized = 0;
+	MPI_Initialized(&initialized);
+	if (initialized) {
+		double global = 0.0;
+		MPI_Allreduce(&v, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		v = global;
+	}
+#endif
 	return v;
 }
 

@@ -34,7 +34,8 @@ public:
 		NUMERIC_TYPE interval,
 		NUMERIC_TYPE next_save,
 		int checkpoint,
-		NUMERIC_TYPE time
+		NUMERIC_TYPE time,
+		bool write_enabled = true
 	);
 
 	void write_header(NUMERIC_TYPE t);

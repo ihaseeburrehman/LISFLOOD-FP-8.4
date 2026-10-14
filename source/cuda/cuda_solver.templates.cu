@@ -3,6 +3,9 @@
 #include "cuda_util.cuh"
 #include <helper_cuda.h>
 #include <cub/cub.cuh>
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#endif
 
 template<typename F>
 lis::cuda::DynamicTimestep<F>::DynamicTimestep
@@ -78,6 +81,17 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 		solver.update_dt_per_element(dt_field);
 		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
 					dt_field, &dt, elements));
+#if defined(LISFLOOD_CUDA_MPI)
+		cuda::sync();
+		int mpi_initialized = 0;
+		MPI_Initialized(&mpi_initialized);
+		if (mpi_initialized) {
+			NUMERIC_TYPE global_dt;
+			MPI_Datatype type = sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
+			MPI_Allreduce(&dt, &global_dt, 1, type, MPI_MIN, MPI_COMM_WORLD);
+			dt = global_dt;
+		}
+#endif
 	}
 	cuda::sync();
 

@@ -7,7 +7,8 @@ lis::Stats::Stats
 	NUMERIC_TYPE interval,
 	NUMERIC_TYPE next_save,
 	int checkpoint,
-	NUMERIC_TYPE time
+	NUMERIC_TYPE time,
+	bool write_enabled
 
 )
 :
@@ -18,7 +19,10 @@ next_save(next_save)
 	snprintf(filename, 800*sizeof(char), "%s%s", resroot, ".mass");
 //	file = fopen_or_die(filename, "w");
 
-	if (checkpoint == ON && time > 0) { //if this is a checkpointed job, we only need to amend the .mass file
+	if (!write_enabled) {
+		file = fopen_or_die("/dev/null", "w");
+	}
+	else if (checkpoint == ON && time > 0) { //if this is a checkpointed job, we only need to amend the .mass file
 		file = fopen_or_die(filename, "a");
 	}
 	else {

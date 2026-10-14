@@ -10,6 +10,13 @@ __constant__ lis::cuda::BoundaryConditions lis::cuda::boundaries;
 __constant__ lis::SamplePoints lis::cuda::sample_points;
 __managed__ NUMERIC_TYPE lis::cuda::dt;
 __managed__ int lis::cuda::sample_buf_idx = 0;
+#if defined(LISFLOOD_CUDA_MPI)
+__constant__ int lis::cuda::fv1_row_begin;
+__constant__ int lis::cuda::fv1_row_end;
+__constant__ int lis::cuda::fv1_partition_active = 0;
+__constant__ int lis::cuda::fv1_owns_north_ghost = 0;
+__constant__ int lis::cuda::fv1_owns_south_ghost = 0;
+#endif
 
 const dim3 lis::cuda::block_size(CUDA_BLOCK_SIZE_X, CUDA_BLOCK_SIZE_Y);
 

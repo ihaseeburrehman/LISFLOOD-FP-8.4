@@ -24,6 +24,26 @@ extern __constant__ SamplePoints sample_points;
 extern __managed__ NUMERIC_TYPE dt;
 extern __managed__ int sample_buf_idx;
 
+#if defined(LISFLOOD_CUDA_MPI)
+extern __constant__ int fv1_row_begin;
+extern __constant__ int fv1_row_end;
+extern __constant__ int fv1_partition_active;
+extern __constant__ int fv1_owns_north_ghost;
+extern __constant__ int fv1_owns_south_ghost;
+__device__ __forceinline__ bool fv1_owns_row(int j)
+{
+	return !fv1_partition_active || (j >= fv1_row_begin && j < fv1_row_end);
+}
+__device__ __forceinline__ bool fv1_owns_cfl_row(int j)
+{
+	return fv1_owns_row(j) || (j == 0 && fv1_owns_north_ghost) ||
+		(j == cuda::geometry.ysz+1 && fv1_owns_south_ghost);
+}
+#else
+__device__ __forceinline__ bool fv1_owns_row(int) { return true; }
+__device__ __forceinline__ bool fv1_owns_cfl_row(int) { return true; }
+#endif
+
 extern const dim3 block_size;
 
 __device__
