@@ -329,6 +329,16 @@ files show the 9.4-minute CUDA FV1 run simulated 2 h, not 24 h; the 24 h,
 63.2-minute archived run was CUDA ACC with an initial 0.5 s time step. The
 benchmark statement in `README.md` has been corrected accordingly.
 
+To measure the matching large grid directly, ECMWF job 38525312 ran the
+10 m, 10,642,080-cell, WRF-driven Alzette FV1 case for 24 h on one A100 using
+the current 8.4 CUDA binary. It completed 182,412 steps and wrote all 25
+hourly depth snapshots through 86,400.383 s. The solver loop took 802 s
+(13 min 22 s); whole-process wall time was 821.53 s (13 min 42 s). Startup
+confirmed `CUDA FV1` bound to `NVIDIA A100-SXM4-40GB`. The historical 8.3 FV1
+record was only a 2 h run (496 s); the new 24 h time is the valid current
+24-hour FV1 measurement. Reproduce with
+`tests_8.4/cuda_fv1_alzette_10m_24h.sbatch`.
+
 ### Independent Green-Ampt equation check (14 October 2026)
 
 To avoid treating either this implementation or another LISFLOOD extension as

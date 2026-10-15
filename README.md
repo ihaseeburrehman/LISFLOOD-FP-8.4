@@ -232,6 +232,11 @@ What was checked for 8.3 (details in the 8.3 paper):
   the grid: on a
   grid without NoData cells it is 72 % at 0.5 million cells and 85-89 % at 2 to
   8 million, and a few seconds on small grids.
+- A fresh 8.4 CUDA FV1 run of the same 10 m, 10.64-million-cell Alzette case
+  completed 24 h in 13 min 22 s of solver time (13 min 42 s wall) on one A100.
+  It wrote 25 hourly depth snapshots and reached 86,400.383 s. The historical
+  8.3 FV1 record above simulated only 2 h, so its 8.27 min is not a 24 h
+  comparison.
 - The Metal FV1 solver takes the same time steps as the CPU solver on the three
   cases of the paper and agrees with it to within single-precision rounding.
 - The other GPU solvers of 8.2 (`acc_nugrid` and the adaptive MWDG2/HWFV1) are
