@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """Compare single-rank and multi-rank CUDA FV1 Alzette outputs."""
-import math
 import sys
+from itertools import zip_longest
 from pathlib import Path
 
-
-def read_raster(path):
-    lines = path.read_text().splitlines()
-    header = lines[:6]
-    values = [float(value) for line in lines[6:] for value in line.split()]
-    return header, values
+import numpy as np
 
 
 def compare_rasters(single, multi, tolerance):
-    patterns = ("r-*.wd", "r-*.Qx", "r-*.Qy", "r-*.elev", "r.max")
+    # Accept the original small-test `r-*` prefix and named cases such as
+    # Alzette's `1hr-*` output prefix.
+    patterns = ("*.wd", "*.Qx", "*.Qy", "*.elev", "*.max")
     worst = (0.0, None, 0.0)
     compared = 0
     for pattern in patterns:
@@ -27,15 +24,29 @@ def compare_rasters(single, multi, tolerance):
         if worst[1] is None:
             worst = (0.0, one[0].name, 0.0)
         for a, b in zip(one, many):
-            ha, va = read_raster(a)
-            hb, vb = read_raster(b)
-            if ha != hb or len(va) != len(vb):
-                raise RuntimeError(f"raster shape/header differs: {a.name} vs {b.name}")
-            if not all(math.isfinite(v) for v in va + vb):
-                raise RuntimeError(f"non-finite values in {a.name} or {b.name}")
-            errors = [abs(x-y) for x, y in zip(va, vb)]
-            maximum = max(errors, default=0.0)
-            rmse = math.sqrt(sum(e*e for e in errors) / max(1, len(errors)))
+            maximum = 0.0
+            squared_error = 0.0
+            value_count = 0
+            with a.open() as fa, b.open() as fb:
+                ha = [fa.readline().rstrip("\n") for _ in range(6)]
+                hb = [fb.readline().rstrip("\n") for _ in range(6)]
+                if ha != hb:
+                    raise RuntimeError(f"raster header differs: {a.name} vs {b.name}")
+                for row_a, row_b in zip_longest(fa, fb):
+                    if row_a is None or row_b is None:
+                        raise RuntimeError(f"raster row count differs: {a.name} vs {b.name}")
+                    va = np.fromstring(row_a, sep=" ")
+                    vb = np.fromstring(row_b, sep=" ")
+                    if va.shape != vb.shape:
+                        raise RuntimeError(f"raster row width differs: {a.name} vs {b.name}")
+                    if not np.isfinite(va).all() or not np.isfinite(vb).all():
+                        raise RuntimeError(f"non-finite values in {a.name} or {b.name}")
+                    errors = np.abs(va - vb)
+                    if errors.size:
+                        maximum = max(maximum, float(errors.max()))
+                        squared_error += float(np.dot(errors, errors))
+                        value_count += errors.size
+            rmse = float(np.sqrt(squared_error / value_count)) if value_count else 0.0
             unit = "m" if a.suffix in (".wd", ".elev", ".max") else "m2/s"
             print(f"{a.name}: max_abs={maximum:.9g} {unit}, rmse={rmse:.9g} {unit}")
             if maximum > worst[0]:
@@ -59,26 +70,40 @@ def read_mass(path):
 
 
 def compare_mass(single, multi, tolerance):
-    a = read_mass(single / "r.mass")
-    b = read_mass(multi / "r.mass")
+    def mass_file(directory):
+        candidates = sorted(directory.glob("*.mass"))
+        if len(candidates) != 1:
+            raise RuntimeError(f"expected one .mass file in {directory}, found {len(candidates)}")
+        return candidates[0]
+
+    a = read_mass(mass_file(single))
+    b = read_mass(mass_file(multi))
     if len(a) != len(b) or not a:
         raise RuntimeError(f"mass row count differs: single={len(a)}, multi={len(b)}")
     max_relative = 0.0
+    max_qout_relative = 0.0
+    max_residual_scaled = 0.0
     for i, (ra, rb) in enumerate(zip(a, b)):
         if len(ra) != len(rb):
             raise RuntimeError(f"mass column count differs at row {i}")
         for col, (x, y) in enumerate(zip(ra, rb)):
-            # Verror is a small residual; scale it by total stored water
-            # volume so harmless reduction-order rounding is assessed against
-            # the conserved quantity instead of against zero.
             scale = max(1.0, abs(x), abs(y))
-            if col == 10 and len(ra) > 5:
+            allowed = tolerance
+            if col == 8:  # Qout is a floating-point reduction over the domain.
+                allowed = 1e-4
+                max_qout_relative = max(max_qout_relative, abs(x-y)/scale)
+            if col in (9, 10) and len(ra) > 5:
+                # Qerror and Verror are residual diagnostics; compare their
+                # reduction noise against stored water volume, not zero.
                 scale = max(1.0, abs(ra[5]), abs(rb[5]))
+                max_residual_scaled = max(max_residual_scaled, abs(x-y)/scale)
             relative = abs(x-y) / scale
             max_relative = max(max_relative, relative)
-            if relative > tolerance:
+            if relative > allowed:
                 raise RuntimeError(f"mass mismatch row {i} col {col}: {x} vs {y}")
-    print(f"mass rows={len(a)}, maximum scaled difference={max_relative:.9g}")
+    print(f"mass rows={len(a)}, maximum scaled difference={max_relative:.9g}, "
+          f"Qout relative difference={max_qout_relative:.9g}, "
+          f"scaled residual difference={max_residual_scaled:.9g}")
 
 
 if __name__ == "__main__":

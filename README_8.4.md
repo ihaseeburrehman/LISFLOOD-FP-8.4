@@ -336,8 +336,19 @@ hourly depth snapshots through 86,400.383 s. The solver loop took 802 s
 (13 min 22 s); whole-process wall time was 821.53 s (13 min 42 s). Startup
 confirmed `CUDA FV1` bound to `NVIDIA A100-SXM4-40GB`. The historical 8.3 FV1
 record was only a 2 h run (496 s); the new 24 h time is the valid current
-24-hour FV1 measurement. Reproduce with
-`tests_8.4/cuda_fv1_alzette_10m_24h.sbatch`.
+24-hour FV1 measurement.
+
+The same 10 m, 24 h case was rerun on 15 October with one and four A100s in
+ECMWF job 38530439. One GPU took 720 s solver / 734.49 s wall; four GPUs took
+566 s / 586.62 s, a 20.1% lower wall time (1.25x throughput). Each run reached
+86,400.383 s and wrote 25 hourly depth snapshots. Every hourly `.wd`, `.Qx`,
+`.Qy`, `.elev` and `.max` raster matched exactly. Across 145 `.mass` rows, the
+maximum relative Qout difference was 7.71e-5 (0.0077%); the maximum residual
+difference scaled by stored water volume was 5.15e-7. This passes the 3%
+acceptance threshold, while the measured speedup applies to this case and
+hardware only. Reproduce with
+`tests_8.4/cuda_fv1_mpi_alzette_10m_24h.sbatch` and
+`tests_8.4/compare_cuda_fv1_mpi.py`.
 
 ### Independent Green-Ampt equation check (14 October 2026)
 
