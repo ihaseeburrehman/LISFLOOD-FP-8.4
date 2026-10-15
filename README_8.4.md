@@ -329,10 +329,18 @@ must use the same count. For example, use `#SBATCH --ntasks=4`, request four
 GPUs, and launch with `mpirun -np 4 lisflood case.par`. For one GPU, set
 `GPUs 1` and launch directly or with `mpirun -np 1`. If the counts do not
 match, FV1 stops with an error instead of silently using a different number.
-Multi-GPU operation currently applies only to CUDA FV1; the other CUDA and
-Metal solvers remain single-GPU.
+Multi-GPU/multi-rank operation applies to CUDA FV1 and Apple Silicon Metal FV1;
+the other CUDA and Metal solvers remain single-GPU.
 
-Use `tests_8.4/cuda_fv1_mpi_alzette.sbatch` as the ECMWF example. The allocation
+For Metal FV1 on Apple Silicon, configure with `-DLISFLOOD_ENABLE_METAL_MPI=ON`
+and OpenMP support:
+
+```sh
+cmake -S source -B build/macos_mpi -DLISFLOOD_ENABLE_METAL_MPI=ON -DOpenMP_ROOT=/opt/homebrew/opt/libomp
+cmake --build build/macos_mpi --target lisflood -j
+```
+
+Use `tests_8.4/cuda_fv1_mpi_alzette.sbatch` as the ECMWF example for CUDA. The allocation
 requests four A100s, and the case file must contain both `cuda` and `fv1`;
 `fv1` alone runs the CPU implementation. The example uses `mpirun` with four
 ranks, and checks that MPI reports ranks 0–3 before running. Build with CUDA,

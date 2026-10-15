@@ -1104,13 +1104,13 @@ void CheckParams(Fnames *Fnameptr, States *Statesptr, Pars *Parptr, Solver *Solv
 	if (Statesptr->cuda_mpi_gpus > 1 &&
 		(Statesptr->cuda != ON || Statesptr->fv1 != ON))
 	{
-		printf("ERROR: GPUs greater than 1 is currently supported only for CUDA FV1 (use both 'cuda' and 'fv1').\n");
+		printf("ERROR: GPUs greater than 1 is currently supported only for CUDA/Metal FV1 (use both 'cuda'/'metal' and 'fv1').\n");
 		exit(EXIT_FAILURE);
 	}
-#if !defined(LISFLOOD_CUDA_MPI)
+#if !defined(LISFLOOD_CUDA_MPI) && !defined(LISFLOOD_METAL_MPI)
 	if (Statesptr->cuda_mpi_gpus > 1)
 	{
-		printf("ERROR: This build has no CUDA MPI multi-GPU support; rebuild with -DLISFLOOD_ENABLE_CUDA_MPI=ON.\n");
+		printf("ERROR: This build has no CUDA/Metal MPI multi-GPU support; rebuild with -DLISFLOOD_ENABLE_CUDA_MPI=ON or -DLISFLOOD_ENABLE_METAL_MPI=ON.\n");
 		exit(EXIT_FAILURE);
 	}
 #endif

@@ -1,0 +1,17 @@
+resroot 1hr
+dirroot /Users/haseeb.rehman/Downloads/LISFLOOD-FP-Metal/LISFLOOD-FP-8.4/alzette_10m_metal_test/metal_2gpu_results
+DEMfile /Users/haseeb.rehman/Downloads/LISFLOOD-FP-Metal/LISFLOOD-FP-8.4/alzette_10m_metal_test/inputs/Alzette_sub_basin_10m_bridge_burn.asc
+manningfile /Users/haseeb.rehman/Downloads/LISFLOOD-FP-Metal/LISFLOOD-FP-8.4/alzette_10m_metal_test/inputs/manning.n.ascii
+dynamicrainfile /Users/haseeb.rehman/Downloads/LISFLOOD-FP-Metal/LISFLOOD-FP-8.4/alzette_10m_metal_test/inputs/rain_wrf1p3_24h_from_14jul18.nc
+startfile /Users/haseeb.rehman/Downloads/LISFLOOD-FP-Metal/LISFLOOD-FP-8.4/alzette_10m_metal_test/inputs/6hr-0004.wd
+fv1
+metal
+GPUs 2
+sim_time 43200
+initial_tstep 10
+massint 600
+saveint 3600
+bcifile /Users/haseeb.rehman/Downloads/LISFLOOD-FP-Metal/LISFLOOD-FP-8.4/alzette_10m_metal_test/inputs/Border.bci
+nodata_elevation -9999
+drain_nodata
+qoutput

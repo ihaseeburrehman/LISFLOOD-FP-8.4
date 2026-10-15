@@ -32,7 +32,8 @@ struct Flow {
 class Simulator {
 public:
   Simulator(Fnames &filenames, Pars &pars, Solver &solver, Arrays &arrays,
-            States &states, BoundCs &boundCs, int verbose);
+            States &states, BoundCs &boundCs, int verbose,
+            int rank = 0, int size = 1, int r_begin = 1, int r_end = 0);
 
   ~Simulator();
 
@@ -42,6 +43,9 @@ public:
 
   // Run one timestep
   NUMERIC_TYPE step();
+
+  // Multi-GPU row gathering across ranks
+  void gather_rows(bool gather_momentum = true, bool gather_max = false);
 
   // Copy results back to CPU
   void copy_to_host(NUMERIC_TYPE *H, NUMERIC_TYPE *HU, NUMERIC_TYPE *HV);
@@ -60,6 +64,9 @@ public:
 
   // Check if this simulator instance is valid (initialized successfully)
   bool is_valid() const { return impl != nullptr; }
+
+  int get_rank() const;
+  int get_size() const;
 
 private:
   SimulatorImpl *impl; // Pointer to implementation (PIMPL idiom)

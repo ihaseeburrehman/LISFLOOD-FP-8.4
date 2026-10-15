@@ -11,3 +11,8 @@ paper/cases/alzette/*.ascii
 paper/cases/alzette/*.nc
 paper/cases/alzette/*.wd
 HANDOVER_LOCAL.md
+alzette_10m_metal_test/inputs/
+alzette_10m_metal_test/metal_results/
+alzette_10m_metal_test/cuda_reference_12h/
+alzette_10m_metal_test/*_results/
+

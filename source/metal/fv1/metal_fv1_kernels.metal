@@ -96,6 +96,10 @@ struct Geometry {
     float tly;
     float blx;
     float bly;
+    int row_begin;
+    int row_end;
+    int owns_north_ghost;
+    int owns_south_ghost;
 };
 
 // Physical parameters
@@ -296,9 +300,9 @@ kernel void apply_friction(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
+    int j = geom.row_begin + gid.y;
     
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
     
     int idx = j * geom.pitch + i;
     float h = H[idx];
@@ -428,9 +432,9 @@ kernel void update_flow_x(
     threadgroup float Hstar_sh[TG_Y][TG_X];
 
     int i = (int)(tgid.x * (TG_X - 1) + tid.x);   // interface / cell index 0..xsz
-    int j = (int)(tgid.y * TG_Y + tid.y) + 1;     // row 1..ysz
+    int j = (int)(geom.row_begin + tgid.y * TG_Y + tid.y);     // row in partition
 
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    bool active = (i <= geom.xsz && j < geom.row_end);
 
     FlowVector U_c, Ustar_c_e;
     float Z_c = 0.0f, Zstar_e = 0.0f;
@@ -539,9 +543,9 @@ kernel void update_flow_y(
     threadgroup float Hstar_sh[TG_Y][TG_X];
 
     int i = (int)(tgid.x * TG_X + tid.x) + 1;     // column 1..xsz
-    int j = (int)(tgid.y * (TG_Y - 1) + tid.y);   // interface / cell row 0..ysz
+    int j = (int)((geom.row_begin - 1) + tgid.y * (TG_Y - 1) + tid.y);   // interface / cell row
 
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    bool active = (i <= geom.xsz && j <= (geom.row_end - 1));
 
     FlowVector U_c, Ustar_c_s;
     float Z_c = 0.0f, Zstar_s = 0.0f;
@@ -563,7 +567,7 @@ kernel void update_flow_y(
         // Domain edges. Metal's y axis points south, so a positive prescribed
         // discharge is +Qn on the north edge and -Qn on the south edge; that
         // keeps "positive value == inflow" on every side, as on the CPU.
-        if (j == 0 || j == geom.ysz) {
+        if ((j == 0 && geom.owns_north_ghost) || (j == geom.ysz && geom.owns_south_ghost)) {
             bool north = (j == 0);
             int bc_idx = north ? (i - 1)
                                : (2 * geom.xsz + geom.ysz - (i - 1) - 1);
@@ -595,13 +599,13 @@ kernel void update_flow_y(
         F[tid.y][tid.x] = F_s;
         Hstar_sh[tid.y][tid.x] = Ustar_s.H;
 
-        if (j == 0) account_boundary(mass_totals, -F_s.H * solver.dt * geom.dx);
-        if (j == geom.ysz) account_boundary(mass_totals, F_s.H * solver.dt * geom.dx);
+        if (j == 0 && geom.owns_north_ghost) account_boundary(mass_totals, -F_s.H * solver.dt * geom.dx);
+        if (j == geom.ysz && geom.owns_south_ghost) account_boundary(mass_totals, F_s.H * solver.dt * geom.dx);
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    if (tid.y == 0 || !active || j < 1) return;
+    if (tid.y == 0 || !active || j < geom.row_begin) return;
 
     int idx = j * geom.pitch + i;
     FlowVector F_n = F[tid.y - 1][tid.x];
@@ -638,9 +642,9 @@ kernel void compute_dt_per_cell(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
+    int j = geom.row_begin + gid.y;
     
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
     
     int idx = j * geom.pitch + i;
     float h = H[idx];
@@ -688,19 +692,23 @@ kernel void zero_ghost_cells(
     if (gid < (uint)geom.pitch) {
         int i = gid;
         // North (j=0)
-        H[i] = 0.0f;
-        HU[i] = 0.0f;
-        HV[i] = 0.0f;
+        if (geom.owns_north_ghost) {
+            H[i] = 0.0f;
+            HU[i] = 0.0f;
+            HV[i] = 0.0f;
+        }
         // South (j=ysz+1)
-        int idx_s = (geom.ysz + 1) * geom.pitch + i;
-        H[idx_s] = 0.0f;
-        HU[idx_s] = 0.0f;
-        HV[idx_s] = 0.0f;
+        if (geom.owns_south_ghost) {
+            int idx_s = (geom.ysz + 1) * geom.pitch + i;
+            H[idx_s] = 0.0f;
+            HU[idx_s] = 0.0f;
+            HV[idx_s] = 0.0f;
+        }
     }
     
     // East and West boundaries
-    if (gid < (uint)(geom.ysz + 2)) {
-        int j = gid;
+    if (gid < (uint)(geom.row_end - geom.row_begin)) {
+        int j = geom.row_begin + gid;
         // West (i=0)
         int idx_w = j * geom.pitch;
         H[idx_w] = 0.0f;
@@ -726,9 +734,9 @@ kernel void apply_uniform_rain(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
+    int j = geom.row_begin + gid.y;
     
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
     
     int idx = j * geom.pitch + i;
     float z = DEM[idx];
@@ -779,9 +787,9 @@ kernel void apply_rain(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x; // 0 to xsz-1
-    int j = gid.y; // 0 to ysz-1
+    int j = (dem_geom.row_begin - 1) + gid.y; // 0 to ysz-1 in partition
     
-    if (i >= dem_geom.xsz || j >= dem_geom.ysz) return;
+    if (i >= dem_geom.xsz || j >= (dem_geom.row_end - 1)) return;
     
     // Calculate 1-based index for H/DEM which includes ghost cells
     int idx = (j + 1) * dem_geom.pitch + (i + 1);
@@ -816,9 +824,9 @@ kernel void update_ghost_cells(
     // South: xsz + ysz
     // West: 2*xsz + ysz
     
-    // West and East boundaries (i=0 and i=xsz+1)
-    if (gid < (uint)(ysz + 2)) {
-        int j = gid;
+    // West and East boundaries for owned rows
+    if (gid < (uint)(geom.row_end - geom.row_begin)) {
+        int j = geom.row_begin + gid;
         
         // West boundary (i=0)
         if (j >= 1 && j <= ysz) {
@@ -858,31 +866,35 @@ kernel void update_ghost_cells(
         int i = gid;
         
         // North boundary (j=0)
-        int bc_idx_n = i - 1; // LISFLOOD North index
-        int type_n = boundary_types[bc_idx_n];
-        
-        int idx_ghost_n = 0 * pitch + i;
-        int idx_interior_n = 1 * pitch + i;
-        H[idx_ghost_n] = H[idx_interior_n];
-        HU[idx_ghost_n] = HU[idx_interior_n];
-        if (type_n == BC_FREE) {
-            HV[idx_ghost_n] = HV[idx_interior_n]; // Simple transmissive (matches CPU fv1)
-        } else {
-            HV[idx_ghost_n] = -HV[idx_interior_n]; // Reflective
+        if (geom.owns_north_ghost) {
+            int bc_idx_n = i - 1; // LISFLOOD North index
+            int type_n = boundary_types[bc_idx_n];
+            
+            int idx_ghost_n = 0 * pitch + i;
+            int idx_interior_n = 1 * pitch + i;
+            H[idx_ghost_n] = H[idx_interior_n];
+            HU[idx_ghost_n] = HU[idx_interior_n];
+            if (type_n == BC_FREE) {
+                HV[idx_ghost_n] = HV[idx_interior_n]; // Simple transmissive (matches CPU fv1)
+            } else {
+                HV[idx_ghost_n] = -HV[idx_interior_n]; // Reflective
+            }
         }
         
         // South boundary (j=ysz+1)
-        int bc_idx_s = 2 * xsz + ysz - i; // LISFLOOD South index
-        int type_s = boundary_types[bc_idx_s];
-        
-        int idx_ghost_s = (ysz + 1) * pitch + i;
-        int idx_interior_s = ysz * pitch + i;
-        H[idx_ghost_s] = H[idx_interior_s];
-        HU[idx_ghost_s] = HU[idx_interior_s];
-        if (type_s == BC_FREE) {
-            HV[idx_ghost_s] = HV[idx_interior_s]; // Simple transmissive (matches CPU fv1)
-        } else {
-            HV[idx_ghost_s] = -HV[idx_interior_s]; // Reflective
+        if (geom.owns_south_ghost) {
+            int bc_idx_s = 2 * xsz + ysz - i; // LISFLOOD South index
+            int type_s = boundary_types[bc_idx_s];
+            
+            int idx_ghost_s = (ysz + 1) * pitch + i;
+            int idx_interior_s = ysz * pitch + i;
+            H[idx_ghost_s] = H[idx_interior_s];
+            HU[idx_ghost_s] = HU[idx_interior_s];
+            if (type_s == BC_FREE) {
+                HV[idx_ghost_s] = HV[idx_interior_s]; // Simple transmissive (matches CPU fv1)
+            } else {
+                HV[idx_ghost_s] = -HV[idx_interior_s]; // Reflective
+            }
         }
     }
 }
@@ -900,9 +912,9 @@ kernel void drain_nodata_cells(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
+    int j = geom.row_begin + gid.y;
     
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
     
     int idx = j * geom.pitch + i;
     float z = DEM[idx];
@@ -932,9 +944,9 @@ kernel void accumulate_outflow(
     int xsz = geom.xsz;
     int ysz = geom.ysz;
     
-    // West and East boundaries
-    if (gid < (uint)ysz) {
-        int j = gid + 1;
+    // West and East boundaries for owned rows
+    if (gid < (uint)(geom.row_end - geom.row_begin)) {
+        int j = geom.row_begin + gid;
         
         // West boundary (i=1) - outflow is NEGATIVE HU
         int bc_idx_w = 2 * xsz + ysz + (ysz - j);
@@ -956,17 +968,21 @@ kernel void accumulate_outflow(
         int i = gid + 1;
         
         // North boundary (j=1) - outflow is NEGATIVE HV
-        int bc_idx_n = i - 1;
-        if (boundary_types[bc_idx_n] == BC_FREE) {
-            float flux = -HV[1 * pitch + i] * geom.dx * dt;
-            if (flux > 0) atomic_add_float(&vol_out[0], flux);
+        if (geom.owns_north_ghost) {
+            int bc_idx_n = i - 1;
+            if (boundary_types[bc_idx_n] == BC_FREE) {
+                float flux = -HV[1 * pitch + i] * geom.dx * dt;
+                if (flux > 0) atomic_add_float(&vol_out[0], flux);
+            }
         }
         
         // South boundary (j=ysz) - outflow is POSITIVE HV
-        int bc_idx_s = xsz + ysz + (xsz - i);
-        if (boundary_types[bc_idx_s] == BC_FREE) {
-            float flux = HV[ysz * pitch + i] * geom.dx * dt;
-            if (flux > 0) atomic_add_float(&vol_out[2], flux);
+        if (geom.owns_south_ghost) {
+            int bc_idx_s = xsz + ysz + (xsz - i);
+            if (boundary_types[bc_idx_s] == BC_FREE) {
+                float flux = HV[ysz * pitch + i] * geom.dx * dt;
+                if (flux > 0) atomic_add_float(&vol_out[2], flux);
+            }
         }
     }
 }
@@ -982,9 +998,9 @@ kernel void update_max_field(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
+    int j = geom.row_begin + gid.y;
 
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
 
     int idx = j * geom.pitch + i;
     maxH[idx] = max(maxH[idx], H[idx]);
