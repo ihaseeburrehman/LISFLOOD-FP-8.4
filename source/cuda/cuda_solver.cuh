@@ -39,9 +39,19 @@ __device__ __forceinline__ bool fv1_owns_cfl_row(int j)
 	return fv1_owns_row(j) || (j == 0 && fv1_owns_north_ghost) ||
 		(j == cuda::geometry.ysz+1 && fv1_owns_south_ghost);
 }
+__device__ __forceinline__ int fv1_owned_row_begin()
+{
+	return fv1_partition_active ? fv1_row_begin : 1;
+}
+__device__ __forceinline__ int fv1_owned_row_end()
+{
+	return fv1_partition_active ? fv1_row_end : cuda::geometry.ysz + 1;
+}
 #else
 __device__ __forceinline__ bool fv1_owns_row(int) { return true; }
 __device__ __forceinline__ bool fv1_owns_cfl_row(int) { return true; }
+__device__ __forceinline__ int fv1_owned_row_begin() { return 1; }
+__device__ __forceinline__ int fv1_owned_row_end() { return cuda::geometry.ysz + 1; }
 #endif
 
 extern const dim3 block_size;
@@ -107,7 +117,9 @@ public:
 		Geometry& geometry,
 		NUMERIC_TYPE max_dt,
 		int adaptive_ts,
-		Solver<F>& solver
+		Solver<F>& solver,
+		int element_offset = 0,
+		int element_count = 0
 	);
 
 	NUMERIC_TYPE update_dt();
@@ -120,9 +132,14 @@ private:
 	NUMERIC_TYPE max_dt;
 	const Solver<F>& solver;
 	NUMERIC_TYPE* dt_field;
+	const int element_offset;
 	const int elements;
 	void* d_temp;
 	size_t bytes;
+#if defined(LISFLOOD_CUDA_MPI)
+	NUMERIC_TYPE* d_reduced_dt;
+	NUMERIC_TYPE* h_reduced_dt;
+#endif
 };
 
 

@@ -45,11 +45,11 @@ lis::cuda::DynamicRain::update
 {
 #if _NETCDF == 1
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
-	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	int global_j = cuda::fv1_owned_row_begin()
+		+ blockIdx.y*blockDim.y + threadIdx.y;
 
-	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
+	for (int j=global_j; j<cuda::fv1_owned_row_end(); j+=blockDim.y*gridDim.y)
 	{
-		if (!cuda::fv1_owns_row(j)) continue;
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
 			NUMERIC_TYPE Z = DEM[j*cuda::pitch + i];

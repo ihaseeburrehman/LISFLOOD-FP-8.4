@@ -15,12 +15,15 @@ public:
 	(
 		Geometry& geometry,
 		NUMERIC_TYPE DepthThresh,
-		int acceleration
+		int acceleration,
+		int element_offset = 0,
+		int element_count = 0
 	);
 
 	void zero_instantaneous_mass();
 
 	void accumulate_mass();
+	void accumulate_mass(NUMERIC_TYPE step_dt);
 
 	StatsEntry create_entry
 	(
@@ -53,7 +56,9 @@ private:
 	void zero_cumulative_mass();
 
 	Geometry& geometry;
+	int element_offset;
 	int elements;
+	bool distributed;
 	NUMERIC_TYPE* histogram_levels;
 	int* histogram_counts;
 	void* area_temp;

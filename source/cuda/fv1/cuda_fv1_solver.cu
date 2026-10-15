@@ -5,7 +5,6 @@
 #include <algorithm>
 #if defined(LISFLOOD_CUDA_MPI)
 #include <mpi.h>
-#include <vector>
 #endif
 
 namespace lis
@@ -18,6 +17,40 @@ namespace fv1
 #if defined(LISFLOOD_CUDA_MPI)
 namespace {
 int mpi_row_begin = 1, mpi_row_end = 1, mpi_rank = 0, mpi_size = 1;
+
+__global__ void pack_mpi_halo_rows(Flow U, int pitch, int north_row,
+		int south_row, NUMERIC_TYPE* packed)
+{
+	const int n = 3 * pitch;
+	for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+			idx < 2 * n; idx += blockDim.x * gridDim.x) {
+		const int side = idx / n;
+		const int field_idx = idx - side * n;
+		const int field = field_idx / pitch;
+		const int column = field_idx - field * pitch;
+		const int row = side == 0 ? north_row : south_row;
+		const NUMERIC_TYPE* src = field == 0 ? U.H : (field == 1 ? U.HU : U.HV);
+		packed[idx] = src[row * pitch + column];
+	}
+}
+
+__global__ void unpack_mpi_halo_rows(Flow U, int pitch, int north_halo,
+		int south_halo, bool has_north, bool has_south,
+		const NUMERIC_TYPE* packed)
+{
+	const int n = 3 * pitch;
+	for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+			idx < 2 * n; idx += blockDim.x * gridDim.x) {
+		const int side = idx / n;
+		if ((side == 0 && !has_south) || (side == 1 && !has_north)) continue;
+		const int field_idx = idx - side * n;
+		const int field = field_idx / pitch;
+		const int column = field_idx - field * pitch;
+		const int row = side == 0 ? south_halo : north_halo;
+		NUMERIC_TYPE* dst = field == 0 ? U.H : (field == 1 ? U.HU : U.HV);
+		dst[row * pitch + column] = packed[idx];
+	}
+}
 }
 
 void configure_mpi_partition(int row_begin, int row_end, int rank, int size)
@@ -44,32 +77,46 @@ void exchange_mpi_halos(Flow& U, int pitch)
 {
 	if (mpi_size <= 1) return;
 	const int n = 3 * pitch;
-	// Halo exchange is called inside the timestep loop. Reuse the host staging
-	// storage instead of allocating and freeing two vectors on every call.
-	static std::vector<NUMERIC_TYPE> send, recv;
-	if (send.size() != static_cast<size_t>(n)) send.resize(n);
-	if (recv.size() != static_cast<size_t>(n)) recv.resize(n);
-	auto pack = [&](int row) {
-		cuda::copy(send.data(), U.H + row*pitch, pitch*sizeof(NUMERIC_TYPE));
-		cuda::copy(send.data()+pitch, U.HU + row*pitch, pitch*sizeof(NUMERIC_TYPE));
-		cuda::copy(send.data()+2*pitch, U.HV + row*pitch, pitch*sizeof(NUMERIC_TYPE));
-	};
-	auto unpack = [&](int row) {
-		cuda::copy(U.H + row*pitch, recv.data(), pitch*sizeof(NUMERIC_TYPE));
-		cuda::copy(U.HU + row*pitch, recv.data()+pitch, pitch*sizeof(NUMERIC_TYPE));
-		cuda::copy(U.HV + row*pitch, recv.data()+2*pitch, pitch*sizeof(NUMERIC_TYPE));
-	};
+	static NUMERIC_TYPE* d_send = nullptr;
+	static NUMERIC_TYPE* d_recv = nullptr;
+	static NUMERIC_TYPE* h_send = nullptr;
+	static NUMERIC_TYPE* h_recv = nullptr;
+	static int allocated_values = 0;
+	if (allocated_values != 2 * n) {
+		if (d_send) checkCudaErrors(cudaFree(d_send));
+		if (d_recv) checkCudaErrors(cudaFree(d_recv));
+		if (h_send) checkCudaErrors(cudaFreeHost(h_send));
+		if (h_recv) checkCudaErrors(cudaFreeHost(h_recv));
+		checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&d_send),
+				2 * n * sizeof(NUMERIC_TYPE)));
+		checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&d_recv),
+				2 * n * sizeof(NUMERIC_TYPE)));
+		checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_send),
+				2 * n * sizeof(NUMERIC_TYPE)));
+		checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_recv),
+				2 * n * sizeof(NUMERIC_TYPE)));
+		allocated_values = 2 * n;
+	}
+	const int threads = 256;
+	const int blocks = std::min(256, (2 * n + threads - 1) / threads);
+	pack_mpi_halo_rows<<<blocks, threads>>>(U, pitch, mpi_row_begin,
+			mpi_row_end - 1, d_send);
+	const int north = mpi_rank > 0 ? mpi_rank - 1 : MPI_PROC_NULL;
+	const int south = mpi_rank + 1 < mpi_size ? mpi_rank + 1 : MPI_PROC_NULL;
+	// One transfer synchronizes the pack kernel and stages both boundary rows.
+	checkCudaErrors(cudaMemcpy(h_send, d_send, 2 * n * sizeof(NUMERIC_TYPE),
+			cudaMemcpyDeviceToHost));
 	const MPI_Datatype type = sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
-	pack(mpi_row_begin);
-	MPI_Sendrecv(send.data(), n, type, mpi_rank > 0 ? mpi_rank-1 : MPI_PROC_NULL, 42,
-		recv.data(), n, type, mpi_rank+1 < mpi_size ? mpi_rank+1 : MPI_PROC_NULL,
-		42, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-	if (mpi_rank+1 < mpi_size) unpack(mpi_row_end);
-	pack(mpi_row_end-1);
-	MPI_Sendrecv(send.data(), n, type, mpi_rank+1 < mpi_size ? mpi_rank+1 : MPI_PROC_NULL, 43,
-		recv.data(), n, type, mpi_rank > 0 ? mpi_rank-1 : MPI_PROC_NULL,
-		43, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-	if (mpi_rank > 0) unpack(mpi_row_begin-1);
+	MPI_Request requests[4];
+	MPI_Irecv(h_recv, n, type, south, 42, MPI_COMM_WORLD, &requests[0]);
+	MPI_Irecv(h_recv + n, n, type, north, 43, MPI_COMM_WORLD, &requests[1]);
+	MPI_Isend(h_send, n, type, north, 42, MPI_COMM_WORLD, &requests[2]);
+	MPI_Isend(h_send + n, n, type, south, 43, MPI_COMM_WORLD, &requests[3]);
+	MPI_Waitall(4, requests, MPI_STATUSES_IGNORE);
+	checkCudaErrors(cudaMemcpyAsync(d_recv, h_recv,
+			2 * n * sizeof(NUMERIC_TYPE), cudaMemcpyHostToDevice));
+	unpack_mpi_halo_rows<<<blocks, threads>>>(U, pitch, mpi_row_begin - 1,
+			mpi_row_end, mpi_rank > 0, mpi_rank + 1 < mpi_size, d_recv);
 }
 #endif
 
@@ -130,16 +177,20 @@ __global__ void update_dt_per_element
 )
 {
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
-	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	int row_begin = 0;
+	int row_end = cuda::geometry.ysz + 2;
+#if defined(LISFLOOD_CUDA_MPI)
+	if (cuda::fv1_partition_active) {
+		row_begin = cuda::fv1_row_begin;
+		row_end = cuda::fv1_row_end;
+	}
+#endif
+	int global_j = row_begin + blockIdx.y*blockDim.y + threadIdx.y;
 
-	for (int j=global_j; j<cuda::geometry.ysz+2; j+=blockDim.y*gridDim.y)
+	for (int j=global_j; j<row_end; j+=blockDim.y*gridDim.y)
 	{
 		for (int i=global_i; i<cuda::pitch; i+=blockDim.x*gridDim.x)
 		{
-			if (!cuda::fv1_owns_cfl_row(j)) {
-				dt[j*cuda::pitch + i] = cuda::solver_params.max_dt;
-				continue;
-			}
 			NUMERIC_TYPE H = U.H[j*cuda::pitch + i];
 
 			if (H > cuda::solver_params.DepthThresh)
@@ -173,13 +224,13 @@ void update_uniform_rain_func
 )
 {
 	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
-	int global_j = blockIdx.y * blockDim.y + threadIdx.y;
+	int global_j = cuda::fv1_owned_row_begin()
+		+ blockIdx.y * blockDim.y + threadIdx.y;
 
-	for (int j = global_j; j < cuda::geometry.ysz+2; j += blockDim.y * gridDim.y)
+	for (int j = global_j; j < cuda::fv1_owned_row_end(); j += blockDim.y * gridDim.y)
 	{
 		for (int i = global_i; i < cuda::pitch; i += blockDim.x * gridDim.x)
 		{
-			if (!cuda::fv1_owns_row(j)) continue;
 			NUMERIC_TYPE cell_rain;
 
 			cell_rain = rain_rate * cuda::dt;
@@ -278,13 +329,24 @@ apply_friction
 )
 {
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
-	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	int friction_row_begin = cuda::fv1_owned_row_begin();
+	int friction_row_end = cuda::fv1_owned_row_end();
+#if defined(LISFLOOD_CUDA_MPI)
+	// The preceding halo exchange supplies neighbour rows. Friction is a
+	// cell-local operation, so applying it to those rows avoids exchanging the
+	// same state again immediately before the flux kernels.
+	if (cuda::fv1_partition_active) {
+		if (friction_row_begin > 1) --friction_row_begin;
+		if (friction_row_end < cuda::geometry.ysz + 1) ++friction_row_end;
+	}
+#endif
+	int global_j = friction_row_begin
+		+ blockIdx.y*blockDim.y + threadIdx.y;
 
-	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
+	for (int j=global_j; j<friction_row_end; j+=blockDim.y*gridDim.y)
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
-			if (!cuda::fv1_owns_row(j)) continue;
 			NUMERIC_TYPE H = U.H[j*cuda::pitch + i];
 			NUMERIC_TYPE& HU = U.HU[j*cuda::pitch + i];
 			NUMERIC_TYPE& HV = U.HV[j*cuda::pitch + i];
@@ -373,10 +435,13 @@ update_flow_variables_x
 	__shared__ NUMERIC_TYPE Hstar[CUDA_BLOCK_SIZE_Y][CUDA_BLOCK_SIZE_X];
 
 	int global_i = blockIdx.x*(blockDim.x-1) + threadIdx.x;
-	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	const int row_begin = cuda::fv1_owned_row_begin();
+	const int row_end = cuda::fv1_owned_row_end();
+	int global_j = row_begin - 1 + blockIdx.y*blockDim.y + threadIdx.y;
 
 	int max_i = ((cuda::geometry.xsz+blockDim.x-2)/(blockDim.x-1))*(blockDim.x-1);
-	int max_j = ((cuda::geometry.ysz+blockDim.y-1)/blockDim.y)*blockDim.y;
+	int max_j = row_begin - 1
+		+ ((row_end-row_begin+blockDim.y-1)/blockDim.y)*blockDim.y;
 
 	for (int j=global_j+1; j<=max_j; j+=blockDim.y*gridDim.y)
 	{
@@ -393,7 +458,7 @@ update_flow_variables_x
 			NUMERIC_TYPE Zstar_e;
 
 			// only update flow variables if (i, j) is inside the domain
-			if (i <= cuda::geometry.xsz && j <= cuda::geometry.ysz && cuda::fv1_owns_row(j))
+			if (i <= cuda::geometry.xsz && j < row_end)
 			{
 				Zstar_e = Zstar_x[j*cuda::pitch + i];
 
@@ -426,7 +491,7 @@ update_flow_variables_x
 
 			__syncthreads();
 
-			if (threadIdx.x != 0 && i <= cuda::geometry.xsz && j <= cuda::geometry.ysz && cuda::fv1_owns_row(j))
+			if (threadIdx.x != 0 && i <= cuda::geometry.xsz && j < row_end)
 			{
 				FlowVector& F_w = F[threadIdx.y][threadIdx.x-1];
 				FlowVector U0 = Uold[j*cuda::pitch + i];
@@ -467,10 +532,15 @@ update_flow_variables_y
         __shared__ NUMERIC_TYPE Hstar[CUDA_BLOCK_SIZE_Y][CUDA_BLOCK_SIZE_X];
 
         int global_i = blockIdx.x*blockDim.x + threadIdx.x;
-        int global_j = blockIdx.y*(blockDim.y-1) + threadIdx.y;
+	const int row_begin = cuda::fv1_owned_row_begin();
+	const int row_end = cuda::fv1_owned_row_end();
+	const int interface_begin = row_begin - 1;
+	int global_j = interface_begin
+		+ blockIdx.y*(blockDim.y-1) + threadIdx.y;
 
 	int max_i = ((cuda::geometry.xsz+blockDim.x-1)/blockDim.x)*blockDim.x;
-	int max_j = ((cuda::geometry.ysz+blockDim.y-2)/(blockDim.y-1))*(blockDim.y-1);
+	int max_j = interface_begin
+		+ ((row_end-row_begin+blockDim.y-2)/(blockDim.y-1))*(blockDim.y-1);
 
 	for (int j=global_j; j<=max_j; j+=(blockDim.y-1)*gridDim.y)
 	{
@@ -603,9 +673,6 @@ lis::cuda::fv1::Flow& lis::cuda::fv1::Solver::update_flow_variables
 	if (friction)
 	{
 		apply_friction<<<grid_size, cuda::block_size>>>(Uold, manning);
-#if defined(LISFLOOD_CUDA_MPI)
-		exchange_mpi_halos(Uold, raster_pitch);
-#endif
 		update_ghost_cells();
 	}
 

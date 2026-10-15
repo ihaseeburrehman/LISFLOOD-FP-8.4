@@ -30,11 +30,16 @@ lis::cuda::StatsCollector::StatsCollector
 (
 	Geometry& geometry,
 	NUMERIC_TYPE DepthThresh,
-	int acceleration
+	int acceleration,
+	int element_offset,
+	int element_count
 )
 :
 geometry(geometry),
-elements((acceleration == 0) ? lis::GhostRaster::elements(geometry) : lis::GhostRaster::elements_H(geometry))
+element_offset(element_offset),
+elements(element_count > 0 ? element_count :
+		((acceleration == 0) ? lis::GhostRaster::elements(geometry) : lis::GhostRaster::elements_H(geometry))),
+distributed(element_count > 0)
 {
 	area_temp = nullptr;
 	volume_temp = nullptr;
@@ -81,9 +86,14 @@ lis::MassStats* lis::cuda::StatsCollector::instantaneous_mass()
 
 void lis::cuda::StatsCollector::accumulate_mass()
 {
+	accumulate_mass(cuda::dt);
+}
+
+void lis::cuda::StatsCollector::accumulate_mass(NUMERIC_TYPE step_dt)
+{
 	lis::cuda::accumulate_mass<<<1, 1>>>(d_cumulative_mass,
 			d_instantaneous_mass);
-	cumulative_time += cuda::dt;
+	cumulative_time += step_dt;
 }
 
 lis::StatsEntry lis::cuda::StatsCollector::create_entry
@@ -166,9 +176,18 @@ NUMERIC_TYPE lis::cuda::StatsCollector::area
 )
 {
 	checkCudaErrors(cub::DeviceHistogram::HistogramRange(area_temp, area_bytes,
-				H, histogram_counts, 3, histogram_levels, elements));
+				H + element_offset, histogram_counts, 3, histogram_levels, elements));
 	cuda::sync();
-	return histogram_counts[1] * geometry.dx * geometry.dy;
+	int wet_cells = histogram_counts[1];
+#if defined(LISFLOOD_CUDA_MPI)
+	if (distributed) {
+		int global_wet_cells = 0;
+		MPI_Allreduce(&wet_cells, &global_wet_cells, 1, MPI_INT, MPI_SUM,
+				MPI_COMM_WORLD);
+		wet_cells = global_wet_cells;
+	}
+#endif
+	return wet_cells * geometry.dx * geometry.dy;
 }
 
 NUMERIC_TYPE lis::cuda::StatsCollector::volume
@@ -178,11 +197,21 @@ NUMERIC_TYPE lis::cuda::StatsCollector::volume
 {
 
 	checkCudaErrors(cub::DeviceReduce::Sum(volume_temp, volume_bytes,
-				H, d_volume, elements));
+				H + element_offset, d_volume, elements));
 
 	NUMERIC_TYPE h_volume;
 
 	cuda::copy(&h_volume, d_volume, sizeof(NUMERIC_TYPE));
+
+#if defined(LISFLOOD_CUDA_MPI)
+	if (distributed) {
+		NUMERIC_TYPE global_volume = C(0.0);
+		MPI_Allreduce(&h_volume, &global_volume, 1,
+				sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE,
+				MPI_SUM, MPI_COMM_WORLD);
+		h_volume = global_volume;
+	}
+#endif
 
 	return h_volume * geometry.dx * geometry.dy;
 }

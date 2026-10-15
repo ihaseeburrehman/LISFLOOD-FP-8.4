@@ -12,6 +12,7 @@
 #include "cuda_unifiedallocator.cuh"
 #include "../rain/rain.h"
 #include "io.h"
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
 #if defined(LISFLOOD_CUDA_MPI)
@@ -24,7 +25,8 @@
 #if defined(LISFLOOD_CUDA_MPI)
 namespace {
 void gather_fv1_rows(lis::cuda::fv1::Flow& flow, const Geometry& geometry,
-		int pitch, int rank, int size)
+		int pitch, int rank, int size, bool gather_depth = true,
+		bool gather_momentum = true)
 {
 	if (size <= 1) return;
 	const int first = 1 + geometry.ysz * rank / size;
@@ -37,18 +39,24 @@ void gather_fv1_rows(lis::cuda::fv1::Flow& flow, const Geometry& geometry,
 	const MPI_Datatype type = sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
 	auto gather = [&](NUMERIC_TYPE* device) {
 		std::vector<NUMERIC_TYPE> local((last-first)*geometry.xsz);
-		std::vector<NUMERIC_TYPE> global(geometry.ysz*geometry.xsz);
+		std::vector<NUMERIC_TYPE> global;
+		if (rank == 0) global.resize(geometry.ysz*geometry.xsz);
 		for (int j=first; j<last; ++j)
 			lis::cuda::copy(local.data()+(j-first)*geometry.xsz,
 				device+j*pitch+1, geometry.xsz*sizeof(NUMERIC_TYPE));
-		MPI_Allgatherv(local.data(), local.size(), type, global.data(),
-			counts.data(), displs.data(), type, MPI_COMM_WORLD);
+		MPI_Gatherv(local.data(), local.size(), type,
+			rank == 0 ? global.data() : nullptr, counts.data(), displs.data(),
+			type, 0, MPI_COMM_WORLD);
 		if (rank == 0)
 			for (int j=1; j<=geometry.ysz; ++j)
 				lis::cuda::copy(device+j*pitch+1, global.data()+(j-1)*geometry.xsz,
 					geometry.xsz*sizeof(NUMERIC_TYPE));
 	};
-	gather(flow.H); gather(flow.HU); gather(flow.HV);
+	if (gather_depth) gather(flow.H);
+	if (gather_momentum) {
+		gather(flow.HU);
+		gather(flow.HV);
+	}
 }
 }
 #endif
@@ -114,6 +122,11 @@ void lis::cuda::fv1::Simulation::run
 	int mpi_row_end = 1 + (geometry.ysz * (mpi_rank + 1)) / mpi_size;
 	if (mpi_row_end <= mpi_row_begin) throw std::runtime_error("More MPI ranks than FV1 rows");
 	configure_mpi_partition(mpi_row_begin, mpi_row_end, mpi_rank, mpi_size);
+	// Launch only enough y blocks for this rank's stripe. The kernels stride
+	// within that stripe; the extra block supplies the overlapping FV1 face.
+	grid_size.y = std::min(128,
+		(mpi_row_end - mpi_row_begin + CUDA_BLOCK_SIZE_Y - 2)
+		/ (CUDA_BLOCK_SIZE_Y - 1) + 1);
 #endif
 	cuda::copy_to_symbol(cuda::geometry, &geometry, sizeof(Geometry));
 	cuda::copy_to_symbol(cuda::pitch, &pitch, sizeof(int));
@@ -170,10 +183,21 @@ void lis::cuda::fv1::Simulation::run
 				physical_params, grid_size));
 
 	DynamicTimestep<fv1::Flow> dynamic_dt(cuda::dt, geometry, solver.InitTstep,
-			states.adaptive_ts, *solve);
+			states.adaptive_ts, *solve
+#if defined(LISFLOOD_CUDA_MPI)
+			, mpi_row_begin * pitch, (mpi_row_end - mpi_row_begin) * pitch
+#endif
+			);
 	solver.MinTstep = solver.InitTstep;
+	NUMERIC_TYPE step_dt = C(0.0);
 
-	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
+	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration
+#if defined(LISFLOOD_CUDA_MPI)
+			, (mpi_row_begin - (mpi_rank == 0 ? 1 : 0)) * pitch,
+			(mpi_row_end - mpi_row_begin + (mpi_rank == 0 ? 1 : 0)
+			 + (mpi_rank + 1 == mpi_size ? 1 : 0)) * pitch
+#endif
+			);
 	Losses losses(filenames, states, pars, geometry, pitch, offset, verbose);
 	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
 			grid_size, pars.output_precision);
@@ -251,18 +275,18 @@ void lis::cuda::fv1::Simulation::run
 #if defined(LISFLOOD_CUDA_MPI)
 		exchange_mpi_halos(d_U, pitch);
 #endif
-		stats_collector.accumulate_mass();
+		stats_collector.accumulate_mass(step_dt);
 		stats_collector.zero_instantaneous_mass();
 		solve->update_ghost_cells();
-		dynamic_dt.update_dt();
-		solver.MinTstep = FMIN(solver.MinTstep, cuda::dt);
+		step_dt = dynamic_dt.update_dt();
+		solver.MinTstep = FMIN(solver.MinTstep, step_dt);
 
 		if (
 #if defined(LISFLOOD_CUDA_MPI)
 			mpi_rank == 0 &&
 #endif
-			verbose) printf("t=%f\tdt=%f\n", solver.t, cuda::dt);
-		solver.t += cuda::dt;
+			verbose) printf("t=%f\tdt=%f\n", solver.t, step_dt);
+		solver.t += step_dt;
 		solver.itCount++;
 
 		d_U = solve->update_flow_variables(
@@ -276,15 +300,20 @@ void lis::cuda::fv1::Simulation::run
 		{
 			losses.apply_fv1(d_U.H, d_U.HU, d_U.HV, d_DEM, solver.t, grid_size);
 		}
-		stats_collector.accumulate_mass();
+		stats_collector.accumulate_mass(step_dt);
 		max_field.update(d_U.H);
 
-		bool gathered_for_output = false;
+		bool gathered_depth = false;
+		bool gathered_full_state = false;
 		if (stats.need_to_write(solver.t))
 		{
 #if defined(LISFLOOD_CUDA_MPI)
-			gather_fv1_rows(d_U, geometry, pitch, mpi_rank, mpi_size);
-			gathered_for_output = true;
+			if (states.save_stages == ON) {
+				gather_fv1_rows(d_U, geometry, pitch, mpi_rank, mpi_size,
+						true, true);
+				gathered_depth = true;
+				gathered_full_state = true;
+			}
 			if (mpi_rank == 0) {
 #endif
 			sampler.sample(d_U.H, d_U.HU, d_U.HV, solver.t);
@@ -307,8 +336,14 @@ void lis::cuda::fv1::Simulation::run
 
 #if defined(LISFLOOD_CUDA_MPI)
 		const bool snapshot_due = solver.t >= snapshot.next_save;
-		if (snapshot_due && !gathered_for_output)
-			gather_fv1_rows(d_U, geometry, pitch, mpi_rank, mpi_size);
+		if (snapshot_due && !gathered_full_state) {
+			// Snapshot writers may need H, HU and HV. Reuse H if the mass
+			// write above already gathered it.
+			gather_fv1_rows(d_U, geometry, pitch, mpi_rank, mpi_size,
+					!gathered_depth, true);
+			gathered_depth = true;
+			gathered_full_state = true;
+		}
 		if (mpi_rank == 0)
 			snapshot.write_if_needed(d_U, solver.t, states.call_gzip);
 		else if (snapshot_due)

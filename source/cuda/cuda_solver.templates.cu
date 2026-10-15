@@ -14,14 +14,17 @@ lis::cuda::DynamicTimestep<F>::DynamicTimestep
 	Geometry& geometry,
 	NUMERIC_TYPE max_dt,
 	int adaptive_ts,
-	Solver<F>& solver
+	Solver<F>& solver,
+	int element_offset,
+	int element_count
 )
 :
 dt(dt),
 max_dt(max_dt),
 adaptive(adaptive_ts == ON),
 solver(solver),
-elements(lis::GhostRaster::elements(geometry))
+element_offset(element_offset),
+elements(element_count > 0 ? element_count : lis::GhostRaster::elements(geometry))
 {
 	if (adaptive)
 	{
@@ -35,6 +38,11 @@ elements(lis::GhostRaster::elements(geometry))
 		d_temp = malloc_device(bytes);
 
 		dt_field = cuda::GhostRaster::allocate_device(geometry);
+#if defined(LISFLOOD_CUDA_MPI)
+		d_reduced_dt = static_cast<NUMERIC_TYPE*>(malloc_device(sizeof(NUMERIC_TYPE)));
+		checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_reduced_dt),
+				sizeof(NUMERIC_TYPE)));
+#endif
 	}
 	else
 	{
@@ -79,20 +87,29 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 	if (adaptive)
 	{
 		solver.update_dt_per_element(dt_field);
-		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
-					dt_field, &dt, elements));
 #if defined(LISFLOOD_CUDA_MPI)
-		// CUB writes the reduction result into managed host-visible memory.
-		// Complete it before the CPU reads dt for the MPI global minimum.
-		cuda::sync();
+		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
+					dt_field + element_offset, d_reduced_dt, elements));
+		checkCudaErrors(cudaMemcpyAsync(h_reduced_dt, d_reduced_dt,
+				sizeof(NUMERIC_TYPE), cudaMemcpyDeviceToHost));
+		// Wait only for the default stream that produced the reduction. This
+		// avoids migrating the managed timestep to the CPU or synchronizing
+		// unrelated device work.
+		checkCudaErrors(cudaStreamSynchronize(0));
 		int mpi_initialized = 0;
 		MPI_Initialized(&mpi_initialized);
 		if (mpi_initialized) {
 			NUMERIC_TYPE global_dt;
 			MPI_Datatype type = sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
-			MPI_Allreduce(&dt, &global_dt, 1, type, MPI_MIN, MPI_COMM_WORLD);
-			dt = global_dt;
+			MPI_Allreduce(h_reduced_dt, &global_dt, 1, type, MPI_MIN, MPI_COMM_WORLD);
+			*h_reduced_dt = global_dt;
 		}
+		checkCudaErrors(cudaMemcpyToSymbolAsync(lis::cuda::dt, h_reduced_dt,
+				sizeof(NUMERIC_TYPE)));
+		return *h_reduced_dt;
+#else
+		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
+					dt_field + element_offset, &dt, elements));
 #endif
 	}
 
@@ -118,6 +135,10 @@ lis::cuda::DynamicTimestep<F>::~DynamicTimestep()
 	{
 		cuda::free_device(dt_field);
 		free_device(d_temp);
+#if defined(LISFLOOD_CUDA_MPI)
+		free_device(d_reduced_dt);
+		checkCudaErrors(cudaFreeHost(h_reduced_dt));
+#endif
 	}
 }
 
