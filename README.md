@@ -225,8 +225,11 @@ What was checked for 8.3 (details in the 8.3 paper):
 - NVIDIA Compute Sanitizer finds invalid memory accesses and shared-memory
   hazards in 8.2 and none in 8.3.
 - On a 24 h, 10.6 million-cell flood simulation on an NVIDIA A100, 8.3 needs
-  9.4 min where 8.2 (with the maximum-depth grid allocated at full size, the
-  minimum for it to run) needed 105 min. The saving depends on the grid: on a
+  63.2 min for CUDA ACC (initial time step 0.5 s); 8.2 (with the maximum-depth
+  grid allocated at full size, the minimum for it to run) needed about 105 min.
+  This was not an FV1 timing. A separate FV1 timing used the same 10.6-million-
+  cell 10 m grid for only 2 h and took 8.27 min (496 s). The saving depends on
+  the grid: on a
   grid without NoData cells it is 72 % at 0.5 million cells and 85-89 % at 2 to
   8 million, and a few seconds on small grids.
 - The Metal FV1 solver takes the same time steps as the CPU solver on the three

@@ -321,6 +321,14 @@ The job stopped before Green-Ampt. Long-duration multi-GPU parity and speedup
 are therefore not established; see the dated entry in `HANDOVER_LOCAL.md` and
 do not use the six-hour pass alone to imply 96-hour validation.
 
+These timings cannot be compared with the 8.3 large-grid benchmark: this test
+used 100 m cells (about 0.19 million raster cells) and 51,369 solver steps,
+whereas the benchmark used 10 m cells (10.64 million cells) and a much smaller
+time step. The older README also mislabeled its benchmark: archived parameter
+files show the 9.4-minute CUDA FV1 run simulated 2 h, not 24 h; the 24 h,
+63.2-minute archived run was CUDA ACC with an initial 0.5 s time step. The
+benchmark statement in `README.md` has been corrected accordingly.
+
 ### Independent Green-Ampt equation check (14 October 2026)
 
 To avoid treating either this implementation or another LISFLOOD extension as
