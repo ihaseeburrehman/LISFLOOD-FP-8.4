@@ -282,7 +282,7 @@ storage at `/perm/lux0804/LISFLOOD_versions`:
 |---|---|---|
 | `LISFLOOD-8.3` | LISFLOOD-FP 8.3 CUDA build | `LISFLOOD-8.3/output` |
 | `LISFLOOD-8.4-single` | commit `5d50b13`, the final 8.4 state before multi-GPU FV1 | `LISFLOOD-8.4-single/output` |
-| `LISFLOOD-8.4-multigpu` | commit `3be328a`, optimized and validated MPI FV1 with the `GPUs` parameter | `LISFLOOD-8.4-multigpu/output` |
+| `LISFLOOD-8.4-multigpu` | commit `24b159c`, final validated MPI FV1 optimization with the `GPUs` parameter | `LISFLOOD-8.4-multigpu/output` |
 
 All three use `/perm/lux0804/LISFLOOD_versions/input`; there are no
 private input copies inside the installations. The shared files are the 10 m
@@ -296,8 +296,9 @@ Each version directory has `source`, `build/lisflood`, `run.par`, and its own
 `output`. Reusable copies of the parameter files and layout instructions are in
 `tests_8.4/hpc_layout`. To return to 8.4 without multi-GPU support, check out
 commit `5d50b13`. The multi-GPU work began at `9c554b8`; use validated commit
-`3be328a` for the optimized implementation and the checked `GPUs 1`/`GPUs 4`
-parameter behavior.
+`24b159c` for the final optimized implementation and the checked `GPUs 1`/`GPUs 4`
+parameter behavior. Commit `3be328a` is the earlier validated implementation before
+the row-local and timestep optimizations.
 
 The installation, shared inputs, and empty per-version output directories are
 kept under `/perm`; they are not dependent on the scratch copy. A 96-hour 10 m
@@ -422,41 +423,63 @@ batch example now uses that separate 3% mass tolerance while retaining the
 `tests_8.4/cuda_fv1_mpi_alzette_10m_96h.sbatch`; compact logs and mass tables
 are archived at `/perm/lux0804/lf84/fv1_mpi_validation_10m_96h_38547028/`.
 
-### FV1 multi-GPU synchronization optimization (15 October 2026)
+### FV1 multi-GPU synchronization and decomposition optimization (15 October 2026)
 
-Profiling the 96-hour 10 m timing gap showed that the experimental MPI path
-was forcing needless host/device synchronization around every timestep. The
-solver also exchanged halos after finishing each step and again at the start
-of the next step, allocated fresh host staging vectors for every exchange,
-and performed halo/gather work even for a single MPI rank. We removed those
-redundant operations, reuse halo staging buffers, make mass-stat zeroing
-asynchronous, and avoid synchronization after ordered same-stream kernels.
-The adaptive timestep still synchronizes before MPI reads the GPU reduction.
+Commit `24b159c` is the final validated implementation. Each rank still holds a
+replicated raster allocation, but all timestep-critical FV1 kernels now launch
+only over that rank's contiguous row stripe. This includes fluxes, friction,
+rain, losses, NoData drainage, maximum depth, and the CFL field/reduction. A
+true local-only allocation would reduce memory use, but it would not remove the
+per-step global CFL agreement or halo dependency that now limit scaling.
 
-The optimized binary was rebuilt on ECMWF and rerun on the 10 m, 24-hour
-Alzette case (job 38576777). One A100 took 590 s in the solver loop / 606.28 s
-wall; four A100s took 515 s / 534.55 s wall. The four-GPU run is 11.8% faster
-than the one-GPU run (1.13x throughput). All 101 paired `.wd`, `.Qx`, `.Qy`,
-`.elev` and `.max` rasters matched exactly; the maximum scaled difference
-across 145 mass rows was `7.71e-5`, within the 3% acceptance threshold. The
-prior 24-hour test was 734.49 s on one GPU and 586.62 s on four, so this
-optimization improved the single-GPU baseline by about 17.5% and four-GPU
-time by about 8.9%; the changed baseline accordingly narrows the relative
-four-GPU gain. Reproduce with
-`tests_8.4/cuda_fv1_mpi_alzette_10m_24h.sbatch`. The paired 96-hour test also
-passed after optimization (job 38586037): one A100 took 2,157.96 s / 35.97
-min and four took 1,966.59 s / 32.78 min, an 8.9% wall-time reduction. All
-389 raster pairs matched exactly and all 577 mass rows passed the 3% limit.
-The checker took about 22 minutes because the two run directories contained
-roughly 54 GB of raster data combined. The 96-hour batch script is
-`tests_8.4/cuda_fv1_mpi_alzette_10m_96h.sbatch`.
+Halo exchange packs H, HU and HV for both neighbours on the GPU, performs one
+pinned device-to-host transfer, posts the north and south MPI operations
+concurrently, then performs one host-to-device transfer and unpacks on the GPU.
+Friction is evaluated on the already-received halo rows because it is a
+cell-local operation; this removes the former second halo exchange without
+changing the FV1 update. Mass volume and wet-area calculations reduce each
+rank's stripe to scalars and combine those scalars with MPI. Raster bands are
+gathered only for an hourly snapshot or enabled stage output.
 
-This ECMWF HPCX OpenMPI build reports that CUDA IPC, GDR-copy and CUDA-copy
-transports are unavailable, so halo payloads remain host-staged. Direct
-CUDA-aware MPI is a possible next optimization, but needs cluster support and
-separate correctness/performance validation. The 24-hour test validates this
-optimization; repeat the optimized one/four-GPU comparison for the 96-hour
-case before drawing conclusions about long-run speedup.
+The CFL minimum is reduced into normal device memory, copied to a pinned host
+scalar, combined with `MPI_Allreduce`, and copied back for the CUDA kernels.
+Host time accounting uses the returned scalar and no longer reads the managed
+CUDA timestep twice per iteration. The ECMWF build was independently checked:
+it is a `Release` build targeting A100 `sm_80`; it was not using `sm_61`. The
+example batch script requests two logical CPUs per MPI rank and binds each rank
+to a physical core.
+
+The final 24-hour, 10 m Alzette test is ECMWF job `38672520`. Four A100s took
+**5.0020 minutes wall** (283 s solver loop), versus the existing one-A100
+reference at **10.1047 minutes wall** (590 s solver loop). This is **2.02x
+throughput**, a **50.5% wall-time reduction**. All 101 hourly `.wd`, `.Qx`,
+`.Qy`, `.elev` and `.max` raster files matched exactly. Across 145 mass rows,
+the largest scaled difference was `6.17017338e-05` (0.0062%), and the scaled
+residual difference was `5.2227503e-07`; both pass the 3% acceptance limit.
+The four-GPU-only reproducer is
+`tests_8.4/cuda_fv1_mpi_alzette_10m_24h_multionly.sbatch`; it compares against
+the preserved one-GPU output instead of rerunning it.
+
+For comparison, the earlier implementation took 8.9092 minutes on four GPUs.
+Row-local work, scalar output reductions, one halo exchange, device timestep
+staging and CPU affinity therefore reduced the four-GPU wall time by 43.9%. A
+pre-timestep version of these changes took 5.4837 minutes in job `38668706`
+and also passed exact raster comparison.
+
+A direct CUDA IPC halo prototype was measured rather than assumed. It opened
+peer allocations successfully on four A100s, despite UCX reporting no CUDA IPC,
+GDR-copy or CUDA-copy transport. It took **8.8370 minutes** and was rejected;
+the direct peer copies and synchronization were slower than the batched pinned
+host path on this node. The IPC code is not in commit `24b159c`.
+
+Four GPUs cannot deliver 4x for this explicit adaptive-timestep case while
+preserving the numerical sequence. Every one of the approximately 182,000
+timesteps requires a global minimum and neighbour-halo agreement, kernel launch
+and synchronization costs do not divide by four, and hourly output remains a
+rank-0 operation. The measured 2.02x is the supported result. Reaching 3x would
+require a larger redesign, such as a persistent multi-GPU execution model that
+o longer returns to MPI/CPU every timestep; stripe-only allocation by itself
+does not remove those synchronization points.
 
 ### Independent Green-Ampt equation check (14 October 2026)
 
