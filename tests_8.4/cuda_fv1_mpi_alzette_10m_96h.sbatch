@@ -20,7 +20,7 @@ BASE=/ec/res4/scratch/lux0804/lf84/fv1_multi_gpu_src
 CASE=/ec/res4/scratch/lux0804/ai_rerun_2026/lisflood_all_models_96h
 INPUTS=$CASE/inputs_18utc
 START=$CASE/wrf1p3_afterda_18utc/results/6hr-0000.wd
-WORK=$BASE/alzette_10m_96h_gpu_compare
+WORK=$BASE/alzette_10m_96h_gpu_compare_optimized
 BIN=$BASE/build/lisflood
 mkdir -p "$WORK"
 cd "$WORK"
@@ -42,6 +42,7 @@ dynamicrainfile $INPUTS/rain_wrf1p3_afterda_96h.nc
 startfile $START
 fv1
 cuda
+GPUs $ranks
 sim_time 345600
 initial_tstep 10
 massint 600

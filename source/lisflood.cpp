@@ -274,6 +274,7 @@ int main(int argc, char *argv[])
 	SimStates.ChanMaskRead = OFF;
 	SimStates.LinkListRead = OFF;
 	SimStates.cuda = OFF;
+	SimStates.cuda_mpi_gpus = 1;
 	SimStates.fv1 = OFF;
 	SimStates.fv2 = OFF;
 	SimStates.acc_nugrid = OFF;

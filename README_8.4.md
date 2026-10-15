@@ -281,6 +281,24 @@ replicated on each rank; output snapshots are assembled across ranks. This is
 an experimental single-node path for **FV1 only**. It does not distribute
 raster memory, and host-staged halo exchange and collectives add overhead.
 
+Set the requested rank/GPU count in the parameter file after `cuda`:
+
+```text
+fv1
+cuda
+GPUs 4
+```
+
+`GPUs` is checked against the MPI process count, so it also documents and
+guards the intended launch. The parameter does not start MPI processes or
+request hardware from the scheduler: the batch allocation and launch command
+must use the same count. For example, use `#SBATCH --ntasks=4`, request four
+GPUs, and launch with `mpirun -np 4 lisflood case.par`. For one GPU, set
+`GPUs 1` and launch directly or with `mpirun -np 1`. If the counts do not
+match, FV1 stops with an error instead of silently using a different number.
+Multi-GPU operation currently applies only to CUDA FV1; the other CUDA and
+Metal solvers remain single-GPU.
+
 Use `tests_8.4/cuda_fv1_mpi_alzette.sbatch` as the ECMWF example. The allocation
 requests four A100s, and the case file must contain both `cuda` and `fv1`;
 `fv1` alone runs the CPU implementation. The example uses `mpirun` with four
@@ -371,6 +389,42 @@ batch example now uses that separate 3% mass tolerance while retaining the
 `1e-6` raster tolerance and stricter `1e-4` Qout tolerance. Reproduce with
 `tests_8.4/cuda_fv1_mpi_alzette_10m_96h.sbatch`; compact logs and mass tables
 are archived at `/perm/lux0804/lf84/fv1_mpi_validation_10m_96h_38547028/`.
+
+### FV1 multi-GPU synchronization optimization (15 October 2026)
+
+Profiling the 96-hour 10 m timing gap showed that the experimental MPI path
+was forcing needless host/device synchronization around every timestep. The
+solver also exchanged halos after finishing each step and again at the start
+of the next step, allocated fresh host staging vectors for every exchange,
+and performed halo/gather work even for a single MPI rank. We removed those
+redundant operations, reuse halo staging buffers, make mass-stat zeroing
+asynchronous, and avoid synchronization after ordered same-stream kernels.
+The adaptive timestep still synchronizes before MPI reads the GPU reduction.
+
+The optimized binary was rebuilt on ECMWF and rerun on the 10 m, 24-hour
+Alzette case (job 38576777). One A100 took 590 s in the solver loop / 606.28 s
+wall; four A100s took 515 s / 534.55 s wall. The four-GPU run is 11.8% faster
+than the one-GPU run (1.13x throughput). All 125 paired `.wd`, `.Qx`, `.Qy`,
+`.elev` and `.max` rasters matched exactly; the maximum scaled difference
+across 145 mass rows was `7.71e-5`, within the 3% acceptance threshold. The
+prior 24-hour test was 734.49 s on one GPU and 586.62 s on four, so this
+optimization improved the single-GPU baseline by about 17.5% and four-GPU
+time by about 8.9%; the changed baseline accordingly narrows the relative
+four-GPU gain. Reproduce with
+`tests_8.4/cuda_fv1_mpi_alzette_10m_24h.sbatch`. The paired 96-hour test also
+passed after optimization (job 38586037): one A100 took 2,157.96 s / 35.97
+min and four took 1,966.59 s / 32.78 min, an 8.9% wall-time reduction. All
+389 raster pairs matched exactly and all 577 mass rows passed the 3% limit.
+The checker took about 33 minutes because the two runs produced roughly 194
+GB of raster data combined. The 96-hour batch script is
+`tests_8.4/cuda_fv1_mpi_alzette_10m_96h.sbatch`.
+
+This ECMWF HPCX OpenMPI build reports that CUDA IPC, GDR-copy and CUDA-copy
+transports are unavailable, so halo payloads remain host-staged. Direct
+CUDA-aware MPI is a possible next optimization, but needs cluster support and
+separate correctness/performance validation. The 24-hour test validates this
+optimization; repeat the optimized one/four-GPU comparison for the 96-hour
+case before drawing conclusions about long-run speedup.
 
 ### Independent Green-Ampt equation check (14 October 2026)
 

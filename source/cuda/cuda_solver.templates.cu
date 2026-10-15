@@ -82,6 +82,8 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
 					dt_field, &dt, elements));
 #if defined(LISFLOOD_CUDA_MPI)
+		// CUB writes the reduction result into managed host-visible memory.
+		// Complete it before the CPU reads dt for the MPI global minimum.
 		cuda::sync();
 		int mpi_initialized = 0;
 		MPI_Initialized(&mpi_initialized);
@@ -93,7 +95,6 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 		}
 #endif
 	}
-	cuda::sync();
 
 	return dt;
 }

@@ -42,8 +42,13 @@ void configure_mpi_partition(int row_begin, int row_end, int rank, int size)
 
 void exchange_mpi_halos(Flow& U, int pitch)
 {
+	if (mpi_size <= 1) return;
 	const int n = 3 * pitch;
-	std::vector<NUMERIC_TYPE> send(n), recv(n);
+	// Halo exchange is called inside the timestep loop. Reuse the host staging
+	// storage instead of allocating and freeing two vectors on every call.
+	static std::vector<NUMERIC_TYPE> send, recv;
+	if (send.size() != static_cast<size_t>(n)) send.resize(n);
+	if (recv.size() != static_cast<size_t>(n)) recv.resize(n);
 	auto pack = [&](int row) {
 		cuda::copy(send.data(), U.H + row*pitch, pitch*sizeof(NUMERIC_TYPE));
 		cuda::copy(send.data()+pitch, U.HU + row*pitch, pitch*sizeof(NUMERIC_TYPE));
@@ -599,7 +604,6 @@ lis::cuda::fv1::Flow& lis::cuda::fv1::Solver::update_flow_variables
 	{
 		apply_friction<<<grid_size, cuda::block_size>>>(Uold, manning);
 #if defined(LISFLOOD_CUDA_MPI)
-		cuda::sync();
 		exchange_mpi_halos(Uold, raster_pitch);
 #endif
 		update_ghost_cells();

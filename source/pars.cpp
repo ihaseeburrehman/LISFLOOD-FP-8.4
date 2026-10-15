@@ -990,6 +990,16 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 		if (verbose == ON) printf("GPU enabled\n");
         return;
 	}
+	if (read_integer_param(param_name, line_number, param_value_ptr, "GPUs",
+			&Statesptr->cuda_mpi_gpus, verbose, mode))
+	{
+		if (Statesptr->cuda_mpi_gpus < 1)
+		{
+			printf("ERROR: GPUs must be a positive integer.\n");
+			exit(EXIT_FAILURE);
+		}
+		return;
+	}
 
 	if (read_empty_param(param_name, line_number, param_value_ptr, "limitslopes", verbose, mode))
     {
@@ -1091,6 +1101,19 @@ void ReadCommandLine(int argc, char *argv[], Fnames *Fnameptr, States *Statesptr
 
 void CheckParams(Fnames *Fnameptr, States *Statesptr, Pars *Parptr, Solver *Solverptr, int verbose)
 {
+	if (Statesptr->cuda_mpi_gpus > 1 &&
+		(Statesptr->cuda != ON || Statesptr->fv1 != ON))
+	{
+		printf("ERROR: GPUs greater than 1 is currently supported only for CUDA FV1 (use both 'cuda' and 'fv1').\n");
+		exit(EXIT_FAILURE);
+	}
+#if !defined(LISFLOOD_CUDA_MPI)
+	if (Statesptr->cuda_mpi_gpus > 1)
+	{
+		printf("ERROR: This build has no CUDA MPI multi-GPU support; rebuild with -DLISFLOOD_ENABLE_CUDA_MPI=ON.\n");
+		exit(EXIT_FAILURE);
+	}
+#endif
 	// do some basic checks to warn user of option conflicts
 	if (Statesptr->output_params.ascii_out == OFF &&
 		Statesptr->output_params.binary_out == OFF &&

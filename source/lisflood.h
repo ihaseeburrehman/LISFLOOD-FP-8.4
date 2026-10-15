@@ -654,6 +654,7 @@ struct States{
 	int maxint;
 	int SGCd8; //PFU flag to choose d8 directions instead of d4 in the sub grid channels
 	int cuda;
+	int cuda_mpi_gpus; // requested CUDA FV1 MPI ranks/GPUs; defaults to one
 	int fv1;
 	int fv2;
 	int dg2;

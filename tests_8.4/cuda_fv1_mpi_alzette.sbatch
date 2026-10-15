@@ -36,6 +36,7 @@ manningfile data/manning_100m.asc
 dynamicrainfile data/rain_100m.nc
 bcifile Border.bci
 cuda
+GPUs 1
 resroot r
 dirroot $run_name
 fv1
@@ -64,7 +65,8 @@ run_pair() {
   local one="single_${loss_name}" four="multi_${loss_name}"
   mkdir -p "$WORK/$one" "$WORK/$four"
   make_par "$one" "$loss_name"
-  sed "s/^dirroot $one$/dirroot $four/" "$one.par" > "$four.par"
+  sed -e "s/^dirroot $one$/dirroot $four/" -e 's/^GPUs 1$/GPUs 4/' \
+    "$one.par" > "$four.par"
   mpirun --bind-to none -np 1 \
     "$BIN" "$one.par" > "$one.log" 2>&1
   mpirun --bind-to none -np 4 \

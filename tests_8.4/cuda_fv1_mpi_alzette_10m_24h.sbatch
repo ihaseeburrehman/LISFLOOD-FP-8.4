@@ -17,7 +17,7 @@ module load cuda/12.6 hpcx-openmpi/2.14.0-cuda netcdf4/4.9.3 python3
 
 BASE=/ec/res4/scratch/lux0804/lf84/fv1_multi_gpu_src
 CASE=/ec/res4/scratch/lux0804/metal_vs_cuda_10m_24h
-WORK=$BASE/alzette_10m_24h_gpu_compare
+WORK=$BASE/alzette_10m_24h_gpu_compare_optimized
 BIN=$BASE/build/lisflood
 mkdir -p "$WORK"
 cd "$WORK"
@@ -37,6 +37,7 @@ dynamicrainfile $CASE/rain_wrf1p3_24h_from_14jul18.nc
 startfile /ec/res4/scratch/lux0804/ai_rerun_2026/lisflood_all_models_96h/wrf1p3_afterda_18utc/results/6hr-0004.wd
 fv1
 cuda
+GPUs $ranks
 sim_time 86400
 initial_tstep 10
 massint 600

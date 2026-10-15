@@ -26,6 +26,7 @@ namespace {
 void gather_fv1_rows(lis::cuda::fv1::Flow& flow, const Geometry& geometry,
 		int pitch, int rank, int size)
 {
+	if (size <= 1) return;
 	const int first = 1 + geometry.ysz * rank / size;
 	const int last = 1 + geometry.ysz * (rank + 1) / size;
 	std::vector<int> counts(size), displs(size);
@@ -69,9 +70,22 @@ void lis::cuda::fv1::Simulation::run
 	int mpi_rank = 0, mpi_size = 1;
 	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
 	MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+	if (mpi_size != states.cuda_mpi_gpus) {
+		fprintf(stderr,
+			"ERROR: parameter GPUs %d requires launching exactly %d MPI ranks; current launch has %d. Example: mpirun -np %d lisflood case.par\n",
+			states.cuda_mpi_gpus, states.cuda_mpi_gpus, mpi_size,
+			states.cuda_mpi_gpus);
+		MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+	}
 	int visible_gpus = 0;
 	checkCudaErrors(cudaGetDeviceCount(&visible_gpus));
 	if (visible_gpus < 1) throw std::runtime_error("No CUDA device visible to MPI rank");
+	if (mpi_size > visible_gpus) {
+		fprintf(stderr,
+			"ERROR: requested %d CUDA FV1 ranks but this MPI launch exposes only %d GPU(s) per rank.\n",
+			mpi_size, visible_gpus);
+		MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+	}
 	const int device = mpi_rank % visible_gpus;
 	checkCudaErrors(cudaSetDevice(device));
 	cudaDeviceProp device_properties{};
@@ -235,7 +249,6 @@ void lis::cuda::fv1::Simulation::run
 		cuda::Boundary::update_point_sources(d_U.H, DEM,
 				stats_collector.instantaneous_mass());
 #if defined(LISFLOOD_CUDA_MPI)
-		cuda::sync();
 		exchange_mpi_halos(d_U, pitch);
 #endif
 		stats_collector.accumulate_mass();
@@ -254,9 +267,6 @@ void lis::cuda::fv1::Simulation::run
 
 		d_U = solve->update_flow_variables(
 				stats_collector.instantaneous_mass());
-#if defined(LISFLOOD_CUDA_MPI)
-		cuda::sync();
-#endif
 		if (pars.drain_nodata)
 		{
 			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM,
@@ -266,10 +276,6 @@ void lis::cuda::fv1::Simulation::run
 		{
 			losses.apply_fv1(d_U.H, d_U.HU, d_U.HV, d_DEM, solver.t, grid_size);
 		}
-#if defined(LISFLOOD_CUDA_MPI)
-		cuda::sync();
-		exchange_mpi_halos(d_U, pitch);
-#endif
 		stats_collector.accumulate_mass();
 		max_field.update(d_U.H);
 
@@ -286,7 +292,6 @@ void lis::cuda::fv1::Simulation::run
 			}
 #endif
 			solve->zero_ghost_cells();
-			cuda::sync();
 
 			if (losses.enabled())
 			{

@@ -70,8 +70,8 @@ elements((acceleration == 0) ? lis::GhostRaster::elements(geometry) : lis::Ghost
 
 void lis::cuda::StatsCollector::zero_instantaneous_mass()
 {
-	MassStats temp = {};
-	cuda::copy(d_instantaneous_mass, &temp, sizeof(MassStats));
+	checkCudaErrors(cudaMemsetAsync(d_instantaneous_mass, 0,
+			sizeof(MassStats)));
 }
 
 lis::MassStats* lis::cuda::StatsCollector::instantaneous_mass()
@@ -83,7 +83,6 @@ void lis::cuda::StatsCollector::accumulate_mass()
 {
 	lis::cuda::accumulate_mass<<<1, 1>>>(d_cumulative_mass,
 			d_instantaneous_mass);
-	cuda::sync();
 	cumulative_time += cuda::dt;
 }
 
