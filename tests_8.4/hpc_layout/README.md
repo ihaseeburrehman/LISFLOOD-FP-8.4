@@ -2,7 +2,7 @@
 
 The curated installation root is:
 
-`/ec/res4/scratch/lux0804/LISFLOOD_versions`
+`/perm/lux0804/LISFLOOD_versions`
 
 It contains one shared `input` directory and three independent installations:
 
@@ -12,6 +12,9 @@ It contains one shared `input` directory and three independent installations:
 
 Each installation contains `source`, `build/lisflood`, `run.par`, and `output`.
 All three `run.par` files use the same files in the top-level `input` directory.
+The curated tree is stored on ECMWF permanent storage so it is not subject to
+scratch purging. Large disposable experiment outputs can still be directed to
+scratch by changing only `dirroot` in a copied parameter file.
 The time-consistent initial state available on HPC is `13_july_18hr.wd`; the
 96-hour WRF rainfall also begins at 18:00 UTC on 13 July 2021.
 

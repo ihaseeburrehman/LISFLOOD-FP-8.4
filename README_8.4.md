@@ -275,8 +275,8 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 
 #### Clean ECMWF version layout
 
-The minimal comparison layout is installed at
-`/ec/res4/scratch/lux0804/LISFLOOD_versions`:
+The minimal comparison layout is installed in purge-safe ECMWF permanent
+storage at `/perm/lux0804/LISFLOOD_versions`:
 
 | Directory | Source version | Output directory |
 |---|---|---|
@@ -284,7 +284,7 @@ The minimal comparison layout is installed at
 | `LISFLOOD-8.4-single` | commit `5d50b13`, the final 8.4 state before multi-GPU FV1 | `LISFLOOD-8.4-single/output` |
 | `LISFLOOD-8.4-multigpu` | commit `3be328a`, optimized and validated MPI FV1 with the `GPUs` parameter | `LISFLOOD-8.4-multigpu/output` |
 
-All three use `/ec/res4/scratch/lux0804/LISFLOOD_versions/input`; there are no
+All three use `/perm/lux0804/LISFLOOD_versions/input`; there are no
 private input copies inside the installations. The shared files are the 10 m
 DEM and Manning raster, `Border.bci`, the 96-hour WRF rainfall, and
 `13_july_18hr.wd`. No file called `18_july_18hr.wd` was present in scratch or
@@ -298,6 +298,12 @@ Each version directory has `source`, `build/lisflood`, `run.par`, and its own
 commit `5d50b13`. The multi-GPU work began at `9c554b8`; use validated commit
 `3be328a` for the optimized implementation and the checked `GPUs 1`/`GPUs 4`
 parameter behavior.
+
+The installation, shared inputs, and empty per-version output directories are
+kept under `/perm`; they are not dependent on the scratch copy. A 96-hour 10 m
+run can produce about 27 GB per configuration, so for disposable benchmarks it
+is reasonable to copy `run.par` and point only `dirroot` back to scratch while
+leaving the executable and inputs in permanent storage.
 
 CUDA FV1 can run with MPI ranks on separate NVIDIA GPUs when configured with
 `-DLISFLOOD_ENABLE_CUDA_MPI=ON`. The option is off by default. Each rank owns
