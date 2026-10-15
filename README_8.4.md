@@ -312,6 +312,15 @@ exchange. `MPI_Finalize` is called when FV1 initializes MPI itself. The Alzette
 regression covers dynamic rainfall and Green-Ampt; other boundary/source and
 loss combinations still need dedicated multi-GPU tests before broader claims.
 
+A 96-hour extension was run on 15 October (ECMWF job 38522270). For the
+no-loss case, every hourly raster still matched exactly, but mass diagnostics
+diverged after the early outputs (including wet area and discharge totals),
+and the strict mass checker failed. The four-GPU run took 67.02 s wall / 65 s
+solver loop versus 34.63 s / 32 s on one GPU, so it was slower on this basin.
+The job stopped before Green-Ampt. Long-duration multi-GPU parity and speedup
+are therefore not established; see the dated entry in `HANDOVER_LOCAL.md` and
+do not use the six-hour pass alone to imply 96-hour validation.
+
 ### Independent Green-Ampt equation check (14 October 2026)
 
 To avoid treating either this implementation or another LISFLOOD extension as
