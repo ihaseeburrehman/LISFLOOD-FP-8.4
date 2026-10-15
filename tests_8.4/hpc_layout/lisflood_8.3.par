@@ -1,0 +1,16 @@
+resroot 1hr
+dirroot /ec/res4/scratch/lux0804/LISFLOOD_versions/LISFLOOD-8.3/output
+DEMfile /ec/res4/scratch/lux0804/LISFLOOD_versions/input/dem_10m.asc
+manningfile /ec/res4/scratch/lux0804/LISFLOOD_versions/input/manning_10m.asc
+dynamicrainfile /ec/res4/scratch/lux0804/LISFLOOD_versions/input/rain_wrf1p3_96h.nc
+startfile /ec/res4/scratch/lux0804/LISFLOOD_versions/input/13_july_18hr.wd
+fv1
+cuda
+sim_time 345600
+initial_tstep 10
+massint 600
+saveint 3600
+bcifile /ec/res4/scratch/lux0804/LISFLOOD_versions/input/Border.bci
+nodata_elevation -9999
+drain_nodata
+qoutput

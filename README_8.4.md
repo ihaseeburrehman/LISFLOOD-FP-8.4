@@ -273,6 +273,32 @@ warning in `source/lisflood.cpp`. `git diff 387f829` shows every change.
 
 ### Experimental multi-GPU CUDA FV1 (14 October 2026)
 
+#### Clean ECMWF version layout
+
+The minimal comparison layout is installed at
+`/ec/res4/scratch/lux0804/LISFLOOD_versions`:
+
+| Directory | Source version | Output directory |
+|---|---|---|
+| `LISFLOOD-8.3` | LISFLOOD-FP 8.3 CUDA build | `LISFLOOD-8.3/output` |
+| `LISFLOOD-8.4-single` | commit `5d50b13`, the final 8.4 state before multi-GPU FV1 | `LISFLOOD-8.4-single/output` |
+| `LISFLOOD-8.4-multigpu` | commit `3be328a`, optimized and validated MPI FV1 with the `GPUs` parameter | `LISFLOOD-8.4-multigpu/output` |
+
+All three use `/ec/res4/scratch/lux0804/LISFLOOD_versions/input`; there are no
+private input copies inside the installations. The shared files are the 10 m
+DEM and Manning raster, `Border.bci`, the 96-hour WRF rainfall, and
+`13_july_18hr.wd`. No file called `18_july_18hr.wd` was present in scratch or
+permanent storage when the layout was created. `13_july_18hr.wd` is consistent
+with the rainfall window, which begins at 18:00 UTC on 13 July 2021; it replaces
+the earlier, opaque `6hr-0000.wd` path in the supplied parameter files.
+
+Each version directory has `source`, `build/lisflood`, `run.par`, and its own
+`output`. Reusable copies of the parameter files and layout instructions are in
+`tests_8.4/hpc_layout`. To return to 8.4 without multi-GPU support, check out
+commit `5d50b13`. The multi-GPU work began at `9c554b8`; use validated commit
+`3be328a` for the optimized implementation and the checked `GPUs 1`/`GPUs 4`
+parameter behavior.
+
 CUDA FV1 can run with MPI ranks on separate NVIDIA GPUs when configured with
 `-DLISFLOOD_ENABLE_CUDA_MPI=ON`. The option is off by default. Each rank owns
 a contiguous band of raster rows, updates that band on its assigned CUDA GPU,
@@ -404,7 +430,7 @@ The adaptive timestep still synchronizes before MPI reads the GPU reduction.
 The optimized binary was rebuilt on ECMWF and rerun on the 10 m, 24-hour
 Alzette case (job 38576777). One A100 took 590 s in the solver loop / 606.28 s
 wall; four A100s took 515 s / 534.55 s wall. The four-GPU run is 11.8% faster
-than the one-GPU run (1.13x throughput). All 125 paired `.wd`, `.Qx`, `.Qy`,
+than the one-GPU run (1.13x throughput). All 101 paired `.wd`, `.Qx`, `.Qy`,
 `.elev` and `.max` rasters matched exactly; the maximum scaled difference
 across 145 mass rows was `7.71e-5`, within the 3% acceptance threshold. The
 prior 24-hour test was 734.49 s on one GPU and 586.62 s on four, so this
@@ -415,8 +441,8 @@ four-GPU gain. Reproduce with
 passed after optimization (job 38586037): one A100 took 2,157.96 s / 35.97
 min and four took 1,966.59 s / 32.78 min, an 8.9% wall-time reduction. All
 389 raster pairs matched exactly and all 577 mass rows passed the 3% limit.
-The checker took about 33 minutes because the two runs produced roughly 194
-GB of raster data combined. The 96-hour batch script is
+The checker took about 22 minutes because the two run directories contained
+roughly 54 GB of raster data combined. The 96-hour batch script is
 `tests_8.4/cuda_fv1_mpi_alzette_10m_96h.sbatch`.
 
 This ECMWF HPCX OpenMPI build reports that CUDA IPC, GDR-copy and CUDA-copy
