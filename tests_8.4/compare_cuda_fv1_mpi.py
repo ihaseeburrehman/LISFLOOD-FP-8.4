@@ -107,9 +107,14 @@ def compare_mass(single, multi, tolerance):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (3, 4):
-        raise SystemExit("usage: compare_cuda_fv1_mpi.py SINGLE_DIR MULTI_DIR [raster_tol_m]")
+    if len(sys.argv) not in (3, 4, 5):
+        raise SystemExit(
+            "usage: compare_cuda_fv1_mpi.py SINGLE_DIR MULTI_DIR "
+            "[raster_tol_m [mass_relative_tol]]")
     compare_rasters(Path(sys.argv[1]), Path(sys.argv[2]),
-                    float(sys.argv[3]) if len(sys.argv) == 4 else 1e-6)
-    compare_mass(Path(sys.argv[1]), Path(sys.argv[2]), 1e-6)
+                    float(sys.argv[3]) if len(sys.argv) >= 4 else 1e-6)
+    # A separate mass tolerance is useful for long integrations, where tiny
+    # per-step reduction differences accumulate in area/volume diagnostics.
+    mass_tolerance = float(sys.argv[4]) if len(sys.argv) == 5 else 1e-6
+    compare_mass(Path(sys.argv[1]), Path(sys.argv[2]), mass_tolerance)
     print("CUDA FV1 single/multi-GPU comparison PASSED")

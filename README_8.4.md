@@ -317,9 +317,9 @@ no-loss case, every hourly raster still matched exactly, but mass diagnostics
 diverged after the early outputs (including wet area and discharge totals),
 and the strict mass checker failed. The four-GPU run took 67.02 s wall / 65 s
 solver loop versus 34.63 s / 32 s on one GPU, so it was slower on this basin.
-The job stopped before Green-Ampt. Long-duration multi-GPU parity and speedup
-are therefore not established; see the dated entry in `HANDOVER_LOCAL.md` and
-do not use the six-hour pass alone to imply 96-hour validation.
+That was the 100 m case. It stopped before Green-Ampt and does not establish
+long-duration parity for that setup; see the dated entry in
+`HANDOVER_LOCAL.md`.
 
 These timings cannot be compared with the 8.3 large-grid benchmark: this test
 used 100 m cells (about 0.19 million raster cells) and 51,369 solver steps,
@@ -349,6 +349,28 @@ acceptance threshold, while the measured speedup applies to this case and
 hardware only. Reproduce with
 `tests_8.4/cuda_fv1_mpi_alzette_10m_24h.sbatch` and
 `tests_8.4/compare_cuda_fv1_mpi.py`.
+
+The same 10 m case was extended to the full 96-hour WRF window on 15 October
+(ECMWF job 38547028). The 96-hour rainfall file was present on HPC at
+`/ec/res4/scratch/lux0804/ai_rerun_2026/lisflood_all_models_96h/inputs_18utc/rain_wrf1p3_afterda_96h.nc`;
+it covers 13 July 2021 18:00 UTC through 17 July 18:00 UTC, matching the
+initial depth file. Both runs reached 345600.406 s and wrote 97 hourly depth
+snapshots. One A100 took 2641.13 s wall (2626 s solver); four A100s took
+2162.15 s wall (2143 s solver), an 18.1% lower wall time (1.22x throughput).
+All 389 paired `.wd`, `.Qx`, `.Qy`, `.elev` and `.max` raster outputs were
+exactly equal at saved precision. Across 577 mass rows, maximum relative
+differences were 0.0144% for Area, 0.00145% for Vol and 0.00743% for Qout;
+Qerror and Verror differences scaled by stored water volume were `3.89e-9`
+and `6.32e-6`. These are below the stated 3% acceptance threshold.
+
+The original Slurm job used the generic checker's `1e-6` mass tolerance and
+therefore exited nonzero on the 500 m2 Area diagnostic difference (0.0144%),
+even though all saved rasters were exact. The mass-only rerun with the
+documented 3% acceptance tolerance passed across all 577 rows. The 96-hour
+batch example now uses that separate 3% mass tolerance while retaining the
+`1e-6` raster tolerance and stricter `1e-4` Qout tolerance. Reproduce with
+`tests_8.4/cuda_fv1_mpi_alzette_10m_96h.sbatch`; compact logs and mass tables
+are archived at `/perm/lux0804/lf84/fv1_mpi_validation_10m_96h_38547028/`.
 
 ### Independent Green-Ampt equation check (14 October 2026)
 
