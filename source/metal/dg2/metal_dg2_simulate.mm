@@ -1526,9 +1526,8 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
 
         update_mass_stats(&states, &pars, &solver, &boundCs, &arrays);
         write_mass_stats(files, &pars, &solver, &boundCs);
-      } else {
-        pars.MassTotal += pars.MassInt;
       }
+      pars.MassTotal += pars.MassInt;
     }
 
     // Solution output
@@ -1538,10 +1537,9 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
         if (states.voutput == ON) update_velocity(&pars, &solver, &arrays);
         write_solution(&filenames, &states, &pars, &solver, &arrays);
-      } else {
-        pars.SaveTotal += pars.SaveInt;
         pars.SaveNo += 1;
       }
+      pars.SaveTotal += pars.SaveInt;
     }
   }
 

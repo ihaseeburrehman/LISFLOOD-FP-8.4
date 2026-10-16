@@ -1197,6 +1197,14 @@ struct SimulatorImpl {
 
     NUMERIC_TYPE adaptive_dt = computeTimestepFv2();
 
+#if defined(LISFLOOD_METAL_MPI)
+    if (mpi_size > 1) {
+      float dt_f = (float)adaptive_dt;
+      MPI_Allreduce(MPI_IN_PLACE, &dt_f, 1, MPI_FLOAT, MPI_MIN, MPI_COMM_WORLD);
+      adaptive_dt = (NUMERIC_TYPE)dt_f;
+    }
+#endif
+
     solverParams.dt = (float)adaptive_dt;
 
     // CRITICAL: Update solver->Tstep so BCs() uses the correct timestep
@@ -1736,9 +1744,8 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
 
         update_mass_stats(&states, &pars, &solver, &boundCs, &arrays);
         write_mass_stats(files, &pars, &solver, &boundCs);
-      } else {
-        pars.MassTotal += pars.MassInt;
       }
+      pars.MassTotal += pars.MassInt;
     }
 
     // Solution output
@@ -1750,10 +1757,9 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
           update_velocity(&pars, &solver, &arrays);
         }
         write_solution(&filenames, &states, &pars, &solver, &arrays);
-      } else {
-        pars.SaveTotal += pars.SaveInt;
         pars.SaveNo += 1;
       }
+      pars.SaveTotal += pars.SaveInt;
     }
   }
 
