@@ -159,6 +159,9 @@ if(METAL_FRAMEWORK AND FOUNDATION_FRAMEWORK)
         find_package(MPI REQUIRED COMPONENTS CXX)
         target_link_libraries(lisflood-metal PUBLIC MPI::MPI_CXX)
         target_compile_definitions(lisflood-metal PUBLIC LISFLOOD_METAL_MPI=1)
+        # Use -I (not -isystem) so MPICH headers beat any Open MPI installed in
+        # the compiler's implicit search path (e.g. /opt/homebrew/include).
+        target_include_directories(lisflood-metal BEFORE PRIVATE ${MPI_CXX_INCLUDE_DIRS})
     endif()
 
     set(METAL_ENABLED TRUE PARENT_SCOPE)
