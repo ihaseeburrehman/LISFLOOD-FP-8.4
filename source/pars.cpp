@@ -1101,10 +1101,16 @@ void ReadCommandLine(int argc, char *argv[], Fnames *Fnameptr, States *Statesptr
 
 void CheckParams(Fnames *Fnameptr, States *Statesptr, Pars *Parptr, Solver *Solverptr, int verbose)
 {
-	if (Statesptr->cuda_mpi_gpus > 1 &&
-		(Statesptr->cuda != ON || Statesptr->fv1 != ON))
+	if (Statesptr->cuda_mpi_gpus > 1 && Statesptr->cuda != ON)
 	{
-		printf("ERROR: GPUs greater than 1 is currently supported only for CUDA/Metal FV1 (use both 'cuda'/'metal' and 'fv1').\n");
+		printf("ERROR: GPUs greater than 1 requires the 'cuda' or 'metal' keyword.\n");
+		exit(EXIT_FAILURE);
+	}
+	if (Statesptr->cuda_mpi_gpus > 1 && Statesptr->cuda == ON &&
+		Statesptr->fv1 != ON && Statesptr->fv2 != ON && Statesptr->dg2 != ON)
+	{
+		printf("ERROR: GPUs greater than 1 is supported for FV1, FV2, and DG2. "
+		       "ACC does not support multi-GPU (staggered Qx/Qy grid prevents row decomposition).\n");
 		exit(EXIT_FAILURE);
 	}
 #if !defined(LISFLOOD_CUDA_MPI) && !defined(LISFLOOD_METAL_MPI)

@@ -51,12 +51,8 @@ int main(int argc, char *argv[])
 	ReadConfiguration(argc, argv, Fnameptr, Statesptr, Parptr, Solverptr,
 			verbose);
 
-	char startfilename[256];
-	strcpy(startfilename, Fnameptr->startfilename);
-	strcat(startfilename, ".raw");
-
 	NUMERIC_TYPE no_data_value = NULLVAL;
-	FILE *fp = LoadDomainGeometry(startfilename, Parptr, verbose, no_data_value);
+	FILE *fp = LoadDomainGeometry(Fnameptr->startfilename, Parptr, verbose, no_data_value);
 	NUMERIC_TYPE *rawdem;
 	rawdem = memory_allocate_zero_numeric_legacy(Parptr->xsz*Parptr->ysz);
 	LoadDEMData(Parptr, rawdem, fp, no_data_value);
