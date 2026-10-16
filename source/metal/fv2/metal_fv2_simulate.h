@@ -32,7 +32,8 @@ struct Flow {
 class Simulator {
 public:
   Simulator(Fnames &filenames, Pars &pars, Solver &solver, Arrays &arrays,
-            States &states, BoundCs &boundCs, int verbose);
+            States &states, BoundCs &boundCs, int verbose,
+            int rank = 0, int size = 1, int r_begin = 1, int r_end = 0);
 
   ~Simulator();
 
@@ -48,6 +49,13 @@ public:
 
   // Copy the running maximum depth field back to CPU (for the .max output)
   void copy_max_to_host(NUMERIC_TYPE *maxH);
+
+  // Gather distributed rows to rank 0 before host copy / output
+  void gather_rows();
+
+  // MPI rank and size accessors
+  int get_rank() const;
+  int get_size() const;
 
   // Get current simulation time
   NUMERIC_TYPE get_time() const;

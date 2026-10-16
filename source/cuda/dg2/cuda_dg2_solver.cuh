@@ -3,6 +3,9 @@
 #include "cuda_dg2_flow.cuh"
 #include "cuda_dg2_slope_limit.cuh"
 #include "cuda_solver.cuh"
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#endif
 
 namespace lis
 {
@@ -45,6 +48,7 @@ public:
 	);
 
 	Flow& d_U();
+	Flow& d_Uint();
 
 	void update_dt_per_element
 	(
@@ -86,3 +90,11 @@ private:
 }
 }
 }
+
+#if defined(LISFLOOD_CUDA_MPI)
+namespace lis { namespace cuda { namespace dg2 {
+void configure_mpi_partition(int row_begin, int row_end, int rank, int size, int pitch);
+void exchange_mpi_halos(Flow& U, int pitch);
+void gather_dg2_rows(Flow& U, const Geometry& geometry, int pitch, int rank, int size);
+}}}
+#endif

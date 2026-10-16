@@ -16,6 +16,9 @@
 #include <ctime>
 #include "stats.h"
 #include "../../rain/Rainfall_uniform.h"
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#endif
 
 //#include "../acc_nugrid/CHECK_CUDA_ERROR.cuh" // use for debug
 
@@ -28,6 +31,14 @@ void lis::cuda::acc::Simulation::run
 	int verbose
 )
 {
+#if defined(LISFLOOD_CUDA_MPI)
+	if (states.cuda_mpi_gpus > 1) {
+		fprintf(stderr,
+			"ERROR: ACC solver does not support multi-GPU (staggered Qx/Qy grid "
+			"prevents row decomposition). Use GPUs=1 or choose FV1/FV2/DG2.\n");
+		MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+	}
+#endif
 	if (verbose) print_device_info();
 	dim3 grid_size(128, 128);
 

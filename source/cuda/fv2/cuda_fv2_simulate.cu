@@ -15,8 +15,13 @@
 #include "cuda_unifiedallocator.cuh"
 #include "../rain/rain.h"
 #include "io.h"
+#include <algorithm>
 #include <cstdio>
 #include <ctime>
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#include <stdexcept>
+#endif
 
 void lis::cuda::fv2::Simulation::run
 (
@@ -27,7 +32,37 @@ void lis::cuda::fv2::Simulation::run
 	int verbose
 )
 {
-	if (verbose) print_device_info();
+#if defined(LISFLOOD_CUDA_MPI)
+	int initialized = 0;
+	MPI_Initialized(&initialized);
+	const bool initialized_here = !initialized;
+	if (initialized_here) MPI_Init(nullptr, nullptr);
+	int mpi_rank = 0, mpi_size = 1;
+	MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+	MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+	if (mpi_size != states.cuda_mpi_gpus) {
+		fprintf(stderr,
+			"ERROR: parameter GPUs %d requires launching exactly %d MPI ranks; "
+			"current launch has %d. Example: mpirun -np %d lisflood case.par\n",
+			states.cuda_mpi_gpus, states.cuda_mpi_gpus, mpi_size,
+			states.cuda_mpi_gpus);
+		MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+	}
+	int visible_gpus = 0;
+	checkCudaErrors(cudaGetDeviceCount(&visible_gpus));
+	if (visible_gpus < 1) throw std::runtime_error("No CUDA device visible to MPI rank");
+	const int device = mpi_rank % visible_gpus;
+	checkCudaErrors(cudaSetDevice(device));
+	cudaDeviceProp device_properties{};
+	checkCudaErrors(cudaGetDeviceProperties(&device_properties, device));
+	printf("CUDA FV2 MPI rank %d/%d bound to GPU %d: %s\n",
+		mpi_rank, mpi_size, device, device_properties.name);
+#endif
+	if (
+#if defined(LISFLOOD_CUDA_MPI)
+		mpi_rank == 0 &&
+#endif
+		verbose) print_device_info();
 	dim3 grid_size(128, 128);
 
 	Geometry geometry;
@@ -35,9 +70,19 @@ void lis::cuda::fv2::Simulation::run
 	int offset = 0;
 
 	Topography DEM(filenames.demfilename, geometry, pitch, offset,
-			pars.nodata_elevation, states.acceleration, verbose); //// modified
+			pars.nodata_elevation, states.acceleration, verbose);
 
 	update_geometry(pars, geometry);
+#if defined(LISFLOOD_CUDA_MPI)
+	int mpi_row_begin = 1 + (geometry.ysz * mpi_rank) / mpi_size;
+	int mpi_row_end   = 1 + (geometry.ysz * (mpi_rank + 1)) / mpi_size;
+	if (mpi_row_end <= mpi_row_begin)
+		throw std::runtime_error("More MPI ranks than FV2 rows");
+	configure_mpi_partition(mpi_row_begin, mpi_row_end, mpi_rank, mpi_size, pitch);
+	grid_size.y = std::min(128,
+		(mpi_row_end - mpi_row_begin + CUDA_BLOCK_SIZE_Y - 2)
+		/ (CUDA_BLOCK_SIZE_Y - 1) + 1);
+#endif
 	cuda::copy_to_symbol(cuda::geometry, &geometry, sizeof(Geometry));
 	cuda::copy_to_symbol(cuda::pitch, &pitch, sizeof(int));
 
@@ -72,7 +117,7 @@ void lis::cuda::fv2::Simulation::run
 	cuda::copy_to_symbol(cuda::physical_params, &physical_params,
 			sizeof(PhysicalParams));
 
-	SolverParams solver_params(pars, solver, states); //// modified
+	SolverParams solver_params(pars, solver, states);
 	cuda::copy_to_symbol(cuda::solver_params, &solver_params,
 			sizeof(SolverParams));
 
@@ -84,15 +129,31 @@ void lis::cuda::fv2::Simulation::run
 				geometry, physical_params, pars.limit_slopes, grid_size));
 
 	DynamicTimestep<Flow> dynamic_dt(cuda::dt, geometry, solver.InitTstep,
-			states.adaptive_ts, *solve);
+			states.adaptive_ts, *solve
+#if defined(LISFLOOD_CUDA_MPI)
+			, mpi_row_begin * pitch, (mpi_row_end - mpi_row_begin) * pitch
+#endif
+			);
 	solver.MinTstep = solver.InitTstep;
 
-	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration);
+	StatsCollector stats_collector(geometry, solver.DepthThresh, states.acceleration
+#if defined(LISFLOOD_CUDA_MPI)
+			, (mpi_row_begin - (mpi_rank == 0 ? 1 : 0)) * pitch,
+			(mpi_row_end - mpi_row_begin + (mpi_rank == 0 ? 1 : 0)
+			 + (mpi_rank + 1 == mpi_size ? 1 : 0)) * pitch
+#endif
+			);
 	Losses losses(filenames, states, pars, geometry, pitch, offset, verbose);
 	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
 			grid_size, pars.output_precision);
 
-	Stats stats(filenames.resrootname, pars.MassInt, pars.MassTotal, states.checkpoint, solver.t);
+	Stats stats(filenames.resrootname, pars.MassInt, pars.MassTotal, states.checkpoint, solver.t
+#if defined(LISFLOOD_CUDA_MPI)
+			, mpi_rank == 0
+#else
+			, true
+#endif
+			);
 	stats.write_header(solver.t);
 
 	Sampler sampler(cuda::sample_points, cuda::sample_buf_idx, verbose);
@@ -100,6 +161,9 @@ void lis::cuda::fv2::Simulation::run
 	{
 		sampler.load_sample_points(filenames.stagefilename, geometry,
 				pitch, offset);
+#if defined(LISFLOOD_CUDA_MPI)
+		if (mpi_rank == 0) {
+#endif
 		sampler.open_stage_file(filenames.resrootname, states.checkpoint, solver.t);
 		sampler.write_stage_header(DEM._0, filenames.stagefilename, states.checkpoint, solver.t);
 
@@ -108,6 +172,9 @@ void lis::cuda::fv2::Simulation::run
 			sampler.open_gauge_file(filenames.resrootname, states.checkpoint, solver.t);
 			sampler.write_gauge_header(DEM._0, filenames.gaugefilename, solver.t);
 		}
+#if defined(LISFLOOD_CUDA_MPI)
+		}
+#endif
 	}
 
 	Snapshot snapshot(filenames.resrootname, pars.SaveInt,
@@ -128,7 +195,7 @@ void lis::cuda::fv2::Simulation::run
 
 	Flow& d_U = solve->d_U();
 
-	time_t loop_start;                                                          
+	time_t loop_start;
 	time(&loop_start);
 
 	while (solver.t < solver.Sim_Time)
@@ -143,13 +210,20 @@ void lis::cuda::fv2::Simulation::run
 		cuda::Boundary::update_time_series(solver.t);
 		cuda::Boundary::update_point_sources(d_U.H, DEM._0,
 				stats_collector.instantaneous_mass());
+#if defined(LISFLOOD_CUDA_MPI)
+		exchange_mpi_halos(d_U, pitch);
+#endif
 		stats_collector.accumulate_mass();
 		stats_collector.zero_instantaneous_mass();
 		solve->update_ghost_cells();
 		dynamic_dt.update_dt();
 		solver.MinTstep = FMIN(solver.MinTstep, cuda::dt);
 
-		if (verbose) printf("t=%f\tdt=%f\n", solver.t, cuda::dt);
+		if (
+#if defined(LISFLOOD_CUDA_MPI)
+			mpi_rank == 0 &&
+#endif
+			verbose) printf("t=%f\tdt=%f\n", solver.t, cuda::dt);
 		solver.t += cuda::dt;
 		solver.itCount++;
 
@@ -157,7 +231,7 @@ void lis::cuda::fv2::Simulation::run
 				stats_collector.instantaneous_mass());
 		if (pars.drain_nodata)
 		{
-			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM._0, 
+			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM._0,
 					stats_collector.instantaneous_mass(), grid_size);
 		}
 		if (losses.enabled())
@@ -168,9 +242,22 @@ void lis::cuda::fv2::Simulation::run
 		stats_collector.accumulate_mass();
 		max_field.update(d_U.H);
 
+		bool gathered_depth = false;
+		bool gathered_full_state = false;
 		if (stats.need_to_write(solver.t))
 		{
+#if defined(LISFLOOD_CUDA_MPI)
+			if (states.save_stages == ON) {
+				gather_fv2_rows(d_U, geometry, pitch, mpi_rank, mpi_size);
+				gathered_depth = true;
+				gathered_full_state = true;
+			}
+			if (mpi_rank == 0) {
+#endif
 			sampler.sample(d_U.H, d_U.HU, d_U.HV, solver.t);
+#if defined(LISFLOOD_CUDA_MPI)
+			}
+#endif
 			solve->zero_ghost_cells();
 			cuda::sync();
 
@@ -180,17 +267,42 @@ void lis::cuda::fv2::Simulation::run
 				stats_collector.total_loss = losses.total_volume();
 			}
 			stats.write(stats_collector.create_entry(solver, d_U.H));
+#if defined(LISFLOOD_CUDA_MPI)
+			if (mpi_rank == 0)
+#endif
 			sampler.write_if_buffer_full();
 		}
 
+#if defined(LISFLOOD_CUDA_MPI)
+		const bool snapshot_due = solver.t >= snapshot.next_save;
+		if (snapshot_due && !gathered_full_state) {
+			gather_fv2_rows(d_U, geometry, pitch, mpi_rank, mpi_size);
+			gathered_depth = true;
+			gathered_full_state = true;
+		}
+		if (mpi_rank == 0)
+			snapshot.write_if_needed(d_U, solver.t, states.call_gzip);
+		else if (snapshot_due)
+			snapshot.next_save += pars.SaveInt;
+#else
 		snapshot.write_if_needed(d_U, solver.t, states.call_gzip);
+#endif
 	}
 
 	time_t loop_end;
 	time(&loop_end);
 	NUMERIC_TYPE seconds = difftime(loop_end, loop_start);
-	printf("loop time %lf\n", seconds);   
+	if (
+#if defined(LISFLOOD_CUDA_MPI)
+		mpi_rank == 0
+#else
+		true
+#endif
+	) printf("loop time %lf\n", seconds);
 
+#if defined(LISFLOOD_CUDA_MPI)
+	if (mpi_rank == 0)
+#endif
 	sampler.write();
 	snapshot.wait();
 	max_field.write();
@@ -200,5 +312,8 @@ void lis::cuda::fv2::Simulation::run
 	cuda::free_device(d_manning);
 	Flow::free_pinned(U);
 	cuda::Boundary::free_device(boundaries);
-}
 
+#if defined(LISFLOOD_CUDA_MPI)
+	if (initialized_here) MPI_Finalize();
+#endif
+}

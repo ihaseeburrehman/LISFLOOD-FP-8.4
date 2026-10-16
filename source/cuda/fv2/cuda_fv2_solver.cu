@@ -1,8 +1,123 @@
 #include "cuda_fv2_solver.cuh"
 #include "cuda_hll.cuh"
+#include "cuda_util.cuh"
 #include <nvfunctional>
+#include <algorithm>
+#if defined(LISFLOOD_CUDA_MPI)
+#include <mpi.h>
+#include <vector>
+#endif
 
 __managed__ NUMERIC_TYPE lis::cuda::fv2::maxH;
+
+#if defined(LISFLOOD_CUDA_MPI)
+namespace {
+static int stored_pitch_fv2 = 0;
+static int mpi_row_begin_fv2 = 1, mpi_row_end_fv2 = 1;
+static int mpi_rank_fv2 = 0, mpi_size_fv2 = 1;
+
+__global__ void pack_mpi_halo_rows_fv2(
+    NUMERIC_TYPE* H, NUMERIC_TYPE* HU, NUMERIC_TYPE* HV,
+    int pitch, int north_row, int south_row, NUMERIC_TYPE* packed)
+{
+    const int n = 3 * pitch;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            idx < 2 * n; idx += blockDim.x * gridDim.x) {
+        const int side = idx / n;
+        const int field_idx = idx - side * n;
+        const int field = field_idx / pitch;
+        const int column = field_idx - field * pitch;
+        const int row = side == 0 ? north_row : south_row;
+        const NUMERIC_TYPE* src = field == 0 ? H : (field == 1 ? HU : HV);
+        packed[idx] = src[row * pitch + column];
+    }
+}
+
+__global__ void unpack_mpi_halo_rows_fv2(
+    NUMERIC_TYPE* H, NUMERIC_TYPE* HU, NUMERIC_TYPE* HV,
+    int pitch, int north_halo, int south_halo,
+    bool has_north, bool has_south, const NUMERIC_TYPE* packed)
+{
+    const int n = 3 * pitch;
+    for (int idx = blockIdx.x * blockDim.x + threadIdx.x;
+            idx < 2 * n; idx += blockDim.x * gridDim.x) {
+        const int side = idx / n;
+        if ((side == 0 && !has_south) || (side == 1 && !has_north)) continue;
+        const int field_idx = idx - side * n;
+        const int field = field_idx / pitch;
+        const int column = field_idx - field * pitch;
+        const int row = side == 0 ? south_halo : north_halo;
+        NUMERIC_TYPE* dst = field == 0 ? H : (field == 1 ? HU : HV);
+        dst[row * pitch + column] = packed[idx];
+    }
+}
+}
+
+void lis::cuda::fv2::configure_mpi_partition(
+    int row_begin, int row_end, int rank, int size, int pitch)
+{
+    mpi_row_begin_fv2 = row_begin; mpi_row_end_fv2 = row_end;
+    mpi_rank_fv2 = rank; mpi_size_fv2 = size; stored_pitch_fv2 = pitch;
+    checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_row_begin, &row_begin, sizeof(int)));
+    checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_row_end, &row_end, sizeof(int)));
+    const int active = 1;
+    checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_partition_active, &active, sizeof(int)));
+    const int north = rank == 0 ? 1 : 0;
+    const int south = rank == size - 1 ? 1 : 0;
+    checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_owns_north_ghost, &north, sizeof(int)));
+    checkCudaErrors(cudaMemcpyToSymbol(cuda::fv1_owns_south_ghost, &south, sizeof(int)));
+    printf("CUDA FV2 MPI rank %d/%d owns rows [%d,%d)\n", rank, size, row_begin, row_end);
+    fflush(stdout);
+}
+
+void lis::cuda::fv2::exchange_mpi_halos(Flow& U, int pitch)
+{
+    if (mpi_size_fv2 <= 1) return;
+    const int n = 3 * pitch;
+    static NUMERIC_TYPE* d_send = nullptr;
+    static NUMERIC_TYPE* d_recv = nullptr;
+    static NUMERIC_TYPE* h_send = nullptr;
+    static NUMERIC_TYPE* h_recv = nullptr;
+    static int allocated_values = 0;
+    if (allocated_values != 2 * n) {
+        if (d_send) checkCudaErrors(cudaFree(d_send));
+        if (d_recv) checkCudaErrors(cudaFree(d_recv));
+        if (h_send) checkCudaErrors(cudaFreeHost(h_send));
+        if (h_recv) checkCudaErrors(cudaFreeHost(h_recv));
+        checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&d_send),
+                2 * n * sizeof(NUMERIC_TYPE)));
+        checkCudaErrors(cudaMalloc(reinterpret_cast<void**>(&d_recv),
+                2 * n * sizeof(NUMERIC_TYPE)));
+        checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_send),
+                2 * n * sizeof(NUMERIC_TYPE)));
+        checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_recv),
+                2 * n * sizeof(NUMERIC_TYPE)));
+        allocated_values = 2 * n;
+    }
+    const int threads = 256;
+    const int blocks = std::min(256, (2 * n + threads - 1) / threads);
+    pack_mpi_halo_rows_fv2<<<blocks, threads>>>(U.H, U.HU, U.HV, pitch,
+            mpi_row_begin_fv2, mpi_row_end_fv2 - 1, d_send);
+    const int north = mpi_rank_fv2 > 0 ? mpi_rank_fv2 - 1 : MPI_PROC_NULL;
+    const int south = mpi_rank_fv2 + 1 < mpi_size_fv2
+                    ? mpi_rank_fv2 + 1 : MPI_PROC_NULL;
+    checkCudaErrors(cudaMemcpy(h_send, d_send, 2 * n * sizeof(NUMERIC_TYPE),
+            cudaMemcpyDeviceToHost));
+    const MPI_Datatype type =
+            sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
+    MPI_Request requests[4];
+    MPI_Irecv(h_recv,     n, type, south, 44, MPI_COMM_WORLD, &requests[0]);
+    MPI_Irecv(h_recv + n, n, type, north, 45, MPI_COMM_WORLD, &requests[1]);
+    MPI_Isend(h_send,     n, type, north, 44, MPI_COMM_WORLD, &requests[2]);
+    MPI_Isend(h_send + n, n, type, south, 45, MPI_COMM_WORLD, &requests[3]);
+    MPI_Waitall(4, requests, MPI_STATUSES_IGNORE);
+    checkCudaErrors(cudaMemcpyAsync(d_recv, h_recv,
+            2 * n * sizeof(NUMERIC_TYPE), cudaMemcpyHostToDevice));
+    unpack_mpi_halo_rows_fv2<<<blocks, threads>>>(U.H, U.HU, U.HV, pitch,
+            mpi_row_begin_fv2 - 1, mpi_row_end_fv2,
+            mpi_rank_fv2 > 0, mpi_rank_fv2 + 1 < mpi_size_fv2, d_recv);
+}
+#endif
 
 namespace lis
 {
@@ -94,11 +209,21 @@ update_dt_per_element
 {
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#else
+	const int j_begin = 0;
+	const int j_end   = cuda::geometry.ysz + 2;
+#endif
 
 	for (int j=global_j; j<cuda::geometry.ysz+2; j+=blockDim.y*gridDim.y)
 	{
 		for (int i=global_i; i<cuda::pitch; i+=blockDim.x*gridDim.x)
 		{
+#if defined(LISFLOOD_CUDA_MPI)
+			if (j < j_begin || j >= j_end) continue;
+#endif
 			FlowCoeffs U = flow[j*cuda::pitch + i];
 			NUMERIC_TYPE local_dt = cuda::solver_params.max_dt;
 			local_dt = min_dt(local_dt, U.get_0());
@@ -335,8 +460,17 @@ rk_stage1_x
 	MassStats* mass_stats
 )
 {
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
 	update_flow_variables_x(DEM, Uold, Ux, [&](int i, int j, FlowCoeffs Lx)
-			{ return Uold[j*cuda::pitch + i] + cuda::dt*Lx; }, mass_stats);
+	{
+#if defined(LISFLOOD_CUDA_MPI)
+		if (j < j_begin || j >= j_end) return FlowCoeffs(Uold[j*cuda::pitch + i]);
+#endif
+		return FlowCoeffs(Uold[j*cuda::pitch + i] + cuda::dt*Lx);
+	}, mass_stats);
 }
 
 __global__ void
@@ -350,8 +484,17 @@ rk_stage1_y
 	MassStats* mass_stats
 )
 {
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
 	update_flow_variables_y(DEM, Uold, Uint, [&](int i, int j, FlowCoeffs Ly)
-			{ return Ux[j*cuda::pitch + i] + cuda::dt*Ly; }, mass_stats);
+	{
+#if defined(LISFLOOD_CUDA_MPI)
+		if (j < j_begin || j >= j_end) return FlowCoeffs(Uold[j*cuda::pitch + i]);
+#endif
+		return FlowCoeffs(Ux[j*cuda::pitch + i] + cuda::dt*Ly);
+	}, mass_stats);
 }
 
 __global__ void
@@ -365,9 +508,18 @@ rk_stage2_x
 	MassStats* mass_stats
 )
 {
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
 	update_flow_variables_x(DEM, Uint, Ux, [&](int i, int j, FlowCoeffs Lx)
-			{ return C(0.5)*(Uold[j*cuda::pitch + i] + 
-					Uint[j*cuda::pitch + i] + cuda::dt*Lx); }, mass_stats);
+	{
+#if defined(LISFLOOD_CUDA_MPI)
+		if (j < j_begin || j >= j_end) return FlowCoeffs(Uint[j*cuda::pitch + i]);
+#endif
+		return FlowCoeffs(C(0.5)*(Uold[j*cuda::pitch + i] +
+				Uint[j*cuda::pitch + i] + cuda::dt*Lx));
+	}, mass_stats);
 }
 
 __global__ void
@@ -381,8 +533,17 @@ rk_stage2_y
 	MassStats* mass_stats
 )
 {
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
 	update_flow_variables_y(DEM, Uint, U, [&](int i, int j, FlowCoeffs Ly)
-			{ return Ux[j*cuda::pitch + i] + C(0.5)*cuda::dt*Ly; }, mass_stats);
+	{
+#if defined(LISFLOOD_CUDA_MPI)
+		if (j < j_begin || j >= j_end) return FlowCoeffs(Ux[j*cuda::pitch + i]);
+#endif
+		return FlowCoeffs(Ux[j*cuda::pitch + i] + C(0.5)*cuda::dt*Ly);
+	}, mass_stats);
 }
 
 __global__ void
@@ -394,11 +555,18 @@ zero_discharge
 {
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
 
 	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
+#if defined(LISFLOOD_CUDA_MPI)
+			if (j < j_begin || j >= j_end) continue;
+#endif
 			FlowCoeffsRef U = flow[j*cuda::pitch + i];
 			if (U.H < cuda::solver_params.DepthThresh)
 			{
@@ -532,11 +700,18 @@ apply_friction
 {
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
 
 	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
+#if defined(LISFLOOD_CUDA_MPI)
+			if (j < j_begin || j >= j_end) continue;
+#endif
 			FlowCoeffsRef Uref = flow[j*cuda::pitch + i];
 			FlowCoeffs U(Uref);
 
@@ -702,6 +877,9 @@ lis::cuda::fv2::Flow& lis::cuda::fv2::Solver::update_flow_variables
 	rk_stage1_y<<<grid_size, cuda::block_size>>>(DEM, Uold, Ux, Uint, mass_stats);
 	zero_discharge<<<grid_size, cuda::block_size>>>(Uint);
 
+#if defined(LISFLOOD_CUDA_MPI)
+	lis::cuda::fv2::exchange_mpi_halos(Uint, stored_pitch_fv2);
+#endif
 	update_ghost_cells(Uint);
 	if (limit_slopes)
 	{
@@ -719,6 +897,11 @@ lis::cuda::fv2::Flow& lis::cuda::fv2::Solver::update_flow_variables
 lis::cuda::fv2::Flow& lis::cuda::fv2::Solver::d_U()
 {
 	return Uold;
+}
+
+lis::cuda::fv2::Flow& lis::cuda::fv2::Solver::d_Uint()
+{
+	return Uint;
 }
 
 void lis::cuda::fv2::Solver::update_dt_per_element
@@ -758,6 +941,43 @@ void lis::cuda::fv2::Solver::update_uniform_rain
 {
 	return;
 }
+
+#if defined(LISFLOOD_CUDA_MPI)
+void lis::cuda::fv2::gather_fv2_rows(Flow& flow, const Geometry& geometry,
+    int pitch, int rank, int size)
+{
+    if (size <= 1) return;
+    std::vector<int> counts(size), displs(size);
+    for (int r = 0; r < size; ++r) {
+        int lo = geometry.ysz * r / size, hi = geometry.ysz * (r + 1) / size;
+        counts[r] = (hi - lo) * geometry.xsz;
+        displs[r] = lo * geometry.xsz;
+    }
+    const MPI_Datatype type =
+        sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE;
+    const int first = 1 + geometry.ysz * rank / size;
+    const int last  = 1 + geometry.ysz * (rank + 1) / size;
+    auto gather = [&](NUMERIC_TYPE* device) {
+        std::vector<NUMERIC_TYPE> local((last - first) * geometry.xsz);
+        std::vector<NUMERIC_TYPE> global;
+        if (rank == 0) global.resize(geometry.ysz * geometry.xsz);
+        for (int j = first; j < last; ++j)
+            lis::cuda::copy(local.data() + (j - first) * geometry.xsz,
+                device + j * pitch + 1, geometry.xsz * sizeof(NUMERIC_TYPE));
+        MPI_Gatherv(local.data(), (int)local.size(), type,
+            rank == 0 ? global.data() : nullptr,
+            counts.data(), displs.data(), type, 0, MPI_COMM_WORLD);
+        if (rank == 0)
+            for (int j = 1; j <= geometry.ysz; ++j)
+                lis::cuda::copy(device + j * pitch + 1,
+                    global.data() + (j - 1) * geometry.xsz,
+                    geometry.xsz * sizeof(NUMERIC_TYPE));
+    };
+    gather(flow.H);
+    gather(flow.HU);
+    gather(flow.HV);
+}
+#endif
 
 lis::cuda::fv2::Solver::~Solver()
 {

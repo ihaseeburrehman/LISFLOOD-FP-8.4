@@ -22,7 +22,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
+#if defined(LISFLOOD_METAL_MPI)
+#include <mpi.h>
+#endif
 
 namespace lis {
 namespace metal {
@@ -43,6 +47,10 @@ struct MetalGeometry {
   float tly;
   float blx;
   float bly;
+  int32_t row_begin;        // first owned row (1 for single-GPU)
+  int32_t row_end;          // one past last owned row (ysz+1 for single-GPU)
+  int32_t owns_north_ghost; // 1 if rank 0
+  int32_t owns_south_ghost; // 1 if last rank
 };
 
 // Metal physical params (must match shader)
@@ -181,6 +189,12 @@ struct SimulatorImpl {
   ::Solver *solver;
   States *states;
 
+  // MPI partition
+  int mpi_rank = 0;
+  int mpi_size = 1;
+  int row_begin = 1;
+  int row_end = 0; // set in init
+
   // Dynamic Rain object
   ::DynamicRain<std::allocator<NUMERIC_TYPE>> *dynamic_rain;
 
@@ -200,8 +214,13 @@ struct SimulatorImpl {
     }
   }
 
-  bool init(Fnames &filenames, Pars &pars, ::Solver &solver, int verb) {
+  bool init(Fnames &filenames, Pars &pars, ::Solver &solver, int verb,
+            int rank = 0, int size = 1, int r_begin = 1, int r_end = 0) {
     verbose = verb;
+    mpi_rank = rank;
+    mpi_size = size;
+    row_begin = r_begin;
+    row_end = (r_end > r_begin) ? r_end : (pars.ysz + 1);
     fnames = &filenames;
 
     // Initialize Dynamic Rain
@@ -308,6 +327,10 @@ struct SimulatorImpl {
     geom.tly = (float)pars.tly;
     geom.blx = (float)pars.blx;
     geom.bly = (float)pars.bly;
+    geom.row_begin = row_begin;
+    geom.row_end = row_end;
+    geom.owns_north_ghost = (mpi_rank == 0) ? 1 : 0;
+    geom.owns_south_ghost = (mpi_rank == mpi_size - 1) ? 1 : 0;
 
     // Physical params
     physics.g = (float)solver.g;
@@ -744,6 +767,92 @@ struct SimulatorImpl {
     }
   }
 
+#if defined(LISFLOOD_METAL_MPI)
+  // Exchange halo rows with neighbouring MPI ranks for DG2 U buffer (9 planes).
+  // U_buf is one of U[0]..U[2]; tags 46 (north->south) / 47 (south->north).
+  void exchangeHalos(id<MTLBuffer> U_buf) {
+    if (mpi_size <= 1) return;
+    const int plane_size = geom.pitch * (geom.ysz + 2); // elements per plane
+    const int n = 9 * geom.pitch;                        // floats per halo row
+    static std::vector<float> send_buf;
+    static std::vector<float> recv_buf;
+    if ((int)send_buf.size() != 2 * n) { send_buf.resize(2 * n); recv_buf.resize(2 * n); }
+
+    float *ptr = (float *)[U_buf contents];
+    const int north_row = geom.row_begin;
+    const int south_row = geom.row_end - 1;
+    for (int p = 0; p < 9; ++p) {
+      float *plane = ptr + p * plane_size;
+      for (int col = 0; col < geom.pitch; ++col) {
+        send_buf[p * geom.pitch + col]     = plane[north_row * geom.pitch + col];
+        send_buf[n + p * geom.pitch + col] = plane[south_row * geom.pitch + col];
+      }
+    }
+
+    const int north_rank = mpi_rank > 0          ? mpi_rank - 1 : MPI_PROC_NULL;
+    const int south_rank = mpi_rank + 1 < mpi_size ? mpi_rank + 1 : MPI_PROC_NULL;
+    MPI_Request requests[4];
+    MPI_Irecv(recv_buf.data(),     n, MPI_FLOAT, south_rank, 46, MPI_COMM_WORLD, &requests[0]);
+    MPI_Irecv(recv_buf.data() + n, n, MPI_FLOAT, north_rank, 47, MPI_COMM_WORLD, &requests[1]);
+    MPI_Isend(send_buf.data(),     n, MPI_FLOAT, north_rank, 46, MPI_COMM_WORLD, &requests[2]);
+    MPI_Isend(send_buf.data() + n, n, MPI_FLOAT, south_rank, 47, MPI_COMM_WORLD, &requests[3]);
+    MPI_Waitall(4, requests, MPI_STATUSES_IGNORE);
+
+    if (mpi_rank + 1 < mpi_size) {
+      const int halo_south = geom.row_end;
+      for (int p = 0; p < 9; ++p) {
+        float *plane = ptr + p * plane_size;
+        for (int col = 0; col < geom.pitch; ++col)
+          plane[halo_south * geom.pitch + col] = recv_buf[p * geom.pitch + col];
+      }
+    }
+    if (mpi_rank > 0) {
+      const int halo_north = geom.row_begin - 1;
+      for (int p = 0; p < 9; ++p) {
+        float *plane = ptr + p * plane_size;
+        for (int col = 0; col < geom.pitch; ++col)
+          plane[halo_north * geom.pitch + col] = recv_buf[n + p * geom.pitch + col];
+      }
+    }
+  }
+
+  // Gather all ranks' owned rows into rank 0's U buffer (9 planes of Uold).
+  void gatherRows(id<MTLBuffer> U_buf) {
+    if (mpi_size <= 1) return;
+    const int plane_size = geom.pitch * (geom.ysz + 2);
+    const int first = geom.row_begin;
+    const int last  = geom.row_end;
+    std::vector<int> counts(mpi_size), displs(mpi_size);
+    for (int r = 0; r < mpi_size; ++r) {
+      int lo = 1 + (geom.ysz * r) / mpi_size;
+      int hi = 1 + (geom.ysz * (r + 1)) / mpi_size;
+      counts[r] = (hi - lo) * geom.xsz;
+      displs[r] = (lo - 1) * geom.xsz;
+    }
+    float *ptr = (float *)[U_buf contents];
+    for (int p = 0; p < 9; ++p) {
+      float *plane = ptr + p * plane_size;
+      std::vector<float> local((last - first) * geom.xsz);
+      std::vector<float> global;
+      if (mpi_rank == 0) global.resize(geom.ysz * geom.xsz);
+      for (int j = first; j < last; ++j)
+        std::memcpy(local.data() + (j - first) * geom.xsz,
+                    plane + j * geom.pitch + 1, geom.xsz * sizeof(float));
+      MPI_Gatherv(local.data(), (int)local.size(), MPI_FLOAT,
+                  mpi_rank == 0 ? global.data() : nullptr, counts.data(),
+                  displs.data(), MPI_FLOAT, 0, MPI_COMM_WORLD);
+      if (mpi_rank == 0) {
+        for (int j = 1; j <= geom.ysz; ++j)
+          std::memcpy(plane + j * geom.pitch + 1,
+                      global.data() + (j - 1) * geom.xsz, geom.xsz * sizeof(float));
+      }
+    }
+  }
+#else
+  void exchangeHalos(id<MTLBuffer>) {}
+  void gatherRows(id<MTLBuffer>) {}
+#endif
+
   // Refresh the prescribed boundary values for this timestep. Stage boundaries
   // are shifted into the GPU's vertical datum so that (value - Z) is evaluated
   // consistently with the shifted DEM; discharge boundaries are in m2/s and
@@ -977,7 +1086,7 @@ struct SimulatorImpl {
         [encoder setBytes:&dt length:sizeof(float) atIndex:4];
         [encoder setBytes:&gpu_nodata length:sizeof(float) atIndex:5];
         [encoder setBuffer:volOutBuffer offset:0 atIndex:6];
-        [encoder dispatchThreads:MTLSizeMake(geom.xsz, geom.ysz, 1)
+        [encoder dispatchThreads:MTLSizeMake(geom.xsz, geom.row_end - geom.row_begin, 1)
             threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
         [encoder endEncoding];
         [commandBuffer commit];
@@ -987,16 +1096,30 @@ struct SimulatorImpl {
 
     applyPointSources();
 
+#if defined(LISFLOOD_METAL_MPI)
+    exchangeHalos(U[0]);
+#endif
+
     NUMERIC_TYPE adaptive_dt = computeTimestepDg2();
+
+#if defined(LISFLOOD_METAL_MPI)
+    if (mpi_size > 1) {
+        float dt_f = (float)adaptive_dt;
+        MPI_Allreduce(MPI_IN_PLACE, &dt_f, 1, MPI_FLOAT, MPI_MIN, MPI_COMM_WORLD);
+        adaptive_dt = (NUMERIC_TYPE)dt_f;
+    }
+#endif
     solverParams.dt = (float)adaptive_dt;
     solver->Tstep = adaptive_dt;
     memcpy([solverBuffer contents], &solverParams, sizeof(MetalSolverParams));
 
     // --- one DG2 step, in the order of cuda dg2 Solver::update_flow_variables
+    // RK stage 1: friction, ghost, limit, sweep1x, sweep1y, zero_discharge(Uint)
+    const int part_rows = geom.row_end - geom.row_begin;
     @autoreleasepool {
       id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
       id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-      MTLSize gridSize = MTLSizeMake(geom.xsz, geom.ysz, 1);
+      MTLSize gridSize = MTLSizeMake(geom.xsz, part_rows, 1);
       MTLSize threadGroupSize = MTLSizeMake(16, 16, 1);
       const NSUInteger N = num_cells;
       memset([maxBits contents], 0, sizeof(uint32_t));
@@ -1057,13 +1180,12 @@ struct SimulatorImpl {
         [encoder setBuffer:volOutBuffer offset:0 atIndex:10];
         struct { int mode; float mass_weight; } stage = {mode, 0.5f};
         [encoder setBytes:&stage length:sizeof(stage) atIndex:11];
-        // overlapping tiles, as the FV1 and FV2 sweeps (flux-sharing invariant)
         MTLSize tg = MTLSizeMake(kTileX, kTileY, 1);
         MTLSize groups = x
             ? MTLSizeMake((geom.xsz + 1 + (kTileX - 1) - 1) / (kTileX - 1),
-                          (geom.ysz + kTileY - 1) / kTileY, 1)
+                          ((NSUInteger)part_rows + kTileY - 1) / kTileY, 1)
             : MTLSizeMake((geom.xsz + kTileX - 1) / kTileX,
-                          (geom.ysz + 1 + (kTileY - 1) - 1) / (kTileY - 1), 1);
+                          ((NSUInteger)part_rows + 1 + (kTileY - 1) - 1) / (kTileY - 1), 1);
         [encoder dispatchThreadgroups:groups threadsPerThreadgroup:tg];
       };
 
@@ -1093,6 +1215,88 @@ struct SimulatorImpl {
       sweep(true, Uold, Uold, Uold, Ux, 0);    // rk_stage1_x
       sweep(false, Uold, Ux, Ux, Uint, 0);     // rk_stage1_y
       zero_discharge(Uint);
+      [encoder endEncoding];
+      [commandBuffer commit];
+      [commandBuffer waitUntilCompleted];
+    }
+
+#if defined(LISFLOOD_METAL_MPI)
+    exchangeHalos(U[1]);
+#endif
+
+    // RK stage 2: ghost, limit, sweep2x, sweep2y, drain, losses, max
+    @autoreleasepool {
+      id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
+      id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+      MTLSize gridSize = MTLSizeMake(geom.xsz, part_rows, 1);
+      MTLSize threadGroupSize = MTLSizeMake(16, 16, 1);
+      const NSUInteger N = num_cells;
+
+      auto limit = [&](id<MTLBuffer> Uset) {
+        if (!limit_slopes) return;
+        [encoder setComputePipelineState:dg2CopySlopesPipeline];
+        [encoder setBuffer:Uset offset:0 atIndex:0];
+        [encoder setBuffer:DEM offset:0 atIndex:1];
+        [encoder setBuffer:slopeCopy offset:0 atIndex:2];
+        [encoder setBuffer:geomBuffer offset:0 atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(N, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder setComputePipelineState:dg2LimitPipeline];
+        [encoder setBuffer:Uset offset:0 atIndex:0];
+        [encoder setBuffer:DEM offset:0 atIndex:1];
+        [encoder setBuffer:slopeCopy offset:0 atIndex:2];
+        [encoder setBuffer:geomBuffer offset:0 atIndex:3];
+        struct { float kt; float unused; } dp = {krivodonova_thresh, 0.0f};
+        [encoder setBytes:&dp length:sizeof(dp) atIndex:4];
+        [encoder setBuffer:maxBits offset:0 atIndex:5];
+        [encoder setBuffer:limited offset:0 atIndex:6];
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+        [encoder setComputePipelineState:dg2ApplyLimitedPipeline];
+        [encoder setBuffer:Uset offset:0 atIndex:0];
+        [encoder setBuffer:limited offset:0 atIndex:1];
+        [encoder setBuffer:geomBuffer offset:0 atIndex:2];
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+      };
+      auto zero_perimeter = [&](id<MTLBuffer> Uset) {
+        [encoder setComputePipelineState:dg2ZeroPerimeterPipeline];
+        [encoder setBuffer:Uset offset:0 atIndex:0];
+        [encoder setBuffer:geomBuffer offset:0 atIndex:1];
+        [encoder dispatchThreads:MTLSizeMake(std::max(geom.xsz, geom.ysz), 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+      };
+      auto zero_discharge = [&](id<MTLBuffer> Uset) {
+        [encoder setComputePipelineState:dg2ZeroDischargePipeline];
+        [encoder setBuffer:Uset offset:0 atIndex:0];
+        [encoder setBuffer:geomBuffer offset:0 atIndex:1];
+        [encoder setBuffer:solverBuffer offset:0 atIndex:2];
+        [encoder dispatchThreads:gridSize threadsPerThreadgroup:threadGroupSize];
+      };
+      auto sweep = [&](bool x, id<MTLBuffer> In, id<MTLBuffer> A, id<MTLBuffer> B,
+                       id<MTLBuffer> Out, int mode) {
+        [encoder setComputePipelineState:(x ? dg2FlowXPipeline : dg2FlowYPipeline)];
+        [encoder setBuffer:In offset:0 atIndex:0];
+        [encoder setBuffer:A offset:0 atIndex:1];
+        [encoder setBuffer:B offset:0 atIndex:2];
+        [encoder setBuffer:Out offset:0 atIndex:3];
+        [encoder setBuffer:DEM offset:0 atIndex:4];
+        [encoder setBuffer:(x ? Zstar_x : Zstar_y) offset:0 atIndex:5];
+        [encoder setBuffer:geomBuffer offset:0 atIndex:6];
+        [encoder setBuffer:physicsBuffer offset:0 atIndex:7];
+        [encoder setBuffer:solverBuffer offset:0 atIndex:8];
+        [encoder setBuffer:boundaryTypesBuffer offset:0 atIndex:9];
+        [encoder setBuffer:volOutBuffer offset:0 atIndex:10];
+        struct { int mode; float mass_weight; } stage = {mode, 0.5f};
+        [encoder setBytes:&stage length:sizeof(stage) atIndex:11];
+        MTLSize tg = MTLSizeMake(kTileX, kTileY, 1);
+        MTLSize groups = x
+            ? MTLSizeMake((geom.xsz + 1 + (kTileX - 1) - 1) / (kTileX - 1),
+                          ((NSUInteger)part_rows + kTileY - 1) / kTileY, 1)
+            : MTLSizeMake((geom.xsz + kTileX - 1) / kTileX,
+                          ((NSUInteger)part_rows + 1 + (kTileY - 1) - 1) / (kTileY - 1), 1);
+        [encoder dispatchThreadgroups:groups threadsPerThreadgroup:tg];
+      };
+
+      id<MTLBuffer> Uold = U[0], Uint = U[1], Ux = U[2];
       encodeGhost(encoder, Uint);
       limit(Uint);
       zero_perimeter(Uint);
@@ -1136,7 +1340,7 @@ struct SimulatorImpl {
 
 Simulator::Simulator(Fnames &filenames, Pars &pars, ::Solver &solver,
                      Arrays &arrays, States &states, BoundCs &boundCs,
-                     int verbose) {
+                     int verbose, int rank, int size, int r_begin, int r_end) {
   impl = new SimulatorImpl();
   impl->arrays = &arrays;
   impl->boundCs = &boundCs;
@@ -1144,7 +1348,7 @@ Simulator::Simulator(Fnames &filenames, Pars &pars, ::Solver &solver,
   impl->solver = &solver;
   impl->states = &states;
 
-  if (!impl->init(filenames, pars, solver, verbose)) {
+  if (!impl->init(filenames, pars, solver, verbose, rank, size, r_begin, r_end)) {
     delete impl;
     impl = nullptr;
   }
@@ -1187,6 +1391,20 @@ void Simulator::copy_max_to_host(NUMERIC_TYPE *maxH) {
   }
 }
 
+void Simulator::gather_rows() {
+  if (impl) {
+    impl->gatherRows(impl->U[0]);
+  }
+}
+
+int Simulator::get_rank() const {
+  return impl ? impl->mpi_rank : 0;
+}
+
+int Simulator::get_size() const {
+  return impl ? impl->mpi_size : 1;
+}
+
 void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
               ::Solver &solver, BoundCs &boundCs, Stage &stage, Arrays &arrays,
               int verbose) {
@@ -1199,32 +1417,63 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
     fprintf(stderr, "ERROR: Metal DG2 requires a loaded rainfall time series.\n");
     std::exit(EXIT_FAILURE);
   }
-  Simulator sim(filenames, pars, solver, arrays, states, boundCs, verbose);
 
-  // Check if Metal initialization succeeded
+#if defined(LISFLOOD_METAL_MPI)
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  const bool initialized_here = !initialized;
+  if (initialized_here) MPI_Init(nullptr, nullptr);
+  int mpi_rank = 0, mpi_size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+  if (mpi_size != states.cuda_mpi_gpus) {
+    fprintf(stderr,
+            "ERROR: parameter GPUs %d requires launching exactly %d MPI ranks; "
+            "got %d.\n",
+            states.cuda_mpi_gpus, states.cuda_mpi_gpus, mpi_size);
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+  }
+  const int mpi_row_begin = 1 + (pars.ysz * mpi_rank) / mpi_size;
+  const int mpi_row_end   = 1 + (pars.ysz * (mpi_rank + 1)) / mpi_size;
+  if (mpi_row_end <= mpi_row_begin)
+    throw std::runtime_error("More MPI ranks than DG2 rows");
+  printf("Metal DG2 MPI rank %d/%d owns rows [%d,%d)\n",
+         mpi_rank, mpi_size, mpi_row_begin, mpi_row_end);
+  fflush(stdout);
+#else
+  const int mpi_rank      = 0;
+  const int mpi_size      = 1;
+  const int mpi_row_begin = 1;
+  const int mpi_row_end   = pars.ysz + 1;
+#endif
+
+  Simulator sim(filenames, pars, solver, arrays, states, boundCs, verbose,
+                mpi_rank, mpi_size, mpi_row_begin, mpi_row_end);
+
   if (!sim.is_valid()) {
     printf("ERROR: Metal GPU initialization failed! Check that:\n");
     printf("  1. Metal shader library (metal_dg2_kernels.metallib) exists\n");
     printf("  2. Metal GPU is available on this system\n");
     printf("  3. Single precision mode is enabled (NUMERIC_TYPE=float)\n");
+#if defined(LISFLOOD_METAL_MPI)
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+#endif
     return;
   }
 
   sim.initialize(arrays.H, arrays.HU, arrays.HV, arrays.DEM, arrays.Manningsn);
 
-  if (verbose) {
-    printf("Metal GPU initialized successfully.\n");
-    printf("Grid: %d x %d cells\n", pars.xsz, pars.ysz);
+  if (verbose && mpi_rank == 0) {
+    printf("Metal DG2 GPU initialized successfully.\n");
+    printf("Grid: %d x %d cells, %d rank(s)\n", pars.xsz, pars.ysz, mpi_size);
     printf("SaveInt: %.2f, MassInt: %.2f\n", pars.SaveInt, pars.MassInt);
     printf("Simulation time: %.2f seconds\n", solver.Sim_Time);
     printf("\nStarting GPU simulation...\n\n");
     fflush(stdout);
   }
 
-  // Initialize Zstar fields (needed for bed slope source terms)
   ::fv1::initialise_Zstar(&pars, &arrays);
 
-  // Main simulation loop
   time_t loop_start;
   time(&loop_start);
 
@@ -1232,102 +1481,92 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
   solver.vol1 = DomainVol(&states, &pars, nullptr, &arrays, nullptr);
 
   while (solver.t < solver.Sim_Time) {
-    // Reset Qin/Qout for this step (matches CPU behavior)
     zero_flux_stats(&boundCs);
 
-    // Execute one timestep on GPU
     NUMERIC_TYPE dt = sim.step();
 
     if (dt <= 0) {
-      if (verbose)
-        printf("\nERROR: Metal simulator returned zero timestep.\n");
+      if (verbose && mpi_rank == 0)
+        printf("\nERROR: Metal DG2 simulator returned zero timestep.\n");
       break;
     }
 
-    if (solver.t > 0) {
+    if (solver.t > 0)
       solver.MinTstep = std::min(solver.MinTstep, dt);
-    }
     const NUMERIC_TYPE t_start = solver.t;
     solver.t += dt;
     solver.itCount += 1;
 
-    // one line per step, as the CUDA solvers print (the 8.4 tests read it)
-    if (verbose) printf("t=%f\tdt=%f\n", t_start, dt);
+    if (verbose && mpi_rank == 0) printf("t=%f\tdt=%f\n", t_start, dt);
 
     // Mass balance output
     if (solver.t >= pars.MassTotal) {
-      sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
+      sim.gather_rows();
+      if (mpi_rank == 0) {
+        sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
+        ::fv1::update_Hstar(&pars, &arrays);
+        ::fv1::update_fluxes(&pars, &solver, &arrays);
+        ::fv1::update_fluxes_on_boundaries(&pars, &solver, &boundCs, &arrays);
 
-      // Compute boundary fluxes for mass balance (Metal doesn't track these
-      // internally) We need to call the CPU FV1 functions to populate FHx/FHy
-      // arrays at boundaries
-      ::fv1::update_Hstar(&pars, &arrays);
-      ::fv1::update_fluxes(&pars, &solver, &arrays);
-      ::fv1::update_fluxes_on_boundaries(&pars, &solver, &boundCs, &arrays);
-      // GPU interface fluxes and point sources are already integrated per step.
-
-      // Virtual gauge output
-      if (states.gsection == ON && files->gau_fp) {
-        fprintf(files->gau_fp, "%12.2" NUM_FMT "", solver.t); // print time
-        for (int i = 0; i < stage.Ngauges; i++) {
-          // Calculate discharge using unit fluxes (FHx, FHy)
-          // CalcVirtualGauge sums up values in the unit flux arrays
-          NUMERIC_TYPE unit_discharge =
-              CalcVirtualGauge(i, pars.xsz + 1, arrays.FHx, arrays.FHy, &stage);
-
-          // Convert unit discharge (m2/s) to discharge (m3/s)
-          // Q = q * width
-          NUMERIC_TYPE discharge = 0.0;
-          if (stage.gauge_dir[i] == North || stage.gauge_dir[i] == South) {
-            discharge = unit_discharge * pars.dx;
-          } else {
-            discharge = unit_discharge * pars.dy;
+        if (states.gsection == ON && files->gau_fp) {
+          fprintf(files->gau_fp, "%12.2" NUM_FMT "", solver.t);
+          for (int i = 0; i < stage.Ngauges; i++) {
+            NUMERIC_TYPE unit_discharge =
+                CalcVirtualGauge(i, pars.xsz + 1, arrays.FHx, arrays.FHy, &stage);
+            NUMERIC_TYPE discharge = 0.0;
+            if (stage.gauge_dir[i] == North || stage.gauge_dir[i] == South)
+              discharge = unit_discharge * pars.dx;
+            else
+              discharge = unit_discharge * pars.dy;
+            fprintf(files->gau_fp, " %10.3" NUM_FMT "", discharge);
           }
-
-          fprintf(files->gau_fp, " %10.3" NUM_FMT "", discharge);
+          fprintf(files->gau_fp, "\n");
+          fflush(files->gau_fp);
         }
-        fprintf(files->gau_fp, "\n");
-        fflush(files->gau_fp);
-      }
 
-      update_mass_stats(&states, &pars, &solver, &boundCs, &arrays);
-      write_mass_stats(files, &pars, &solver, &boundCs);
+        update_mass_stats(&states, &pars, &solver, &boundCs, &arrays);
+        write_mass_stats(files, &pars, &solver, &boundCs);
+      } else {
+        pars.MassTotal += pars.MassInt;
+      }
     }
 
     // Solution output
     if (solver.t >= pars.SaveTotal) {
-      sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
-      if (states.voutput == ON) {
-        update_velocity(&pars, &solver, &arrays);
+      sim.gather_rows();
+      if (mpi_rank == 0) {
+        sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
+        if (states.voutput == ON) update_velocity(&pars, &solver, &arrays);
+        write_solution(&filenames, &states, &pars, &solver, &arrays);
+      } else {
+        pars.SaveTotal += pars.SaveInt;
+        pars.SaveNo += 1;
       }
-      write_solution(&filenames, &states, &pars, &solver, &arrays);
     }
   }
 
-  // Final copy and final solution output to ensure the last step is captured
-  // correctly
-  sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
-
-  if (states.voutput == ON) {
-    update_velocity(&pars, &solver, &arrays);
+  // Final output
+  sim.gather_rows();
+  if (mpi_rank == 0) {
+    sim.copy_to_host(arrays.H, arrays.HU, arrays.HV);
+    if (states.voutput == ON) update_velocity(&pars, &solver, &arrays);
+    write_solution(&filenames, &states, &pars, &solver, &arrays);
+    sim.copy_max_to_host(arrays.maxH);
+    write_max_field(&filenames, &states, &pars, &arrays);
   }
-
-  // Force a write of the final state (SaveNo will be correct)
-  write_solution(&filenames, &states, &pars, &solver, &arrays);
-
-  // The maximum depth field is tracked on the GPU every timestep; bring it
-  // back and write the .max file, as fv1::solve does on the CPU.
-  sim.copy_max_to_host(arrays.maxH);
-  write_max_field(&filenames, &states, &pars, &arrays);
 
   time_t loop_end;
   time(&loop_end);
   double elapsed = difftime(loop_end, loop_start);
 
-  if (verbose) {
+  if (verbose && mpi_rank == 0) {
     printf("\nloop time %lf\n", elapsed);
     printf("Finished.\n\n");
   }
+
+#if defined(LISFLOOD_METAL_MPI)
+  if (initialized_here) MPI_Finalize();
+#endif
 }
 
 } // namespace dg2

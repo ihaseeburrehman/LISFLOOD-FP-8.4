@@ -99,6 +99,10 @@ struct Geometry {
     float tly;
     float blx;
     float bly;
+    int row_begin;        // first owned row (1 for single-GPU)
+    int row_end;          // one past last owned row (ysz+1 for single-GPU)
+    int owns_north_ghost; // 1 if rank 0 (writes j=0 ghost)
+    int owns_south_ghost; // 1 if last rank (writes j=ysz+1 ghost)
 };
 
 // Physical parameters
@@ -299,17 +303,17 @@ kernel void apply_friction(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
-    
-    if (i > geom.xsz || j > geom.ysz) return;
-    
+    int j = geom.row_begin + (int)gid.y;
+
+    if (i > geom.xsz || j >= geom.row_end) return;
+
     int idx = j * geom.pitch + i;
     float h = H[idx];
-    
+
     if (h > solver.depth_thresh) {
         float hu = HU[idx];
         float hv = HV[idx];
-        
+
         // Use safe depth for division to prevent numerical instability
         float h_safe = max(h, MIN_SAFE_H);
         
@@ -353,14 +357,14 @@ kernel void compute_zstar_x(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x;
-    int j = gid.y + 1;
-    
-    if (i > geom.xsz || j > geom.ysz) return;
-    
+    int j = geom.row_begin + (int)gid.y;
+
+    if (i > geom.xsz || j >= geom.row_end) return;
+
     int idx = j * geom.pitch + i;
     float Z_neg = DEM[idx];
     float Z_pos = DEM[idx + 1];
-    
+
     Zstar_x[idx] = max(Z_neg, Z_pos);
 }
 
@@ -372,14 +376,14 @@ kernel void compute_zstar_y(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y;
-    
-    if (i > geom.xsz || j > geom.ysz) return;
-    
+    int j = geom.row_begin - 1 + (int)gid.y;
+
+    if (i > geom.xsz || j >= geom.row_end) return;
+
     int idx = j * geom.pitch + i;
     float Z_neg = DEM[idx];         // North cell (row j)
     float Z_pos = DEM[(j+1) * geom.pitch + i]; // South cell (row j+1)
-    
+
     Zstar_y[idx] = max(Z_neg, Z_pos);
 }
 
@@ -431,9 +435,9 @@ kernel void update_flow_x(
     threadgroup float Hstar_sh[TG_Y][TG_X];
 
     int i = (int)(tgid.x * (TG_X - 1) + tid.x);   // interface / cell index 0..xsz
-    int j = (int)(tgid.y * TG_Y + tid.y) + 1;     // row 1..ysz
+    int j = (int)(geom.row_begin + tgid.y * TG_Y + tid.y);     // row in partition
 
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    bool active = (i <= geom.xsz && j < geom.row_end);
 
     FlowVector U_c, Ustar_c_e;
     float Z_c = 0.0f, Zstar_e = 0.0f;
@@ -542,9 +546,9 @@ kernel void update_flow_y(
     threadgroup float Hstar_sh[TG_Y][TG_X];
 
     int i = (int)(tgid.x * TG_X + tid.x) + 1;     // column 1..xsz
-    int j = (int)(tgid.y * (TG_Y - 1) + tid.y);   // interface / cell row 0..ysz
+    int j = (int)((geom.row_begin - 1) + tgid.y * (TG_Y - 1) + tid.y);   // interface/cell row in partition
 
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    bool active = (i <= geom.xsz && j <= geom.row_end - 1);
 
     FlowVector U_c, Ustar_c_s;
     float Z_c = 0.0f, Zstar_s = 0.0f;
@@ -641,13 +645,13 @@ kernel void compute_dt_per_cell(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
-    
-    if (i > geom.xsz || j > geom.ysz) return;
-    
+    int j = geom.row_begin + (int)gid.y;
+
+    if (i > geom.xsz || j >= geom.row_end) return;
+
     int idx = j * geom.pitch + i;
     float h = H[idx];
-    
+
     if (h > DEPTH_THRESH) {
         float hu = HU[idx];
         float hv = HV[idx];
@@ -687,20 +691,24 @@ kernel void zero_ghost_cells(
     constant Geometry& geom [[buffer(3)]],
     uint gid [[thread_position_in_grid]])
 {
-    // North and South boundaries
+    // North and South boundaries (only the rank that owns them)
     if (gid < (uint)geom.pitch) {
         int i = gid;
-        // North (j=0)
-        H[i] = 0.0f;
-        HU[i] = 0.0f;
-        HV[i] = 0.0f;
-        // South (j=ysz+1)
-        int idx_s = (geom.ysz + 1) * geom.pitch + i;
-        H[idx_s] = 0.0f;
-        HU[idx_s] = 0.0f;
-        HV[idx_s] = 0.0f;
+        if (geom.owns_north_ghost) {
+            // North (j=0)
+            H[i] = 0.0f;
+            HU[i] = 0.0f;
+            HV[i] = 0.0f;
+        }
+        if (geom.owns_south_ghost) {
+            // South (j=ysz+1)
+            int idx_s = (geom.ysz + 1) * geom.pitch + i;
+            H[idx_s] = 0.0f;
+            HU[idx_s] = 0.0f;
+            HV[idx_s] = 0.0f;
+        }
     }
-    
+
     // East and West boundaries
     if (gid < (uint)(geom.ysz + 2)) {
         int j = gid;
@@ -729,13 +737,13 @@ kernel void apply_uniform_rain(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
-    
-    if (i > geom.xsz || j > geom.ysz) return;
-    
+    int j = geom.row_begin + (int)gid.y;
+
+    if (i > geom.xsz || j >= geom.row_end) return;
+
     int idx = j * geom.pitch + i;
     float z = DEM[idx];
-    
+
     // Don't add rain to nodata cells
     if (abs(z - nodata) > 1e-6f) {
         float increment = max(-H[idx], rain_rate * dt);
@@ -782,12 +790,13 @@ kernel void apply_rain(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x; // 0 to xsz-1
-    int j = gid.y; // 0 to ysz-1
-    
-    if (i >= dem_geom.xsz || j >= dem_geom.ysz) return;
-    
+    int j = (int)gid.y; // partition-relative 0-based row
+
+    int jabs = dem_geom.row_begin - 1 + j; // 0-based absolute row
+    if (i >= dem_geom.xsz || jabs >= dem_geom.row_end - 1) return;
+
     // Calculate 1-based index for H/DEM which includes ghost cells
-    int idx = (j + 1) * dem_geom.pitch + (i + 1);
+    int idx = (jabs + 1) * dem_geom.pitch + (i + 1);
     
     float z = DEM[idx];
     
@@ -856,36 +865,40 @@ kernel void update_ghost_cells(
         }
     }
     
-    // North and South boundaries (j=0 and j=ysz+1)
+    // North and South boundaries (j=0 and j=ysz+1) — only the owning rank
     if (gid >= 1 && gid <= (uint)xsz) {
         int i = gid;
-        
-        // North boundary (j=0)
-        int bc_idx_n = i - 1; // LISFLOOD North index
-        int type_n = boundary_types[bc_idx_n];
-        
-        int idx_ghost_n = 0 * pitch + i;
-        int idx_interior_n = 1 * pitch + i;
-        H[idx_ghost_n] = H[idx_interior_n];
-        HU[idx_ghost_n] = HU[idx_interior_n];
-        if (type_n == BC_FREE) {
-            HV[idx_ghost_n] = HV[idx_interior_n]; // Simple transmissive (matches CPU fv1)
-        } else {
-            HV[idx_ghost_n] = -HV[idx_interior_n]; // Reflective
+
+        if (geom.owns_north_ghost) {
+            // North boundary (j=0)
+            int bc_idx_n = i - 1; // LISFLOOD North index
+            int type_n = boundary_types[bc_idx_n];
+
+            int idx_ghost_n = 0 * pitch + i;
+            int idx_interior_n = 1 * pitch + i;
+            H[idx_ghost_n] = H[idx_interior_n];
+            HU[idx_ghost_n] = HU[idx_interior_n];
+            if (type_n == BC_FREE) {
+                HV[idx_ghost_n] = HV[idx_interior_n];
+            } else {
+                HV[idx_ghost_n] = -HV[idx_interior_n];
+            }
         }
-        
-        // South boundary (j=ysz+1)
-        int bc_idx_s = 2 * xsz + ysz - i; // LISFLOOD South index
-        int type_s = boundary_types[bc_idx_s];
-        
-        int idx_ghost_s = (ysz + 1) * pitch + i;
-        int idx_interior_s = ysz * pitch + i;
-        H[idx_ghost_s] = H[idx_interior_s];
-        HU[idx_ghost_s] = HU[idx_interior_s];
-        if (type_s == BC_FREE) {
-            HV[idx_ghost_s] = HV[idx_interior_s]; // Simple transmissive (matches CPU fv1)
-        } else {
-            HV[idx_ghost_s] = -HV[idx_interior_s]; // Reflective
+
+        if (geom.owns_south_ghost) {
+            // South boundary (j=ysz+1)
+            int bc_idx_s = 2 * xsz + ysz - i; // LISFLOOD South index
+            int type_s = boundary_types[bc_idx_s];
+
+            int idx_ghost_s = (ysz + 1) * pitch + i;
+            int idx_interior_s = ysz * pitch + i;
+            H[idx_ghost_s] = H[idx_interior_s];
+            HU[idx_ghost_s] = HU[idx_interior_s];
+            if (type_s == BC_FREE) {
+                HV[idx_ghost_s] = HV[idx_interior_s];
+            } else {
+                HV[idx_ghost_s] = -HV[idx_interior_s];
+            }
         }
     }
 }
@@ -903,13 +916,13 @@ kernel void drain_nodata_cells(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
-    
-    if (i > geom.xsz || j > geom.ysz) return;
-    
+    int j = geom.row_begin + (int)gid.y;
+
+    if (i > geom.xsz || j >= geom.row_end) return;
+
     int idx = j * geom.pitch + i;
     float z = DEM[idx];
-    
+
     // If this is a NoData cell, eliminate any water
     if (abs(z - nodata) < 1.0f) {
         if (H[idx] > 0.0f) atomic_add_float(&mass_totals[2], H[idx] * geom.dx * geom.dy);
@@ -985,9 +998,9 @@ kernel void update_max_field(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
+    int j = geom.row_begin + (int)gid.y;
 
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
 
     int idx = j * geom.pitch + i;
     maxH[idx] = max(maxH[idx], H[idx]);
@@ -1038,8 +1051,8 @@ kernel void fv2_limit_slopes(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int p = geom.pitch;
     int c = j * p + i;
     int w = c - 1, e = c + 1, s = c + p, n = c - p;
@@ -1115,16 +1128,20 @@ kernel void fv2_update_ghost_cells(
     }
     int i = (int)gid;
     if (i >= 1 && i <= xsz) {
-        int c = p + i;                                   // north
-        int b = i - 1;
-        EdgeState o = fv2_outside(boundary_types[b], boundary_values[b], Zstar_y[i],
-                                  solver.depth_thresh, 1.0f, EdgeState{H[c], HV[c], HU[c]});
-        H[c - p] = o.H; HV[c - p] = o.Qn; HU[c - p] = o.Qt;
-        c = ysz * p + i;                                 // south
-        b = 2 * xsz + ysz - i;
-        o = fv2_outside(boundary_types[b], boundary_values[b], Zstar_y[c],
-                        solver.depth_thresh, -1.0f, EdgeState{H[c], HV[c], HU[c]});
-        H[c + p] = o.H; HV[c + p] = o.Qn; HU[c + p] = o.Qt;
+        if (geom.owns_north_ghost) {
+            int c = p + i;                               // north
+            int b = i - 1;
+            EdgeState o = fv2_outside(boundary_types[b], boundary_values[b], Zstar_y[i],
+                                      solver.depth_thresh, 1.0f, EdgeState{H[c], HV[c], HU[c]});
+            H[c - p] = o.H; HV[c - p] = o.Qn; HU[c - p] = o.Qt;
+        }
+        if (geom.owns_south_ghost) {
+            int c = ysz * p + i;                         // south
+            int b = 2 * xsz + ysz - i;
+            EdgeState o = fv2_outside(boundary_types[b], boundary_values[b], Zstar_y[c],
+                                      solver.depth_thresh, -1.0f, EdgeState{H[c], HV[c], HU[c]});
+            H[c + p] = o.H; HV[c + p] = o.Qn; HU[c + p] = o.Qt;
+        }
     }
 }
 
@@ -1142,9 +1159,10 @@ kernel void fv2_compute_dt(
     volatile device atomic_uint* min_dt_atomic [[buffer(8)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = (int)gid.x, j = (int)gid.y;
+    int i = (int)gid.x;
+    int j = geom.row_begin - 1 + (int)gid.y;  // include one ghost row on each side
     float local_dt = max_dt;
-    if (i < geom.pitch && j < geom.ysz + 2) {
+    if (i < geom.pitch && j >= 0 && j <= geom.row_end) {
         int c = j * geom.pitch + i;
         float h = H[c];
         if (h > solver.depth_thresh) {
@@ -1169,8 +1187,8 @@ kernel void fv2_zero_discharge(
     uint2 gid [[thread_position_in_grid]])
 {
     int i = gid.x + 1;
-    int j = gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int c = j * geom.pitch + i;
     if (H[c] < solver.depth_thresh) {
         HU[c] = 0.0f;
@@ -1245,8 +1263,8 @@ kernel void fv2_flow_x(
     threadgroup FlowVector Ustar_sh[TG_Y][TG_X];
 
     int i = (int)(tgid.x * (TG_X - 1) + tid.x);   // face between i and i+1; cell i
-    int j = (int)(tgid.y * TG_Y + tid.y) + 1;
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    int j = (int)(geom.row_begin + tgid.y * TG_Y + tid.y);
+    bool active = (i <= geom.xsz && j < geom.row_end);
 
     int idx = j * geom.pitch + i;
     FlowVector U_w = FlowVector{0.0f, 0.0f, 0.0f};
@@ -1354,8 +1372,8 @@ kernel void fv2_flow_y(
     threadgroup FlowVector Ustar_sh[TG_Y][TG_X];
 
     int i = (int)(tgid.x * TG_X + tid.x) + 1;
-    int j = (int)(tgid.y * (TG_Y - 1) + tid.y);   // face between j and j+1 (south); cell j
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    int j = (int)((geom.row_begin - 1) + tgid.y * (TG_Y - 1) + tid.y);   // face/cell row in partition
+    bool active = (i <= geom.xsz && j <= geom.row_end - 1);
 
     int idx = j * geom.pitch + i;
     FlowVector U_n = FlowVector{0.0f, 0.0f, 0.0f};   // this cell (row j)

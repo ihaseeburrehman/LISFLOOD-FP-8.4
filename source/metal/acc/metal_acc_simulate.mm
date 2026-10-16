@@ -18,6 +18,9 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
+#if defined(LISFLOOD_METAL_MPI)
+#include <mpi.h>
+#endif
 #include <cmath>
 
 namespace lis {
@@ -869,6 +872,14 @@ static void write_acc_output(Fnames *filenames, States *states, Pars *pars,
 void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
               ::Solver &solver, BoundCs &boundCs, Stage &stage, Arrays &arrays,
               int verbose) {
+#if defined(LISFLOOD_METAL_MPI)
+  if (states.cuda_mpi_gpus > 1) {
+    fprintf(stderr,
+            "ERROR: ACC solver does not support multi-GPU (staggered Qx/Qy grid "
+            "prevents row decomposition). Use GPUs=1 or choose FV1/FV2/DG2.\n");
+    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+  }
+#endif
   Simulator sim(filenames, pars, solver, arrays, states, boundCs, verbose);
   if (!sim.is_valid()) {
     printf("ERROR: Metal ACC initialisation failed. Check that\n"

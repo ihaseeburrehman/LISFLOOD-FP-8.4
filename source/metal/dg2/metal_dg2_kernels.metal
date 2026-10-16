@@ -98,6 +98,10 @@ struct Geometry {
     float tly;
     float blx;
     float bly;
+    int row_begin;        // first owned row (1 for single-GPU)
+    int row_end;          // one past last owned row (ysz+1 for single-GPU)
+    int owns_north_ghost; // 1 if rank 0
+    int owns_south_ghost; // 1 if last rank
 };
 
 // Physical parameters
@@ -983,10 +987,10 @@ kernel void update_max_field(
     constant Geometry& geom [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = gid.x + 1;
-    int j = gid.y + 1;
+    int i = (int)gid.x + 1;
+    int j = geom.row_begin + (int)gid.y;
 
-    if (i > geom.xsz || j > geom.ysz) return;
+    if (i > geom.xsz || j >= geom.row_end) return;
 
     int idx = j * geom.pitch + i;
     maxH[idx] = max(maxH[idx], H[idx]);
@@ -1551,8 +1555,8 @@ kernel void dg2_friction(
     constant int& has_manning_map [[buffer(5)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = (int)gid.x + 1, j = (int)gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int i = (int)gid.x + 1, j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int N = dg2_plane(geom);
     int c = j * geom.pitch + i;
     Coeffs C = dg2_load(U, c, N);
@@ -1654,8 +1658,8 @@ kernel void dg2_limit_slopes(
     device float* LS [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = (int)gid.x + 1, j = (int)gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int i = (int)gid.x + 1, j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int N = dg2_plane(geom), p = geom.pitch;
     int c = j * p + i;
     int w = c - 1, e = c + 1, s = c + p, n = c - p;
@@ -1701,8 +1705,8 @@ kernel void dg2_apply_limited(
     constant Geometry& geom [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = (int)gid.x + 1, j = (int)gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int i = (int)gid.x + 1, j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int N = dg2_plane(geom);
     int c = j * geom.pitch + i;
     U[P_H1x * N + c] = LS[c];
@@ -1777,20 +1781,33 @@ kernel void dg2_update_ghost_cells(
     }
     if (k <= xsz) {
         int i = k;
-        for (int side = 0; side < 2; side++) {
-            bool north = (side == 0);
-            int c = north ? p + i : ysz * p + i;
-            int b = north ? i - 1 : 2 * xsz + ysz - i;
-            float Zs = north ? Zstar_y[i] : Zstar_y[c];
+        // North ghost (j=0 ghost) — only the rank that owns row 1 writes it
+        if (geom.owns_north_ghost) {
+            int c = p + i;
+            int b = i - 1;
+            float Zs = Zstar_y[i];
             int type = boundary_types[b];
-            EdgeState o = fv2_outside(type, boundary_values[b], Zs, th, north ? -1.0f : 1.0f,
+            EdgeState o = fv2_outside(type, boundary_values[b], Zs, th, -1.0f,
                                       EdgeState{H[c], HV[c], HU[c]});
             if (type == BC_FREE && H[c] <= th) {
                 H[c] = 0.0f; U[P_H1x * N + c] = 0.0f; U[P_H1y * N + c] = 0.0f;
                 o.H = 0.0f;
             }
-            int gc = north ? c - p : c + p;
-            H[gc] = o.H; HV[gc] = o.Qn; HU[gc] = o.Qt;
+            H[c - p] = o.H; HV[c - p] = o.Qn; HU[c - p] = o.Qt;
+        }
+        // South ghost (j=ysz+1 ghost) — only the rank that owns row ysz writes it
+        if (geom.owns_south_ghost) {
+            int c = ysz * p + i;
+            int b = 2 * xsz + ysz - i;
+            float Zs = Zstar_y[c];
+            int type = boundary_types[b];
+            EdgeState o = fv2_outside(type, boundary_values[b], Zs, th, 1.0f,
+                                      EdgeState{H[c], HV[c], HU[c]});
+            if (type == BC_FREE && H[c] <= th) {
+                H[c] = 0.0f; U[P_H1x * N + c] = 0.0f; U[P_H1y * N + c] = 0.0f;
+                o.H = 0.0f;
+            }
+            H[c + p] = o.H; HV[c + p] = o.Qn; HU[c + p] = o.Qt;
         }
     }
 }
@@ -1831,8 +1848,8 @@ kernel void dg2_zero_discharge(
     constant SolverParams& solver [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = (int)gid.x + 1, j = (int)gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int i = (int)gid.x + 1, j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int N = dg2_plane(geom);
     int c = j * geom.pitch + i;
     if (U[c] < solver.depth_thresh) {
@@ -1849,8 +1866,8 @@ kernel void dg2_drain_nodata(
     device atomic_uint* mass_totals [[buffer(4)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    int i = (int)gid.x + 1, j = (int)gid.y + 1;
-    if (i > geom.xsz || j > geom.ysz) return;
+    int i = (int)gid.x + 1, j = geom.row_begin + (int)gid.y;
+    if (i > geom.xsz || j >= geom.row_end) return;
     int c = j * geom.pitch + i;
     if (abs(Z[c] - nodata) < 1e-6f) {
         float h = U[c];
@@ -1896,8 +1913,8 @@ kernel void dg2_flow_x(
 
     int N = dg2_plane(geom);
     int i = (int)(tgid.x * (TG_X - 1) + tid.x);   // face between i and i+1; cell i
-    int j = (int)(tgid.y * TG_Y + tid.y) + 1;
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    int j = geom.row_begin + (int)(tgid.y * TG_Y + tid.y);
+    bool active = (i <= geom.xsz && j < geom.row_end);
     int c = j * geom.pitch + i;
     float th = solver.depth_thresh, g = params.g;
 
@@ -1989,8 +2006,8 @@ kernel void dg2_flow_y(
 
     int N = dg2_plane(geom), p = geom.pitch;
     int i = (int)(tgid.x * TG_X + tid.x) + 1;
-    int j = (int)(tgid.y * (TG_Y - 1) + tid.y);   // face between j (north) and j+1 (south); cell j
-    bool active = (i <= geom.xsz && j <= geom.ysz);
+    int j = (geom.row_begin - 1) + (int)(tgid.y * (TG_Y - 1) + tid.y);
+    bool active = (i <= geom.xsz && j <= geom.row_end - 1);
     int c = j * p + i;
     float th = solver.depth_thresh, g = params.g;
 
