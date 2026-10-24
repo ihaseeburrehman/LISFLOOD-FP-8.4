@@ -886,8 +886,11 @@ apply_friction
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
 #if defined(LISFLOOD_CUDA_MPI)
-	const int j_begin = cuda::fv1_owned_row_begin();
-	const int j_end   = cuda::fv1_owned_row_end();
+	// the owned rows and the halo row on each side: the halo rows hold the
+	// neighbour's state as exchanged before this step, and the fluxes across
+	// the partition need it after friction, as on one GPU (as in FV1)
+	const int j_begin = max(1, cuda::fv1_owned_row_begin() - 1);
+	const int j_end   = min(cuda::geometry.ysz + 1, cuda::fv1_owned_row_end() + 1);
 #endif
 
 	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
