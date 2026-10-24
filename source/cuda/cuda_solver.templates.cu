@@ -123,6 +123,8 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 			solver.update_dt_per_element(dt_field);
 			checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
 						dt_field + element_offset, &dt, elements));
+			// the host reads the managed dt next: wait for the reduction
+			checkCudaErrors(cudaStreamSynchronize(0));
 		}
 #endif
 	}

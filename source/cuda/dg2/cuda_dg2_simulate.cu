@@ -226,15 +226,18 @@ void lis::cuda::dg2::Simulation::run
 		stats_collector.accumulate_mass();
 		stats_collector.zero_instantaneous_mass();
 		solve->update_ghost_cells();
-		dynamic_dt.update_dt();
-		solver.MinTstep = FMIN(solver.MinTstep, cuda::dt);
+		// the time step as update_dt returns it: the managed cuda::dt may
+		// still hold the previous step on the host (its update is
+		// asynchronous), and every rank must advance the same time
+		const NUMERIC_TYPE step_dt = dynamic_dt.update_dt();
+		solver.MinTstep = FMIN(solver.MinTstep, step_dt);
 
 		if (
 #if defined(LISFLOOD_CUDA_MPI)
 			mpi_rank == 0 &&
 #endif
-			verbose) printf("t=%f\tdt=%f\n", solver.t, cuda::dt);
-		solver.t += cuda::dt;
+			verbose) printf("t=%f\tdt=%f\n", solver.t, step_dt);
+		solver.t += step_dt;
 		solver.itCount++;
 
 		d_U = solve->update_flow_variables(
