@@ -275,6 +275,34 @@ reduce_dt
 }
 
 
+/**
+ * uniform rain, as in FV1: rate x dt added to the depth (cell average) of
+ * every cell this rank owns outside NoData; a uniform depth change leaves the
+ * slopes as they are
+ */
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
+update_uniform_rain_func
+(
+	Flow U,
+	DeviceTopography DEM,
+	NUMERIC_TYPE rain_rate
+)
+{
+	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
+	int global_j = cuda::fv1_owned_row_begin()
+		+ blockIdx.y * blockDim.y + threadIdx.y;
+
+	for (int j = global_j; j < cuda::fv1_owned_row_end(); j += blockDim.y * gridDim.y)
+	{
+		for (int i = global_i; i < cuda::pitch; i += blockDim.x * gridDim.x)
+		{
+			if (FABS(DEM._0[j * cuda::pitch + i] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
+			U.H[j * cuda::pitch + i] += rain_rate * cuda::dt;
+		}
+	}
+}
+
 __device__
 FlowCoeffs bed_source_x
 (
@@ -980,7 +1008,8 @@ void lis::cuda::fv2::Solver::update_uniform_rain
 	NUMERIC_TYPE rain_rate
 )
 {
-	return;
+	lis::cuda::fv2::update_uniform_rain_func<<<grid_size, cuda::block_size>>>(
+			Uold, DEM, rain_rate);
 }
 
 #if defined(LISFLOOD_CUDA_MPI)

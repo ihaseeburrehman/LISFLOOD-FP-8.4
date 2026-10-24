@@ -14,6 +14,7 @@
 #include "cuda_losses.cuh"
 #include "cuda_unifiedallocator.cuh"
 #include "../rain/rain.h"
+#include "../../rain/Rainfall_uniform.h"
 #include "io.h"
 #include <algorithm>
 #include <cstdio>
@@ -197,6 +198,7 @@ void lis::cuda::fv2::Simulation::run
 		snapshot.enable_discharge_writer();
 	}
 
+	Rainfall_uniform rainfall_uniform(C(0.0));
 	Flow& d_U = solve->d_U();
 
 	time_t loop_start;
@@ -209,6 +211,12 @@ void lis::cuda::fv2::Simulation::run
 			rain.update_time(solver.t);
 			lis::cuda::DynamicRain::update<<<cell_grid, CUDA_BLOCK_SIZE>>>(
 					d_DEM._0, d_U.H, rain.data());
+		}
+
+		if (states.rainfall == ON)
+		{
+			rainfall_uniform.update_rainfall(filenames.rainfilename, solver.t);
+			solve->update_uniform_rain(rainfall_uniform.value);
 		}
 		stats_collector.zero_instantaneous_mass();
 		cuda::Boundary::update_time_series(solver.t);
