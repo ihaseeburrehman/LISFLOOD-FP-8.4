@@ -3,8 +3,6 @@
 #include "cuda_hll.cuh"
 #include "cuda_solver.cuh"
 #include <algorithm>
-#include <cfloat>
-#include <helper_cuda.h>
 #if defined(LISFLOOD_CUDA_MPI)
 #include <mpi.h>
 #endif
@@ -217,18 +215,6 @@ __global__ void update_dt_per_element
 	}
 }
 
-/** *a = min(*a, v) for v >= 0: the bit patterns of non-negative floats order as the values */
-__device__ inline void atomic_min_nonnegative(float* a, float v)
-{
-	atomicMin(reinterpret_cast<unsigned int*>(a), __float_as_uint(v));
-}
-
-__device__ inline void atomic_min_nonnegative(double* a, double v)
-{
-	atomicMin(reinterpret_cast<unsigned long long*>(a),
-			static_cast<unsigned long long>(__double_as_longlong(v)));
-}
-
 /**
  * update_dt_per_element and the minimum over elements [first, last) in one
  * kernel: each cell's time step is computed as there, and the minimum of the
@@ -287,18 +273,7 @@ reduce_dt
 		}
 	}
 
-	// minimum over the block: within each warp, then over the warps
-	__shared__ NUMERIC_TYPE warp_min[CUDA_BLOCK_SIZE/32];
-	int tid = threadIdx.y*blockDim.x + threadIdx.x;
-	for (int s=16; s>0; s>>=1) local = FMIN(local, __shfl_down_sync(0xffffffff, local, s));
-	if ((tid & 31) == 0) warp_min[tid/32] = local;
-	__syncthreads();
-	if (tid < 32)
-	{
-		local = (tid < (blockDim.x*blockDim.y)/32) ? warp_min[tid] : FLT_MAX;
-		for (int s=16; s>0; s>>=1) local = FMIN(local, __shfl_down_sync(0xffffffff, local, s));
-		if (tid == 0) atomic_min_nonnegative(min_dt, local);
-	}
+	block_min_to(local, min_dt);
 }
 
 __global__

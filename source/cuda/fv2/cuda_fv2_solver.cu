@@ -232,6 +232,49 @@ update_dt_per_element
 	}
 }
 
+/**
+ * update_dt_per_element and the minimum over elements [first, last) in one
+ * kernel: each cell's time step is computed as there, and the minimum of the
+ * same values is exact in any order
+ */
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
+reduce_dt
+(
+	NUMERIC_TYPE* min_dt_out,
+	Flow flow,
+	int first,
+	int last
+)
+{
+	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
+	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+#if defined(LISFLOOD_CUDA_MPI)
+	const int j_begin = cuda::fv1_owned_row_begin();
+	const int j_end   = cuda::fv1_owned_row_end();
+#endif
+	NUMERIC_TYPE local = FLT_MAX;
+
+	for (int j=global_j; j<cuda::geometry.ysz+2; j+=blockDim.y*gridDim.y)
+	{
+		for (int i=global_i; i<cuda::pitch; i+=blockDim.x*gridDim.x)
+		{
+#if defined(LISFLOOD_CUDA_MPI)
+			if (j < j_begin || j >= j_end) continue;
+#endif
+			int idx = j*cuda::pitch + i;
+			if (idx < first || idx >= last) continue;
+			FlowCoeffs U = flow[idx];
+			NUMERIC_TYPE local_dt = cuda::solver_params.max_dt;
+			local_dt = min_dt(local_dt, U.get_0());
+			local = FMIN(local, local_dt);
+		}
+	}
+
+	block_min_to(local, min_dt_out);
+}
+
+
 __device__
 FlowCoeffs bed_source_x
 (
@@ -886,6 +929,20 @@ lis::cuda::fv2::Flow& lis::cuda::fv2::Solver::d_U()
 lis::cuda::fv2::Flow& lis::cuda::fv2::Solver::d_Uint()
 {
 	return Uint;
+}
+
+bool lis::cuda::fv2::Solver::reduce_dt
+(
+	NUMERIC_TYPE* min_dt,
+	int first,
+	int count
+) const
+{
+	// 0x7f bytes: a float or double far above any time step
+	checkCudaErrors(cudaMemsetAsync(min_dt, 0x7f, sizeof(NUMERIC_TYPE)));
+	lis::cuda::fv2::reduce_dt<<<grid_size, cuda::block_size>>>(
+			min_dt, Uold, first, first + count);
+	return true;
 }
 
 void lis::cuda::fv2::Solver::update_dt_per_element

@@ -4,6 +4,7 @@
 #define CUDA_BLOCK_SIZE 256
 
 #include <algorithm>
+#include <cfloat>
 #include "../geometry.h"
 #include "cuda_boundary.cuh"
 #include "cuda_stats.cuh"
@@ -56,6 +57,37 @@ __device__ __forceinline__ int fv1_owned_row_end() { return cuda::geometry.ysz +
 #endif
 
 extern const dim3 block_size;
+
+/** *a = min(*a, v) for v >= 0: the bit patterns of non-negative floats order as the values */
+__device__ inline void atomic_min_nonnegative(float* a, float v)
+{
+	atomicMin(reinterpret_cast<unsigned int*>(a), __float_as_uint(v));
+}
+
+__device__ inline void atomic_min_nonnegative(double* a, double v)
+{
+	atomicMin(reinterpret_cast<unsigned long long*>(a),
+			static_cast<unsigned long long>(__double_as_longlong(v)));
+}
+
+/**
+ * minimum of v (>= 0) over the threads of a block of CUDA_BLOCK_SIZE threads,
+ * taken into *min (atomically); within each warp, then over the warps
+ */
+__device__ inline void block_min_to(NUMERIC_TYPE v, NUMERIC_TYPE* min)
+{
+	__shared__ NUMERIC_TYPE warp_min[CUDA_BLOCK_SIZE/32];
+	int tid = threadIdx.y*blockDim.x + threadIdx.x;
+	for (int s=16; s>0; s>>=1) v = FMIN(v, __shfl_down_sync(0xffffffff, v, s));
+	if ((tid & 31) == 0) warp_min[tid/32] = v;
+	__syncthreads();
+	if (tid < 32)
+	{
+		v = (tid < (blockDim.x*blockDim.y)/32) ? warp_min[tid] : FLT_MAX;
+		for (int s=16; s>0; s>>=1) v = FMIN(v, __shfl_down_sync(0xffffffff, v, s));
+		if (tid == 0) atomic_min_nonnegative(min, v);
+	}
+}
 
 /**
  * blocks for the kernels of block_size threads over nx by ny cells, allowing

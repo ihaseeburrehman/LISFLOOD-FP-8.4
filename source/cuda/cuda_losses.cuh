@@ -137,6 +137,25 @@ public:
 	 * slopes zero); a cell that dries loses its slopes and discharge.
 	 * face: the face value is average +- face x slope (FV2: 0.5, DG2: sqrt(3)).
 	 */
+	/**
+	 * FV2 and DG2, the cell-wise updates after the fluxes in one pass:
+	 * NoData drainage (if drain), the losses as apply_slopes (if enabled) and
+	 * the maximum depth maxH, over the same cells as the separate kernels
+	 */
+	void apply_slopes_cells
+	(
+		NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,
+		NUMERIC_TYPE* HU, NUMERIC_TYPE* HU1x, NUMERIC_TYPE* HU1y,
+		NUMERIC_TYPE* HV, NUMERIC_TYPE* HV1x, NUMERIC_TYPE* HV1y,
+		NUMERIC_TYPE* DEM,
+		NUMERIC_TYPE* maxH,
+		bool drain,
+		MassStats* mass_stats,
+		NUMERIC_TYPE face,
+		NUMERIC_TYPE t,
+		dim3 grid_size
+	);
+
 	void apply_slopes
 	(
 		NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,

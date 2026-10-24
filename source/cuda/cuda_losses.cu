@@ -162,6 +162,64 @@ __device__ NUMERIC_TYPE depth_after_losses
 	return depth_after_loss(h, rate, p.residual[idx], step_dt, threshold);
 }
 
+/** as drain_nodata_water, for one NoData cell */
+__device__ void drain_cell(NUMERIC_TYPE* H, int idx, MassStats* mass_stats)
+{
+	NUMERIC_TYPE h = H[idx];
+	H[idx] = C(0.0);
+	if (h == C(0.0)) return;
+	NUMERIC_TYPE Q = -h * cuda::geometry.dx * cuda::geometry.dy / cuda::dt;
+	if (Q > C(0.0)) atomicAdd(&(mass_stats->in), Q);
+	else atomicAdd(&(mass_stats->out), -Q);
+}
+
+/**
+ * FV2 and DG2 losses of one cell (see Losses::apply_slopes); adds the depth
+ * removed to removed
+ */
+__device__ void loss_cell_slopes
+(
+	NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,
+	NUMERIC_TYPE* HU, NUMERIC_TYPE* HU1x, NUMERIC_TYPE* HU1y,
+	NUMERIC_TYPE* HV, NUMERIC_TYPE* HV1x, NUMERIC_TYPE* HV1y,
+	NUMERIC_TYPE face,
+	const LossParams& p,
+	int idx,
+	double& removed
+)
+{
+	NUMERIC_TYPE h = H[idx];
+	NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
+	if (h_new == h) return;
+
+	H[idx] = h_new;
+	bool faces_dry = face*FABS(H1x[idx]) >= h_new || face*FABS(H1y[idx]) >= h_new;
+	if (h_new > cuda::solver_params.DepthThresh && !faces_dry)
+	{
+		// keep the velocity: discharge falls with the depth
+		NUMERIC_TYPE scale = h_new/h;
+		HU[idx] *= scale; HU1x[idx] *= scale; HU1y[idx] *= scale;
+		HV[idx] *= scale; HV1x[idx] *= scale; HV1y[idx] *= scale;
+	}
+	else if (h_new > cuda::solver_params.DepthThresh)
+	{
+		// a face would become dry (cell on a wet/dry edge): make the cell
+		// first order, so every face has the cell's depth and velocity
+		// (a face with discharge but no depth would stop the time step)
+		NUMERIC_TYPE scale = h_new/h;
+		H1x[idx] = C(0.0); H1y[idx] = C(0.0);
+		HU[idx] *= scale; HU1x[idx] = C(0.0); HU1y[idx] = C(0.0);
+		HV[idx] *= scale; HV1x[idx] = C(0.0); HV1y[idx] = C(0.0);
+	}
+	else
+	{
+		H1x[idx] = C(0.0); H1y[idx] = C(0.0);
+		HU[idx] = C(0.0); HU1x[idx] = C(0.0); HU1y[idx] = C(0.0);
+		HV[idx] = C(0.0); HV1x[idx] = C(0.0); HV1y[idx] = C(0.0);
+	}
+	removed += (double)(h - h_new);
+}
+
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
 apply_losses_fv1
@@ -239,17 +297,9 @@ fv1_cell_updates
 			NUMERIC_TYPE h = H[idx];
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6))
 			{
-				// as drain_nodata_water
 				if (drain)
 				{
-					H[idx] = C(0.0);
-					if (h != C(0.0))
-					{
-						NUMERIC_TYPE Q = -h * cuda::geometry.dx * cuda::geometry.dy
-							/ cuda::dt;
-						if (Q > C(0.0)) atomicAdd(&(mass_stats->in), Q);
-						else atomicAdd(&(mass_stats->out), -Q);
-					}
+					drain_cell(H, idx, mass_stats);
 					h = C(0.0);
 				}
 			}
@@ -307,40 +357,60 @@ apply_losses_slopes
 			int idx = j*cuda::pitch + i;
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
-			NUMERIC_TYPE h = H[idx];
-			NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
-			if (h_new == h) continue;
-
-			H[idx] = h_new;
-			bool faces_dry = face*FABS(H1x[idx]) >= h_new || face*FABS(H1y[idx]) >= h_new;
-			if (h_new > cuda::solver_params.DepthThresh && !faces_dry)
-			{
-				// keep the velocity: discharge falls with the depth
-				NUMERIC_TYPE scale = h_new/h;
-				HU[idx] *= scale; HU1x[idx] *= scale; HU1y[idx] *= scale;
-				HV[idx] *= scale; HV1x[idx] *= scale; HV1y[idx] *= scale;
-			}
-			else if (h_new > cuda::solver_params.DepthThresh)
-			{
-				// a face would become dry (cell on a wet/dry edge): make the cell
-				// first order, so every face has the cell's depth and velocity
-				// (a face with discharge but no depth would stop the time step)
-				NUMERIC_TYPE scale = h_new/h;
-				H1x[idx] = C(0.0); H1y[idx] = C(0.0);
-				HU[idx] *= scale; HU1x[idx] = C(0.0); HU1y[idx] = C(0.0);
-				HV[idx] *= scale; HV1x[idx] = C(0.0); HV1y[idx] = C(0.0);
-			}
-			else
-			{
-				H1x[idx] = C(0.0); H1y[idx] = C(0.0);
-				HU[idx] = C(0.0); HU1x[idx] = C(0.0); HU1y[idx] = C(0.0);
-				HV[idx] = C(0.0); HV1x[idx] = C(0.0); HV1y[idx] = C(0.0);
-			}
-			removed += (double)(h - h_new);
+			loss_cell_slopes(H, H1x, H1y, HU, HU1x, HU1y, HV, HV1x, HV1y,
+					face, p, idx, removed);
 		}
 	}
 
 	add_block_sum(removed*cuda::geometry.dx*cuda::geometry.dy, volume);
+}
+
+/**
+ * FV2 and DG2, the cell-wise updates after the fluxes in one pass, over the
+ * same cells as the separate kernels: drain_nodata_water and update_max_field
+ * on the rows this rank owns, apply_losses_slopes on rows 1 to ysz
+ */
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
+slopes_cell_updates
+(
+	NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,
+	NUMERIC_TYPE* HU, NUMERIC_TYPE* HU1x, NUMERIC_TYPE* HU1y,
+	NUMERIC_TYPE* HV, NUMERIC_TYPE* HV1x, NUMERIC_TYPE* HV1y,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* maxH,
+	bool drain,
+	bool losses,
+	MassStats* mass_stats,
+	NUMERIC_TYPE face,
+	LossParams p,
+	double* volume
+)
+{
+	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
+	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	double removed = 0.0;
+
+	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
+	{
+		const bool owned = j >= cuda::fv1_owned_row_begin() && j < cuda::fv1_owned_row_end();
+		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
+		{
+			int idx = j*cuda::pitch + i;
+			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6))
+			{
+				if (drain && owned) drain_cell(H, idx, mass_stats);
+			}
+			else if (losses)
+			{
+				loss_cell_slopes(H, H1x, H1y, HU, HU1x, HU1y, HV, HV1x, HV1y,
+						face, p, idx, removed);
+			}
+			if (owned) maxH[idx] = FMAX(maxH[idx], H[idx]);
+		}
+	}
+
+	if (losses) add_block_sum(removed*cuda::geometry.dx*cuda::geometry.dy, volume);
 }
 
 __global__ void
@@ -814,6 +884,25 @@ void lis::cuda::Losses::apply_fv1_cells
 {
 	lis::cuda::fv1_cell_updates<<<grid_size, CUDA_BLOCK_SIZE>>>(H, HU, HV, DEM, maxH, drain,
 			enabled(), mass_stats, params(t), d_volume);
+}
+
+void lis::cuda::Losses::apply_slopes_cells
+(
+	NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,
+	NUMERIC_TYPE* HU, NUMERIC_TYPE* HU1x, NUMERIC_TYPE* HU1y,
+	NUMERIC_TYPE* HV, NUMERIC_TYPE* HV1x, NUMERIC_TYPE* HV1y,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* maxH,
+	bool drain,
+	MassStats* mass_stats,
+	NUMERIC_TYPE face,
+	NUMERIC_TYPE t,
+	dim3 grid_size
+)
+{
+	lis::cuda::slopes_cell_updates<<<grid_size, CUDA_BLOCK_SIZE>>>(H, H1x, H1y,
+			HU, HU1x, HU1y, HV, HV1x, HV1y, DEM, maxH, drain, enabled(),
+			mass_stats, face, params(t), d_volume);
 }
 
 void lis::cuda::Losses::apply_slopes

@@ -239,18 +239,12 @@ void lis::cuda::dg2::Simulation::run
 
 		d_U = solve->update_flow_variables(
 				stats_collector.instantaneous_mass());
-		if (pars.drain_nodata)
-		{
-			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM._0,
-					stats_collector.instantaneous_mass(), grid_size);
-		}
-		if (losses.enabled())
-		{
-			losses.apply_slopes(d_U.H, d_U.H1x, d_U.H1y, d_U.HU, d_U.HU1x, d_U.HU1y,
-					d_U.HV, d_U.HV1x, d_U.HV1y, d_DEM._0, SQRT(C(3.0)), solver.t, grid_size);
-		}
+		// drain, losses and maximum depth in one pass over the cells
+		losses.apply_slopes_cells(d_U.H, d_U.H1x, d_U.H1y, d_U.HU, d_U.HU1x, d_U.HU1y,
+				d_U.HV, d_U.HV1x, d_U.HV1y, d_DEM._0, max_field.data(),
+				pars.drain_nodata, stats_collector.instantaneous_mass(),
+				SQRT(C(3.0)), solver.t, grid_size);
 		stats_collector.accumulate_mass();
-		max_field.update(d_U.H);
 
 		bool gathered_full_state = false;
 		if (stats.need_to_write(solver.t))
