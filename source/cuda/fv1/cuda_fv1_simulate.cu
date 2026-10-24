@@ -122,12 +122,14 @@ void lis::cuda::fv1::Simulation::run
 	int mpi_row_end = 1 + (geometry.ysz * (mpi_rank + 1)) / mpi_size;
 	if (mpi_row_end <= mpi_row_begin) throw std::runtime_error("More MPI ranks than FV1 rows");
 	configure_mpi_partition(mpi_row_begin, mpi_row_end, mpi_rank, mpi_size);
-	// Launch only enough y blocks for this rank's stripe. The kernels stride
-	// within that stripe; the extra block supplies the overlapping FV1 face.
-	grid_size.y = std::min(128,
-		(mpi_row_end - mpi_row_begin + CUDA_BLOCK_SIZE_Y - 2)
-		/ (CUDA_BLOCK_SIZE_Y - 1) + 1);
+	const int owned_rows = mpi_row_end - mpi_row_begin;
+#else
+	const int owned_rows = geometry.ysz;
 #endif
+	// launch only enough blocks for this rank's cells: the kernels stride over
+	// larger grids, and blocks beyond the domain would start only to exit
+	grid_size = cuda::tile_grid(geometry.xsz, owned_rows);
+	const dim3 cell_grid = cuda::row_grid(geometry.xsz, owned_rows);
 	cuda::copy_to_symbol(cuda::geometry, &geometry, sizeof(Geometry));
 	cuda::copy_to_symbol(cuda::pitch, &pitch, sizeof(int));
 
@@ -200,7 +202,7 @@ void lis::cuda::fv1::Simulation::run
 			);
 	Losses losses(filenames, states, pars, geometry, pitch, offset, verbose);
 	MaxField max_field(filenames.resrootname, geometry, pitch, offset,
-			grid_size, pars.output_precision);
+			cell_grid, pars.output_precision);
 
 	Stats stats(filenames.resrootname, pars.MassInt, pars.MassTotal, states.checkpoint, solver.t,
 #if defined(LISFLOOD_CUDA_MPI)
@@ -258,7 +260,7 @@ void lis::cuda::fv1::Simulation::run
 		if (rain.enabled())
 		{
 			rain.update_time(solver.t);
-			lis::cuda::DynamicRain::update<<<grid_size, CUDA_BLOCK_SIZE>>>(
+			lis::cuda::DynamicRain::update<<<cell_grid, CUDA_BLOCK_SIZE>>>(
 					d_DEM, d_U.H, rain.data());
 		}
 
@@ -294,11 +296,11 @@ void lis::cuda::fv1::Simulation::run
 		if (pars.drain_nodata)
 		{
 			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM,
-					stats_collector.instantaneous_mass(), grid_size);
+					stats_collector.instantaneous_mass(), cell_grid);
 		}
 		if (losses.enabled())
 		{
-			losses.apply_fv1(d_U.H, d_U.HU, d_U.HV, d_DEM, solver.t, grid_size);
+			losses.apply_fv1(d_U.H, d_U.HU, d_U.HV, d_DEM, solver.t, cell_grid);
 		}
 		stats_collector.accumulate_mass(step_dt);
 		max_field.update(d_U.H);

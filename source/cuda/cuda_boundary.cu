@@ -502,6 +502,14 @@ __device__ int lis::cuda::Boundary::index_s_ACC
 {
 	return 2*cuda::geometry.xsz + cuda::geometry.ysz - i - 1;
 }											   
+namespace
+{
+// host copies of the counts, so that steps without time series or point
+// sources launch no kernels for them
+int host_time_series_count = 0;
+int host_PS_count = 0;
+}
+
 void lis::cuda::Boundary::initialise
 (
 	BoundaryConditions& d_dst,
@@ -515,6 +523,8 @@ void lis::cuda::Boundary::initialise
 	initialise_all_time_series(temp, h_src);
 	initialise_BC(temp, h_src);
 	initialise_PS(temp, h_src, pitch, offset);
+	host_time_series_count = temp.time_series_count;
+	host_PS_count = temp.PS_count;
 	
 	cuda::copy_to_symbol(d_dst, &temp, sizeof(BoundaryConditions));
 }
@@ -657,6 +667,8 @@ void lis::cuda::Boundary::update_time_series
 	NUMERIC_TYPE t
 )
 {
+	// boundary values change only through time series
+	if (host_time_series_count == 0) return;
 	cuda::update_time_series<<<1, 1>>>(t);
 	update_time_varying_boundary_conditions<<<64, CUDA_BLOCK_SIZE>>>();
 	update_time_varying_point_sources<<<1, CUDA_BLOCK_SIZE>>>();
@@ -669,6 +681,7 @@ void lis::cuda::Boundary::update_point_sources
 	MassStats* mass_stats
 )
 {
+	if (host_PS_count == 0) return;
 	cuda::update_point_sources<<<1, CUDA_BLOCK_SIZE>>>(H, DEM, mass_stats);
 }
 
@@ -683,9 +696,9 @@ void lis::cuda::Boundary::update_H
 	int drycheck
 )
 {
-	cuda::update_point_sources_Q << <1, CUDA_BLOCK_SIZE >> > (H, mass_stats);
+	if (host_PS_count > 0) cuda::update_point_sources_Q << <1, CUDA_BLOCK_SIZE >> > (H, mass_stats);
 	cuda::update_H << <grid_size, cuda::block_size >> > (H, Qx, Qy, drycheck);
-	cuda::update_point_sources_H << <1, CUDA_BLOCK_SIZE >> > (H, DEM, mass_stats);
+	if (host_PS_count > 0) cuda::update_point_sources_H << <1, CUDA_BLOCK_SIZE >> > (H, DEM, mass_stats);
 }								  
 void lis::cuda::Boundary::drain_nodata_water
 (

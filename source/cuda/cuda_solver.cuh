@@ -3,6 +3,7 @@
 #define CUDA_BLOCK_SIZE_Y 16
 #define CUDA_BLOCK_SIZE 256
 
+#include <algorithm>
 #include "../geometry.h"
 #include "cuda_boundary.cuh"
 #include "cuda_stats.cuh"
@@ -55,6 +56,27 @@ __device__ __forceinline__ int fv1_owned_row_end() { return cuda::geometry.ysz +
 #endif
 
 extern const dim3 block_size;
+
+/**
+ * blocks for the kernels of block_size threads over nx by ny cells, allowing
+ * for tiles that overlap by one cell (FV1, FV2); at most 128 x 128, larger
+ * grids are covered by the kernels' grid-stride loops
+ */
+inline dim3 tile_grid(int nx, int ny)
+{
+	auto blocks = [](int n, int b) { return std::min(128, std::max(1, (n + b - 3)/(b - 1) + 1)); };
+	return dim3(blocks(nx, CUDA_BLOCK_SIZE_X), blocks(ny, CUDA_BLOCK_SIZE_Y));
+}
+
+/**
+ * blocks for the cell-wise kernels of CUDA_BLOCK_SIZE threads in a row over
+ * nx by ny cells: one block row per grid row, at most 128 x 128
+ */
+inline dim3 row_grid(int nx, int ny)
+{
+	return dim3(std::min(128, std::max(1, (nx + CUDA_BLOCK_SIZE - 1)/CUDA_BLOCK_SIZE)),
+			std::min(128, std::max(1, ny)));
+}
 
 __device__
 void update_mass_stats_x

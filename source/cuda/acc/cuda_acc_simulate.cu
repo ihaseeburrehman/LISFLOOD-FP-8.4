@@ -53,6 +53,10 @@ void lis::cuda::acc::Simulation::run
 	//CHECK_CUDA_ERROR(cuda::sync());
 
 	update_geometry(pars, geometry); 
+	// launch only enough blocks for the cells (Qx and Qy have one more column
+	// and row); the kernels stride over larger grids
+	grid_size = cuda::tile_grid(geometry.xsz + 1, geometry.ysz + 1);
+	const dim3 cell_grid = cuda::row_grid(geometry.xsz + 1, geometry.ysz + 1);
 
 	cuda::copy_to_symbol(cuda::geometry, &geometry, sizeof(Geometry)); 
 
@@ -194,7 +198,7 @@ void lis::cuda::acc::Simulation::run
 		if (rain.enabled())
 		{
 			rain.update_time(solver.t);
-			lis::cuda::DynamicRain::updateACC << <grid_size, CUDA_BLOCK_SIZE >> > (
+			lis::cuda::DynamicRain::updateACC << <cell_grid, CUDA_BLOCK_SIZE >> > (
 				d_DEM, d_U.H, rain.data());
 		}
 
@@ -212,13 +216,13 @@ void lis::cuda::acc::Simulation::run
 		{
 
 			cuda::Boundary::drain_nodata_waterACC(d_U.H, d_DEM,
-					stats_collector.instantaneous_mass(), grid_size); 
+					stats_collector.instantaneous_mass(), cell_grid); 
 		}
 
 		// infiltration and evaporation, before rain as in the CPU solver
 		if (losses.enabled())
 		{
-			losses.apply_acc(d_U.H, d_DEM, solver.t, grid_size);
+			losses.apply_acc(d_U.H, d_DEM, solver.t, cell_grid);
 		}
 
 		if (states.rainfall == ON) {
