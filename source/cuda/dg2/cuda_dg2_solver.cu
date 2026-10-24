@@ -163,6 +163,13 @@ void lis::cuda::dg2::gather_dg2_rows(Flow& flow, const Geometry& geometry,
     gather(flow.H);
     gather(flow.HU);
     gather(flow.HV);
+    // the slopes too: the .wd1x/.wd1y files and DG2 start files hold them
+    gather(flow.H1x);
+    gather(flow.H1y);
+    gather(flow.HU1x);
+    gather(flow.HU1y);
+    gather(flow.HV1x);
+    gather(flow.HV1y);
 }
 #endif
 
