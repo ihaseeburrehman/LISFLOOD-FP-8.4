@@ -7,8 +7,8 @@ endif()
 
 project(lisflood-fp)
 
-option(LISFLOOD_ENABLE_CUDA_MPI "Enable the experimental CUDA FV1 MPI multi-GPU path" OFF)
-option(LISFLOOD_ENABLE_METAL_MPI "Enable the Metal FV1 MPI multi-GPU/rank path" OFF)
+option(LISFLOOD_ENABLE_CUDA_MPI "Multi-GPU (MPI) for the CUDA FV1, FV2 and DG2 solvers" OFF)
+option(LISFLOOD_ENABLE_METAL_MPI "Multi-rank (MPI) for the Metal FV1, FV2 and DG2 solvers" OFF)
 
 set(_CONFIG config.default.cmake CACHE FILEPATH "CMake config file")
 include(${_CONFIG})

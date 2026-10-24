@@ -221,6 +221,7 @@ int main(int argc, char *argv[])
 	SimStates.calc_infiltration = OFF;
 	SimStates.calc_distributed_infiltration = OFF;
 	SimStates.calc_greenampt = OFF;
+	SimStates.calc_horton = OFF;
 	SimStates.call_gzip = OFF;
 	SimStates.alt_ascheader = OFF;
 	SimStates.checkpoint = OFF;
@@ -450,19 +451,22 @@ int main(int argc, char *argv[])
 			"(supported by CUDA/Metal FV1, FV2, DG2, ACC, ACC_NUGRID, "
 			"MWDG2 and HWFV1)\n");
 	}
-	// Green-Ampt is a separate choice from the constant rate, and only the
-	// GPU solvers identified above apply it
-	if (Statesptr->calc_greenampt == ON && Statesptr->calc_infiltration == ON)
+	// Green-Ampt and Horton are separate choices from the constant rate, and
+	// only the GPU solvers identified above apply them
+	if ((Statesptr->calc_greenampt == ON) + (Statesptr->calc_horton == ON) +
+		(Statesptr->calc_infiltration == ON) > 1)
 	{
 		fprintf(stderr, "ERROR: choose one infiltration model: either 'infiltration <rate>' "
-			"or 'infilfile <file>' (constant rate), or 'infiltration greenampt'\n");
+			"or 'infilfile <file>' (constant rate), 'infiltration greenampt' "
+			"or 'infiltration horton'\n");
 		return -1;
 	}
-	if (Statesptr->calc_greenampt == ON && !losses_on_gpu)
+	if ((Statesptr->calc_greenampt == ON || Statesptr->calc_horton == ON) && !losses_on_gpu)
 	{
-		fprintf(stderr, "WARNING: Green-Ampt infiltration is not applied by this solver "
+		fprintf(stderr, "WARNING: %s infiltration is not applied by this solver "
 			"(supported by CUDA/Metal FV1, FV2, DG2, ACC, ACC_NUGRID, "
-			"MWDG2 and HWFV1)\n");
+			"MWDG2 and HWFV1)\n",
+			Statesptr->calc_horton == ON ? "Horton" : "Green-Ampt");
 	}
 
 #ifdef CUDA

@@ -1,0 +1,17 @@
+resroot 1hr
+dirroot metal_2gpu_results
+DEMfile inputs/Alzette_sub_basin_10m_bridge_burn.asc
+manningfile inputs/manning.n.ascii
+dynamicrainfile inputs/rain_wrf1p3_24h_from_14jul18.nc
+startfile inputs/6hr-0004.wd
+fv1
+metal
+GPUs 2
+sim_time 43200
+initial_tstep 10
+massint 600
+saveint 3600
+bcifile inputs/Border.bci
+nodata_elevation -9999
+drain_nodata
+qoutput

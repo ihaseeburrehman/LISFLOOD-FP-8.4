@@ -20,12 +20,15 @@ namespace acc_nugrid { struct AssembledSolution; }
  * dtheta (porosity - initial moisture) and, optionally, fmax (m, the most
  * the soil can take: soil depth x dtheta), and the state F (m, infiltrated
  * depth so far, double precision).
+ * Horton (horton == true): the same grids hold fc (ks, m/s), f0 (psi, m/s)
+ * and k (dtheta, 1/s), and F the depth infiltrated so far; fmax is unused.
  * Both: evap_rate (m/s, uniform), and residual (m, the part of the loss that
  * rounding to single precision dropped, carried to the next step).
  */
 struct LossParams
 {
 	bool greenampt;
+	bool horton;
 	NUMERIC_TYPE* rate_grid;
 	NUMERIC_TYPE uniform_rate;
 	NUMERIC_TYPE evap_rate;
@@ -61,6 +64,17 @@ struct LossParams
  *   greenampt_soil_depth <number|file>  optional: soil depth, m (storage cap)
  * The soil does not recover between rain events (F never decreases).
  *
+ * Horton (infiltration horton), on every cell with water, in its
+ * cumulative-infiltration form (as in SWMM): the capacity decays with the
+ * depth infiltrated, F = fc te + (f0 - fc)/k (1 - exp(-k te)), so a cell
+ * that runs short of water keeps its unused capacity. Each step te is found
+ * from F (Newton) and the step takes F(te + dt) - F(te), limited by the
+ * water available:
+ *   horton_f0 <number|file>   initial capacity f0, mm/h
+ *   horton_fc <number|file>   final capacity fc, mm/h (fc <= f0)
+ *   horton_k  <number|file>   decay constant k, 1/h
+ * As for Green-Ampt, the soil does not recover between rain events.
+ *
  * Evaporation, with either model:
  *   evaporation <file>    time series in mm/day, uniform in space
  *
@@ -83,7 +97,7 @@ public:
 		int verbose
 	);
 
-	bool enabled() const { return infiltration || greenampt || evaporation; }
+	bool enabled() const { return infiltration || greenampt || horton || evaporation; }
 
 	/** FV1: ghost-cell layout; scales HU and HV with the depth */
 	void apply_fv1
@@ -158,6 +172,7 @@ private:
 	int offset;
 	bool infiltration = false;
 	bool greenampt = false;
+	bool horton = false;
 	bool evaporation = false;
 	bool acc = false;
 	NUMERIC_TYPE uniform_rate = C(0.0);   /**< m/s */

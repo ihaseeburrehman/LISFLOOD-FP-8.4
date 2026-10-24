@@ -614,7 +614,8 @@ void dg2::set_boundary_values
 	switch (BCptr->BC_Ident[bc_i])
 	{
 	case FREE1:
-
+		// outflow only, as fv1: inward-pointing momentum is reflected
+		if (HU_sign * HU_const > C(0.0)) HU_outside = -HU_const;
 		if (H_const <= Solverptr->DepthThresh){
 			H_const = C(0.0);
 		    H_outside = C(0.0);

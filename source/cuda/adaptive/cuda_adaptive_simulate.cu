@@ -228,7 +228,7 @@ void lis::cuda::adaptive::Simulation::run
 	int loss_pitch = 0, loss_offset = 0;
 	NUMERIC_TYPE* loss_dem = nullptr;
 	NUMERIC_TYPE* device_loss_dem = nullptr;
-	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON || states.calc_evap == ON;
+	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON || states.calc_horton == ON || states.calc_evap == ON;
 	if (has_losses)
 	{
 		if (test_case != 0 || solver_params.L < 5 || sim_params.xsz > mesh_dim || sim_params.ysz > mesh_dim)

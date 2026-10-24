@@ -52,11 +52,13 @@ public:
   id<MTLBuffer> fmax_buffer() const { return fmax; }
   bool uses_rate_grid() const { return has_rate_grid; }
   bool uses_greenampt() const { return greenampt; }
+  /** Green-Ampt or Horton: the ks/psi/dtheta buffers hold soil parameters */
+  bool uses_soil_params() const { return greenampt || horton; }
   bool uses_soil_depth() const { return has_fmax; }
 
 private:
   bool on = false;
-  bool greenampt = false, infiltration = false, evaporation = false;
+  bool greenampt = false, horton = false, infiltration = false, evaporation = false;
   bool has_rate_grid = false, has_fmax = false;
   float uniform_rate = 0.0f;
   int xsz = 0, ysz = 0, pitch = 0, i0 = 0, j0 = 0, ngx = 0, ngy = 0;

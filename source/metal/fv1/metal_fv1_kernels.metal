@@ -76,8 +76,10 @@ inline void set_boundary_values(int type, float value, float Z,
         in.Qn = out.Qn;
         out.Qt = in.Qt;
     } else if (type == BC_FREE || type == BC_FREE6) {
+        // outflow only (swe/fv1.cpp): qn_sign is the inward normal, and
+        // inward-pointing momentum is reflected, as at a wall
         out.H = in.H;
-        out.Qn = in.Qn;
+        out.Qn = (qn_sign * in.Qn > 0.0f) ? -in.Qn : in.Qn;
         out.Qt = in.Qt;
     } else { // BC_NONE: closed wall
         out.H = in.H;

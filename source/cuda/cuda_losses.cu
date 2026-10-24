@@ -64,8 +64,34 @@ __device__ NUMERIC_TYPE depth_after_loss
 }
 
 /**
- * Green-Ampt: depth after this step's infiltration (and evaporation) on a
- * cell with water; updates F, the depth infiltrated so far
+ * Horton, cumulative form: the depth the soil can take in a step of dt,
+ * given F, the depth already infiltrated. te solves
+ * F = fc te + A (1 - exp(-k te)), A = (f0 - fc)/k, by Newton from below
+ * (the left side is concave in te, so the iterates rise to the root).
+ */
+__device__ double horton_capacity(double F, double f0, double fc, double k, double dt)
+{
+	if (k <= 0.0 || f0 <= fc) return fmax(f0, fc)*dt;
+	const double A = (f0 - fc)/k;
+	if (fc <= 0.0 && F >= A) return 0.0;
+	double te = 0.0;
+	if (F > 0.0)
+	{
+		te = F/f0;
+		for (int n=0; n<50; n++)
+		{
+			double e = exp(-k*te);
+			double step = (F - (fc*te + A*(1.0 - e)))/(fc + (f0 - fc)*e);
+			te += step;
+			if (fabs(step) <= 1e-9*(te + 1.0)) break;
+		}
+	}
+	return fc*dt - A*exp(-k*te)*expm1(-k*dt);
+}
+
+/**
+ * Green-Ampt or Horton: depth after this step's infiltration (and
+ * evaporation) on a cell with water; updates F, the depth infiltrated so far
  */
 __device__ NUMERIC_TYPE depth_after_greenampt
 (
@@ -85,7 +111,12 @@ __device__ NUMERIC_TYPE depth_after_greenampt
 	double F = p.F[idx];
 	double ks = p.ks[idx];
 	double dF = 0.0;
-	if (ks > 0.0)
+	if (p.horton)
+	{
+		// ks = fc, psi = f0, dtheta = k (see LossParams)
+		dF = horton_capacity(F, (double)p.psi[idx], ks, (double)p.dtheta[idx], dt);
+	}
+	else if (ks > 0.0)
 	{
 		// implicit Euler: F_new = F + dt Ks (1 + (psi + h) dtheta / F_new)
 		double M = ((double)p.psi[idx] + (double)h) * (double)p.dtheta[idx];
@@ -125,7 +156,7 @@ __device__ NUMERIC_TYPE depth_after_losses
 	NUMERIC_TYPE h, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 )
 {
-	if (p.greenampt) return depth_after_greenampt(p, idx, h, step_dt);
+	if (p.greenampt || p.horton) return depth_after_greenampt(p, idx, h, step_dt);
 	NUMERIC_TYPE rate = ((p.rate_grid != nullptr) ? p.rate_grid[idx] : p.uniform_rate)
 		+ p.evap_rate;
 	return depth_after_loss(h, rate, p.residual[idx], step_dt, threshold);
@@ -296,7 +327,7 @@ __global__ void preflag_loss_details(bool* details, int L, Geometry geom,
 		if (idx >= 0 && first >= 0)
 		{
 			if (p.rate_grid) different |= p.rate_grid[idx] != p.rate_grid[first];
-			if (p.greenampt)
+			if (p.greenampt || p.horton)
 			{
 				different |= p.ks[idx] != p.ks[first] || p.psi[idx] != p.psi[first]
 					|| p.dtheta[idx] != p.dtheta[first];
@@ -450,6 +481,7 @@ acc(states.acceleration == ON)
 {
 	infiltration = (states.calc_infiltration == ON);
 	greenampt = (states.calc_greenampt == ON);
+	horton = (states.calc_horton == ON);
 	evaporation = (states.calc_evap == ON);
 	if (!enabled()) return;
 
@@ -531,6 +563,53 @@ acc(states.acceleration == ON)
 		delete[] zeros;
 		if (verbose) printf("Infiltration: Green-Ampt%s\n",
 				(d_fmax != nullptr) ? ", with soil depth" : "");
+	}
+
+	if (horton)
+	{
+		const char* missing = nullptr;
+		if (strlen(filenames.horton_f0) == 0) missing = "horton_f0";
+		else if (strlen(filenames.horton_fc) == 0) missing = "horton_fc";
+		else if (strlen(filenames.horton_k) == 0) missing = "horton_k";
+		if (missing != nullptr)
+		{
+			fprintf(stderr, "ERROR: infiltration horton needs %s (a number or a grid file)\n",
+					missing);
+			exit(-1);
+		}
+		NUMERIC_TYPE* f0 = host_grid(filenames.horton_f0, C(3600000.0),
+				"horton_f0", verbose);          // mm/h -> m/s
+		NUMERIC_TYPE* fc = host_grid(filenames.horton_fc, C(3600000.0),
+				"horton_fc", verbose);          // mm/h -> m/s
+		NUMERIC_TYPE* k = host_grid(filenames.horton_k, C(3600.0),
+				"horton_k", verbose);           // 1/h -> 1/s
+		long inverted = 0;
+		for (int j=0; j<geometry.ysz; j++)
+		{
+			for (int i=0; i<geometry.xsz; i++)
+			{
+				int idx = j*pitch + i + offset;
+				if (fc[idx] > f0[idx]) { f0[idx] = fc[idx]; inverted++; }
+			}
+		}
+		if (inverted > 0)
+		{
+			fprintf(stderr, "WARNING: horton_fc > horton_f0 in %ld cells; "
+					"there the capacity is constant at horton_fc\n", inverted);
+		}
+		// the Green-Ampt grids hold the Horton parameters (see LossParams)
+		d_ks = to_device(fc);
+		d_psi = to_device(f0);
+		d_dtheta = to_device(k);
+		delete[] f0; delete[] fc; delete[] k;
+
+		int elements = acc ? lis::GhostRaster::elements_H(geometry)
+			: lis::GhostRaster::elements(geometry);
+		double* zeros = new double[elements]();
+		d_F = static_cast<double*>(malloc_device(elements*sizeof(double)));
+		copy(d_F, zeros, elements*sizeof(double));
+		delete[] zeros;
+		if (verbose) printf("Infiltration: Horton\n");
 	}
 
 	if (evaporation)
@@ -621,6 +700,7 @@ lis::cuda::LossParams lis::cuda::Losses::params
 {
 	LossParams p;
 	p.greenampt = greenampt;
+	p.horton = horton;
 	p.rate_grid = d_rate;
 	p.uniform_rate = infiltration ? uniform_rate : C(0.0);
 	p.evap_rate = evaporation ? InterpolateTimeSeries(evap, t) : C(0.0);

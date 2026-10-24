@@ -348,6 +348,9 @@ __device__ lis::cuda::FlowVector lis::cuda::Boundary::outside_x
 	switch (cuda::boundaries.BC_type[bc_i])
 	{
 	case FREE1:
+		// outflow only (swe/fv1.cpp): HU_sign is the inward normal, and
+		// inward-pointing momentum is reflected, as at a wall
+		if (HU_sign*U_const.HU > C(0.0)) U_outside.HU = -U_const.HU;
 		break;
 	case HFIX2:
 	case HVAR3:

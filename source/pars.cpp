@@ -483,7 +483,7 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 		Statesptr->gsection = ON;
 		return;
 	}
-	// infiltration greenampt: Green-Ampt instead of a constant rate (8.4)
+	// infiltration greenampt | horton: a soil model instead of a constant rate (8.4)
 	if (STRCMPi("infiltration", param_name) == 0)
 	{
 		char word[64] = "";
@@ -494,6 +494,18 @@ void CheckParam(char* param_name, char* param_value_ptr, int line_number, Fnames
 			if (verbose == ON) printf("infiltration = greenampt\n");
 			return;
 		}
+		if (STRCMPi(word, "horton") == 0)
+		{
+			Statesptr->calc_horton = ON;
+			if (verbose == ON) printf("infiltration = horton\n");
+			return;
+		}
+	}
+	if (read_string_param(param_name, line_number, param_value_ptr, "horton_f0", Fnameptr->horton_f0, verbose, mode) ||
+		read_string_param(param_name, line_number, param_value_ptr, "horton_fc", Fnameptr->horton_fc, verbose, mode) ||
+		read_string_param(param_name, line_number, param_value_ptr, "horton_k", Fnameptr->horton_k, verbose, mode))
+	{
+		return;
 	}
 	if (read_string_param(param_name, line_number, param_value_ptr, "greenampt_ks", Fnameptr->greenampt_ks, verbose, mode) ||
 		read_string_param(param_name, line_number, param_value_ptr, "greenampt_psi", Fnameptr->greenampt_psi, verbose, mode) ||

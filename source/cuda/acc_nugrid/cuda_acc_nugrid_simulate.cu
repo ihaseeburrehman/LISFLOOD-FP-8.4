@@ -169,7 +169,7 @@ void lis::cuda::acc_nugrid::Simulation::run
 	int loss_pitch = 0, loss_offset = 0;
 	NUMERIC_TYPE* loss_dem = nullptr;
 	NUMERIC_TYPE* device_loss_dem = nullptr;
-	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON
+	const bool has_losses = states.calc_infiltration == ON || states.calc_greenampt == ON || states.calc_horton == ON
 		|| states.calc_evap == ON;
 	if (has_losses)
 	{

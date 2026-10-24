@@ -33,6 +33,9 @@ Ver  Date         Details
                   evaporation for CUDA/Metal FV1, FV2, DG2 and ACC and CUDA MWDG2/HWFV1;
                   finest-grid soil state on adaptive meshes; Metal FV2, DG2 and ACC; CUDA
                   ACC waits for its last snapshot before exiting (HR)
+     Oct 24 2026  Horton infiltration (infiltration horton) for every GPU solver; FREE
+                  boundary is outflow only (inward momentum reflected) on CPU FV1/DG2 and
+                  CUDA/Metal FV1, FV2, DG2; CPU FV1 wall keeps its tangential momentum (HR)
 8.3  Oct 07 2026  CUDA: max-depth grid on the GPU (large grids run), dry NoData cells skip
                   the mass counter, flux kernels synchronised; Metal FV1 back end (HR)
 8.1  Nov 23 2020  Merged changes from v7.1 (d8subgrid) into v8 (PFU)

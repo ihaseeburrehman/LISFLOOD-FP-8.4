@@ -423,6 +423,10 @@ struct Fnames{
 	char greenampt_porosity[256];   // saturated moisture content, m3/m3
 	char greenampt_theta_init[256]; // initial moisture content, m3/m3
 	char greenampt_soil_depth[256]; // optional soil depth, m (storage cap)
+	// Horton infiltration (GPU solvers, 8.4): a number or a grid file each
+	char horton_f0[256];            // initial infiltration capacity, mm/h
+	char horton_fc[256];            // final (saturated) capacity, mm/h
+	char horton_k[256];             // decay constant, 1/h
     char dynamicrainfilename[256];
 };
 
@@ -593,6 +597,7 @@ struct States{
 	int calc_infiltration;
 	int calc_distributed_infiltration; // uses a file to use spatially distributed infiltration rates
 	int calc_greenampt; // Green-Ampt infiltration (infiltration greenampt; CUDA solvers, 8.4)
+	int calc_horton; // Horton infiltration (infiltration horton; GPU solvers, 8.4)
 	int call_gzip;
 	int alt_ascheader;
 	int checkpoint;

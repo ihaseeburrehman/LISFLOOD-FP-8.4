@@ -521,9 +521,15 @@ void fv1::set_boundary_values
 	switch (BCptr->BC_Ident[bc_i])
 	{
 	case FREE1:
+		// FREE boundary, outflow only. A zero-gradient ghost copied
+		// inward-pointing momentum and so carried water in through a FREE edge
+		// wherever flow near it ran into the domain (for example rain on ground
+		// sloping away from the edge). That face now reflects, as a wall does:
+		// water leaves, never enters. HU_sign is the inward normal (+1
+		// west/south, -1 east/north).
 		H_outside = H_inside;
-		HU_outside = HU_inside;
-		HV_outside = HV_outside;
+		HU_outside = (HU_sign * HU_inside > C(0.0)) ? -HU_inside : HU_inside;
+		HV_outside = HV_inside;
 		break;
 	case HFIX2:
 		{
@@ -575,7 +581,9 @@ void fv1::set_boundary_values
 	default:
 		H_outside = H_inside;
 		HU_outside = -HU_inside;
-		HV_outside = HV_outside;
+		// was HV_outside = HV_outside, a self-assignment that left the
+		// tangential momentum at the caller's 0; a reflective wall copies it
+		HV_outside = HV_inside;
 		break;
 	}
 }

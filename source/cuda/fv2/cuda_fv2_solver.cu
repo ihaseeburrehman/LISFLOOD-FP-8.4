@@ -460,14 +460,10 @@ rk_stage1_x
 	MassStats* mass_stats
 )
 {
-#if defined(LISFLOOD_CUDA_MPI)
-	const int j_begin = cuda::fv1_owned_row_begin();
-	const int j_end   = cuda::fv1_owned_row_end();
-#endif
 	update_flow_variables_x(DEM, Uold, Ux, [&](int i, int j, FlowCoeffs Lx)
 	{
 #if defined(LISFLOOD_CUDA_MPI)
-		if (j < j_begin || j >= j_end) return FlowCoeffs(Uold[j*cuda::pitch + i]);
+		if (j < cuda::fv1_owned_row_begin() || j >= cuda::fv1_owned_row_end()) return FlowCoeffs(Uold[j*cuda::pitch + i]);
 #endif
 		return FlowCoeffs(Uold[j*cuda::pitch + i] + cuda::dt*Lx);
 	}, mass_stats);
@@ -484,14 +480,10 @@ rk_stage1_y
 	MassStats* mass_stats
 )
 {
-#if defined(LISFLOOD_CUDA_MPI)
-	const int j_begin = cuda::fv1_owned_row_begin();
-	const int j_end   = cuda::fv1_owned_row_end();
-#endif
 	update_flow_variables_y(DEM, Uold, Uint, [&](int i, int j, FlowCoeffs Ly)
 	{
 #if defined(LISFLOOD_CUDA_MPI)
-		if (j < j_begin || j >= j_end) return FlowCoeffs(Uold[j*cuda::pitch + i]);
+		if (j < cuda::fv1_owned_row_begin() || j >= cuda::fv1_owned_row_end()) return FlowCoeffs(Uold[j*cuda::pitch + i]);
 #endif
 		return FlowCoeffs(Ux[j*cuda::pitch + i] + cuda::dt*Ly);
 	}, mass_stats);
@@ -508,14 +500,10 @@ rk_stage2_x
 	MassStats* mass_stats
 )
 {
-#if defined(LISFLOOD_CUDA_MPI)
-	const int j_begin = cuda::fv1_owned_row_begin();
-	const int j_end   = cuda::fv1_owned_row_end();
-#endif
 	update_flow_variables_x(DEM, Uint, Ux, [&](int i, int j, FlowCoeffs Lx)
 	{
 #if defined(LISFLOOD_CUDA_MPI)
-		if (j < j_begin || j >= j_end) return FlowCoeffs(Uint[j*cuda::pitch + i]);
+		if (j < cuda::fv1_owned_row_begin() || j >= cuda::fv1_owned_row_end()) return FlowCoeffs(Uint[j*cuda::pitch + i]);
 #endif
 		return FlowCoeffs(C(0.5)*(Uold[j*cuda::pitch + i] +
 				Uint[j*cuda::pitch + i] + cuda::dt*Lx));
@@ -533,14 +521,10 @@ rk_stage2_y
 	MassStats* mass_stats
 )
 {
-#if defined(LISFLOOD_CUDA_MPI)
-	const int j_begin = cuda::fv1_owned_row_begin();
-	const int j_end   = cuda::fv1_owned_row_end();
-#endif
 	update_flow_variables_y(DEM, Uint, U, [&](int i, int j, FlowCoeffs Ly)
 	{
 #if defined(LISFLOOD_CUDA_MPI)
-		if (j < j_begin || j >= j_end) return FlowCoeffs(Ux[j*cuda::pitch + i]);
+		if (j < cuda::fv1_owned_row_begin() || j >= cuda::fv1_owned_row_end()) return FlowCoeffs(Ux[j*cuda::pitch + i]);
 #endif
 		return FlowCoeffs(Ux[j*cuda::pitch + i] + C(0.5)*cuda::dt*Ly);
 	}, mass_stats);

@@ -4,15 +4,10 @@ work/
 quick_test_work*
 __pycache__/
 .DS_Store
-paper/cases/ea_test4/*.dem
-paper/cases/ea_test4/reference-*/
-paper/cases/alzette/*.asc
-paper/cases/alzette/*.ascii
-paper/cases/alzette/*.nc
-paper/cases/alzette/*.wd
-HANDOVER_LOCAL.md
-alzette_10m_metal_test/inputs/
-alzette_10m_metal_test/metal_results/
-alzette_10m_metal_test/cuda_reference_12h/
-alzette_10m_metal_test/*_results/
+paper_8.3/cases/ea_test4/*.dem
+paper_8.3/cases/ea_test4/reference-*/
+paper_8.3/cases/alzette/*.asc
+paper_8.3/cases/alzette/*.ascii
+paper_8.3/cases/alzette/*.nc
+paper_8.3/cases/alzette/*.wd
 

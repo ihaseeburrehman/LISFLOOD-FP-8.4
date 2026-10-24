@@ -334,9 +334,9 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
            static_cast<int>((stage.stage_loc_y[i] - pars.bly) / pars.dx));
     if (lossesEnabled) {
       const float *rate = losses.uses_rate_grid() ? static_cast<const float *>(losses.rate_buffer().contents) : nullptr;
-      const float *ks = losses.uses_greenampt() ? static_cast<const float *>(losses.ks_buffer().contents) : nullptr;
-      const float *psi = losses.uses_greenampt() ? static_cast<const float *>(losses.psi_buffer().contents) : nullptr;
-      const float *dth = losses.uses_greenampt() ? static_cast<const float *>(losses.dtheta_buffer().contents) : nullptr;
+      const float *ks = losses.uses_soil_params() ? static_cast<const float *>(losses.ks_buffer().contents) : nullptr;
+      const float *psi = losses.uses_soil_params() ? static_cast<const float *>(losses.psi_buffer().contents) : nullptr;
+      const float *dth = losses.uses_soil_params() ? static_cast<const float *>(losses.dtheta_buffer().contents) : nullptr;
       const float *fmax = losses.uses_soil_depth() ? static_cast<const float *>(losses.fmax_buffer().contents) : nullptr;
       auto rasterIndex = [&](int x, int y) {
         if (x >= xsz || y >= ysz) return -1;

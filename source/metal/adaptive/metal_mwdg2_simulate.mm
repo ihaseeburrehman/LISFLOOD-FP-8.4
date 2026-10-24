@@ -456,7 +456,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
         uint32_t lossPreflagLayout[4] = {nodeCount, maxLevel,
             static_cast<uint32_t>(pars.xsz), static_cast<uint32_t>(pars.ysz)};
         uint32_t lossPreflagModes[3] = {losses.uses_rate_grid() ? 1u : 0u,
-            losses.uses_greenampt() ? 1u : 0u,
+            losses.uses_soil_params() ? 1u : 0u,
             losses.uses_soil_depth() ? 1u : 0u};
         const float nodata = static_cast<float>(pars.nodata_elevation);
         runtime.dispatch("mwdg2_preflag_loss_details",

@@ -81,8 +81,9 @@ bool Losses::setup(id<MTLDevice> device, Fnames &filenames, States &states,
                    int i0_, int j0_, size_t n, int verbose) {
   infiltration = states.calc_infiltration == ON;
   greenampt = states.calc_greenampt == ON;
+  horton = states.calc_horton == ON;
   evaporation = states.calc_evap == ON;
-  if (!infiltration && !greenampt && !evaporation) return false;
+  if (!infiltration && !greenampt && !horton && !evaporation) return false;
   xsz = xsz_; ysz = ysz_; pitch = pitch_; i0 = i0_; j0 = j0_;
   dA = (double)pars.dx * (double)pars.dy;
 
@@ -172,6 +173,32 @@ bool Losses::setup(id<MTLDevice> device, Fnames &filenames, States &states,
     Fhi = zeros(); Flo = zeros();
     if (verbose) printf("Infiltration: Green-Ampt%s\n", depth ? ", with soil depth" : "");
   }
+  if (horton) {
+    const char *missing = nullptr;
+    if (!strlen(filenames.horton_f0)) missing = "horton_f0";
+    else if (!strlen(filenames.horton_fc)) missing = "horton_fc";
+    else if (!strlen(filenames.horton_k)) missing = "horton_k";
+    if (missing) {
+      fprintf(stderr, "ERROR: infiltration horton needs %s (a number or a grid file)\n",
+              missing);
+      fail();
+    }
+    std::vector<float> f0, fc, k;
+    if (!read_parameter(filenames.horton_f0, xsz, ysz, 3600000.0, "horton_f0", f0) ||
+        !read_parameter(filenames.horton_fc, xsz, ysz, 3600000.0, "horton_fc", fc) ||
+        !read_parameter(filenames.horton_k, xsz, ysz, 3600.0, "horton_k", k))
+      fail();  // mm/h -> m/s, 1/h -> 1/s
+    long inverted = 0;
+    for (size_t c = 0; c < f0.size(); c++)
+      if (fc[c] > f0[c]) { f0[c] = fc[c]; inverted++; }
+    if (inverted > 0)
+      fprintf(stderr, "WARNING: horton_fc > horton_f0 in %ld cells; "
+                      "there the capacity is constant at horton_fc\n", inverted);
+    // the Green-Ampt buffers hold the Horton parameters (see the kernel)
+    ks = upload(fc); psi = upload(f0); dtheta = upload(k);
+    Fhi = zeros(); Flo = zeros();
+    if (verbose) printf("Infiltration: Horton\n");
+  }
   if (evaporation) {
     evap = arrays ? arrays->evap : nullptr;
     if (!evap) {
@@ -201,7 +228,7 @@ void Losses::encode(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> U,
                     float depth_thresh, double dt, double t) {
   if (!on) return;
   LossParams p;
-  p.greenampt = greenampt ? 1 : 0;
+  p.greenampt = greenampt ? 1 : (horton ? 2 : 0);
   p.has_rate_grid = has_rate_grid ? 1 : 0;
   p.has_fmax = has_fmax ? 1 : 0;
   p.has_q = has_q ? 1 : 0;

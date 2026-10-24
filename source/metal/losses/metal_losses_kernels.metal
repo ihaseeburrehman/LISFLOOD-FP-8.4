@@ -6,7 +6,10 @@
 //    (deeper than DepthThresh, not NoData) loses (rate + evaporation) x dt of
 //    depth, never below zero;
 //  - Green-Ampt: f = Ks (1 + (psi + h) dtheta / F), advanced with implicit
-//    Euler, limited by the water present and, optionally, by the soil depth.
+//    Euler, limited by the water present and, optionally, by the soil depth;
+//  - Horton, cumulative form: F = fc te + (f0 - fc)/k (1 - exp(-k te)); each
+//    step takes F(te + dt) - F(te), limited by the water present (the
+//    Green-Ampt buffers hold fc, f0 and k: ks, psi, dtheta).
 // Depth is single precision and the loss per step is often close to its
 // resolution, so each cell carries the part of the loss that rounding dropped
 // to its next step (compensated subtraction), as in CUDA.
@@ -20,7 +23,7 @@
 using namespace metal;
 
 struct LossParams {
-    int greenampt;      // 1: Green-Ampt, 0: constant rate
+    int greenampt;      // 0: constant rate, 1: Green-Ampt, 2: Horton
     int has_rate_grid;  // constant rate: per-cell rates
     int has_fmax;       // Green-Ampt: soil-depth cap
     int has_q;          // mode 0: scale HU, HV with the depth
@@ -62,6 +65,34 @@ inline float greenampt_step(float F, float k, float M)
     return 2.0f * (F * k + k * M) / (sq + (F - k));
 }
 
+// 1 - exp(-x) for x >= 0 without cancellation at small x
+inline float one_minus_exp(float x)
+{
+    if (x < 1e-3f) return x * (1.0f - x * (0.5f - x * (1.0f / 6.0f)));
+    return 1.0f - exp(-x);
+}
+
+// Horton, cumulative form (cuda horton_capacity): the depth the soil can
+// take in a step of dt after F has infiltrated. te solves
+// F = fc te + A (1 - exp(-k te)), A = (f0 - fc)/k, by Newton from below.
+inline float horton_capacity(float F, float f0, float fc, float k, float dt)
+{
+    if (k <= 0.0f || f0 <= fc) return max(f0, fc) * dt;
+    float A = (f0 - fc) / k;
+    if (fc <= 0.0f && F >= A) return 0.0f;
+    float te = 0.0f;
+    if (F > 0.0f) {
+        te = F / f0;
+        for (int n = 0; n < 30; n++) {
+            float e = exp(-k * te);
+            float step = (F - (fc * te + A * one_minus_exp(k * te))) / (fc + (f0 - fc) * e);
+            te += step;
+            if (abs(step) <= 1e-6f * (te + 1.0f)) break;
+        }
+    }
+    return fc * dt + A * exp(-k * te) * one_minus_exp(k * dt);
+}
+
 // F (= hi + lo) += x, exactly up to the rounding of the pair
 inline void add_F(device float* Fhi, device float* Flo, int c, float x)
 {
@@ -85,7 +116,9 @@ inline float depth_after_greenampt(constant LossParams& p, int c, float h,
     float F = Fhi[c] + Flo[c];
     float k = ks[c] * p.dt;
     float dF = 0.0f;
-    if (ks[c] > 0.0f) {
+    if (p.greenampt == 2) {
+        dF = horton_capacity(F, psi[c], ks[c], dtheta[c], p.dt);  // f0, fc, k
+    } else if (ks[c] > 0.0f) {
         dF = greenampt_step(F, k, (psi[c] + h) * dtheta[c]);
         if (p.has_fmax) dF = min(dF, max(fmax[c] - F, 0.0f));
     }
