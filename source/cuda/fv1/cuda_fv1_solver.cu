@@ -3,6 +3,8 @@
 #include "cuda_hll.cuh"
 #include "cuda_solver.cuh"
 #include <algorithm>
+#include <cfloat>
+#include <helper_cuda.h>
 #if defined(LISFLOOD_CUDA_MPI)
 #include <mpi.h>
 #endif
@@ -212,6 +214,90 @@ __global__ void update_dt_per_element
 				dt[j*cuda::pitch + i] = cuda::solver_params.max_dt;
 			}
 		}
+	}
+}
+
+/** *a = min(*a, v) for v >= 0: the bit patterns of non-negative floats order as the values */
+__device__ inline void atomic_min_nonnegative(float* a, float v)
+{
+	atomicMin(reinterpret_cast<unsigned int*>(a), __float_as_uint(v));
+}
+
+__device__ inline void atomic_min_nonnegative(double* a, double v)
+{
+	atomicMin(reinterpret_cast<unsigned long long*>(a),
+			static_cast<unsigned long long>(__double_as_longlong(v)));
+}
+
+/**
+ * update_dt_per_element and the minimum over elements [first, last) in one
+ * kernel: each cell's time step is computed as there, and the minimum of the
+ * same values is exact in any order
+ */
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
+reduce_dt
+(
+	NUMERIC_TYPE* min_dt,
+	Flow U,
+	int first,
+	int last
+)
+{
+	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
+	int row_begin = 0;
+	int row_end = cuda::geometry.ysz + 2;
+#if defined(LISFLOOD_CUDA_MPI)
+	if (cuda::fv1_partition_active) {
+		row_begin = cuda::fv1_row_begin;
+		row_end = cuda::fv1_row_end;
+	}
+#endif
+	int global_j = row_begin + blockIdx.y*blockDim.y + threadIdx.y;
+	NUMERIC_TYPE local = FLT_MAX;
+
+	for (int j=global_j; j<row_end; j+=blockDim.y*gridDim.y)
+	{
+		for (int i=global_i; i<cuda::pitch; i+=blockDim.x*gridDim.x)
+		{
+			int idx = j*cuda::pitch + i;
+			if (idx < first || idx >= last) continue;
+			NUMERIC_TYPE H = U.H[idx];
+			NUMERIC_TYPE cell_dt;
+
+			if (H > cuda::solver_params.DepthThresh)
+			{
+				NUMERIC_TYPE HU = U.HU[idx];
+				NUMERIC_TYPE HV = U.HV[idx];
+				NUMERIC_TYPE U = HU/H;
+				NUMERIC_TYPE V = HV/H;
+
+				NUMERIC_TYPE dt_x = cuda::solver_params.cfl * cuda::geometry.dx
+					/ (FABS(U)+SQRT(cuda::physical_params.g * H));
+				NUMERIC_TYPE dt_y = cuda::solver_params.cfl * cuda::geometry.dy
+					/ (FABS(V)+SQRT(cuda::physical_params.g * H));
+
+				cell_dt = FMIN(dt_x, dt_y);
+			}
+			else
+			{
+				cell_dt = cuda::solver_params.max_dt;
+			}
+			local = FMIN(local, cell_dt);
+		}
+	}
+
+	// minimum over the block: within each warp, then over the warps
+	__shared__ NUMERIC_TYPE warp_min[CUDA_BLOCK_SIZE/32];
+	int tid = threadIdx.y*blockDim.x + threadIdx.x;
+	for (int s=16; s>0; s>>=1) local = FMIN(local, __shfl_down_sync(0xffffffff, local, s));
+	if ((tid & 31) == 0) warp_min[tid/32] = local;
+	__syncthreads();
+	if (tid < 32)
+	{
+		local = (tid < (blockDim.x*blockDim.y)/32) ? warp_min[tid] : FLT_MAX;
+		for (int s=16; s>0; s>>=1) local = FMIN(local, __shfl_down_sync(0xffffffff, local, s));
+		if (tid == 0) atomic_min_nonnegative(min_dt, local);
 	}
 }
 
@@ -702,6 +788,20 @@ void lis::cuda::fv1::Solver::update_dt_per_element
 }
 
 
+
+bool lis::cuda::fv1::Solver::reduce_dt
+(
+	NUMERIC_TYPE* min_dt,
+	int first,
+	int count
+) const
+{
+	// 0x7f bytes: a float or double far above any time step
+	checkCudaErrors(cudaMemsetAsync(min_dt, 0x7f, sizeof(NUMERIC_TYPE)));
+	lis::cuda::fv1::reduce_dt<<<grid_size, cuda::block_size>>>(
+			min_dt, Uold, first, first + count);
+	return true;
+}
 
 void lis::cuda::fv1::Solver::FloodplainQ()
 {

@@ -24,6 +24,8 @@ public:
 
 	void update(NUMERIC_TYPE* H);
 	void updateACC(NUMERIC_TYPE* H);
+	/** the device field of maximum depths, for kernels that update it */
+	NUMERIC_TYPE* data() { return maxH; }
 	void write();
 
 	~MaxField();

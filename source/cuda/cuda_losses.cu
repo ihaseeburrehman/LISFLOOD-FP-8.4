@@ -212,6 +212,79 @@ apply_losses_fv1
 
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
+fv1_cell_updates
+(
+	NUMERIC_TYPE* H,
+	NUMERIC_TYPE* HU,
+	NUMERIC_TYPE* HV,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* maxH,
+	bool drain,
+	bool losses,
+	MassStats* mass_stats,
+	LossParams p,
+	double* volume
+)
+{
+	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
+	int global_j = cuda::fv1_owned_row_begin()
+		+ blockIdx.y*blockDim.y + threadIdx.y;
+	double removed = 0.0;
+
+	for (int j=global_j; j<cuda::fv1_owned_row_end(); j+=blockDim.y*gridDim.y)
+	{
+		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
+		{
+			int idx = j*cuda::pitch + i;
+			NUMERIC_TYPE h = H[idx];
+			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6))
+			{
+				// as drain_nodata_water
+				if (drain)
+				{
+					H[idx] = C(0.0);
+					if (h != C(0.0))
+					{
+						NUMERIC_TYPE Q = -h * cuda::geometry.dx * cuda::geometry.dy
+							/ cuda::dt;
+						if (Q > C(0.0)) atomicAdd(&(mass_stats->in), Q);
+						else atomicAdd(&(mass_stats->out), -Q);
+					}
+					h = C(0.0);
+				}
+			}
+			else if (losses)
+			{
+				// as apply_losses_fv1
+				NUMERIC_TYPE h_new = depth_after_losses(p, idx, h, cuda::dt, cuda::solver_params.DepthThresh);
+				if (h_new != h)
+				{
+					H[idx] = h_new;
+					if (h_new > cuda::solver_params.DepthThresh)
+					{
+						NUMERIC_TYPE scale = h_new/h;
+						HU[idx] *= scale;
+						HV[idx] *= scale;
+					}
+					else
+					{
+						HU[idx] = C(0.0);
+						HV[idx] = C(0.0);
+					}
+					removed += (double)(h - h_new);
+					h = h_new;
+				}
+			}
+			// as update_max_field
+			maxH[idx] = FMAX(maxH[idx], h);
+		}
+	}
+
+	if (losses) add_block_sum(removed*cuda::geometry.dx*cuda::geometry.dy, volume);
+}
+
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
 apply_losses_slopes
 (
 	NUMERIC_TYPE* H, NUMERIC_TYPE* H1x, NUMERIC_TYPE* H1y,
@@ -724,6 +797,23 @@ void lis::cuda::Losses::apply_fv1
 )
 {
 	apply_losses_fv1<<<grid_size, CUDA_BLOCK_SIZE>>>(H, HU, HV, DEM, params(t), d_volume);
+}
+
+void lis::cuda::Losses::apply_fv1_cells
+(
+	NUMERIC_TYPE* H,
+	NUMERIC_TYPE* HU,
+	NUMERIC_TYPE* HV,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* maxH,
+	bool drain,
+	MassStats* mass_stats,
+	NUMERIC_TYPE t,
+	dim3 grid_size
+)
+{
+	lis::cuda::fv1_cell_updates<<<grid_size, CUDA_BLOCK_SIZE>>>(H, HU, HV, DEM, maxH, drain,
+			enabled(), mass_stats, params(t), d_volume);
 }
 
 void lis::cuda::Losses::apply_slopes

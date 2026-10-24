@@ -293,17 +293,11 @@ void lis::cuda::fv1::Simulation::run
 
 		d_U = solve->update_flow_variables(
 				stats_collector.instantaneous_mass());
-		if (pars.drain_nodata)
-		{
-			cuda::Boundary::drain_nodata_water(d_U.H, d_DEM,
-					stats_collector.instantaneous_mass(), cell_grid);
-		}
-		if (losses.enabled())
-		{
-			losses.apply_fv1(d_U.H, d_U.HU, d_U.HV, d_DEM, solver.t, cell_grid);
-		}
+		// drain, losses and maximum depth in one pass over the cells
+		losses.apply_fv1_cells(d_U.H, d_U.HU, d_U.HV, d_DEM, max_field.data(),
+				pars.drain_nodata, stats_collector.instantaneous_mass(),
+				solver.t, cell_grid);
 		stats_collector.accumulate_mass(step_dt);
-		max_field.update(d_U.H);
 
 		bool gathered_depth = false;
 		bool gathered_full_state = false;

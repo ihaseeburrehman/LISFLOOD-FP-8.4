@@ -126,6 +126,18 @@ class Solver
 		NUMERIC_TYPE* dt_field
 	) const = 0;
 
+	/**
+	 * the minimum of the per-element time steps over elements
+	 * [first, first + count) into the device scalar min_dt, in one kernel
+	 * and without the dt field; false if the solver has no such kernel
+	 */
+	virtual bool reduce_dt
+	(
+		NUMERIC_TYPE* min_dt,
+		int first,
+		int count
+	) const { return false; }
+
 	virtual ~Solver() {};
 };
 
@@ -158,8 +170,8 @@ private:
 	const int elements;
 	void* d_temp;
 	size_t bytes;
-#if defined(LISFLOOD_CUDA_MPI)
 	NUMERIC_TYPE* d_reduced_dt;
+#if defined(LISFLOOD_CUDA_MPI)
 	NUMERIC_TYPE* h_reduced_dt;
 #endif
 };

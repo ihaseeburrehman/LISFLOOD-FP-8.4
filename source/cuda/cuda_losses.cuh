@@ -111,6 +111,25 @@ public:
 	);
 
 	/**
+	 * FV1, the cell-wise updates after the fluxes in one pass: water in
+	 * NoData cells drains away (if drain), then the losses as apply_fv1 (if
+	 * enabled), then the maximum depth maxH; each cell gets the same
+	 * arithmetic as the separate kernels
+	 */
+	void apply_fv1_cells
+	(
+		NUMERIC_TYPE* H,
+		NUMERIC_TYPE* HU,
+		NUMERIC_TYPE* HV,
+		NUMERIC_TYPE* DEM,
+		NUMERIC_TYPE* maxH,
+		bool drain,
+		MassStats* mass_stats,
+		NUMERIC_TYPE t,
+		dim3 grid_size
+	);
+
+	/**
 	 * FV2 and DG2: the loss lowers the cell average of the depth; the depth
 	 * slopes are kept (a uniform loss keeps the water surface flat) and the
 	 * discharge average and slopes are scaled with the depth; if a face

@@ -38,8 +38,8 @@ elements(element_count > 0 ? element_count : lis::GhostRaster::elements(geometry
 		d_temp = malloc_device(bytes);
 
 		dt_field = cuda::GhostRaster::allocate_device(geometry);
-#if defined(LISFLOOD_CUDA_MPI)
 		d_reduced_dt = static_cast<NUMERIC_TYPE*>(malloc_device(sizeof(NUMERIC_TYPE)));
+#if defined(LISFLOOD_CUDA_MPI)
 		checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_reduced_dt),
 				sizeof(NUMERIC_TYPE)));
 #endif
@@ -86,10 +86,13 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 {
 	if (adaptive)
 	{
-		solver.update_dt_per_element(dt_field);
 #if defined(LISFLOOD_CUDA_MPI)
-		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
-					dt_field + element_offset, d_reduced_dt, elements));
+		if (!solver.reduce_dt(d_reduced_dt, element_offset, elements))
+		{
+			solver.update_dt_per_element(dt_field);
+			checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
+						dt_field + element_offset, d_reduced_dt, elements));
+		}
 		checkCudaErrors(cudaMemcpyAsync(h_reduced_dt, d_reduced_dt,
 				sizeof(NUMERIC_TYPE), cudaMemcpyDeviceToHost));
 		// Wait only for the default stream that produced the reduction. This
@@ -108,8 +111,19 @@ NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::update_dt()
 				sizeof(NUMERIC_TYPE)));
 		return *h_reduced_dt;
 #else
-		checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
-					dt_field + element_offset, &dt, elements));
+		if (solver.reduce_dt(d_reduced_dt, element_offset, elements))
+		{
+			NUMERIC_TYPE h_dt;
+			checkCudaErrors(cudaMemcpy(&h_dt, d_reduced_dt, sizeof(NUMERIC_TYPE),
+					cudaMemcpyDeviceToHost));
+			dt = h_dt;
+		}
+		else
+		{
+			solver.update_dt_per_element(dt_field);
+			checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
+						dt_field + element_offset, &dt, elements));
+		}
 #endif
 	}
 
@@ -135,8 +149,8 @@ lis::cuda::DynamicTimestep<F>::~DynamicTimestep()
 	{
 		cuda::free_device(dt_field);
 		free_device(d_temp);
-#if defined(LISFLOOD_CUDA_MPI)
 		free_device(d_reduced_dt);
+#if defined(LISFLOOD_CUDA_MPI)
 		checkCudaErrors(cudaFreeHost(h_reduced_dt));
 #endif
 	}

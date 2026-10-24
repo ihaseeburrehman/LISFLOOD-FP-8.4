@@ -56,6 +56,13 @@ public:
 		NUMERIC_TYPE* dt_field
 	) const;
 
+	bool reduce_dt
+	(
+		NUMERIC_TYPE* min_dt,
+		int first,
+		int count
+	) const;
+
 	~Solver();
 
 private:

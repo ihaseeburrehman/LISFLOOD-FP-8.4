@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
+#include <vector>
 
 #include "../../lisflood.h"
 
@@ -22,6 +24,29 @@ typedef struct Rainfall_uniform
 		this->value = value;
 	}
 
+	// lines of the rainfall file, as fgets reads them
+	std::vector<std::string> lines;
+	bool loaded = false;
+
+	void load
+	(
+		const char* rainfilename
+	)
+	{
+		FILE* fp = fopen(rainfilename, "r");
+
+		if (NULL == fp)
+		{
+			fprintf(stderr, "Error opening time varying rainfall %s, file: %s, line: %d.\n", rainfilename, __FILE__, __LINE__);
+			exit(-1);
+		}
+
+		char str[255];
+		while (fgets(str, sizeof(str), fp) != NULL) lines.push_back(str);
+		fclose(fp);
+		loaded = true;
+	}
+
 	void update_rainfall
 	(
 		const char* rainfilename,
@@ -31,17 +56,15 @@ typedef struct Rainfall_uniform
 		char str[255];
 		char buf[32] = { '\0' };
 
-		FILE* fp = fopen(rainfilename, "r");
-
-		if (NULL == fp)
-		{
-			fprintf(stderr, "Error opening time varying rainfall %s, file: %s, line: %d.\n", rainfilename, __FILE__, __LINE__);
-			exit(-1);
-		}
+		// the file is read once; each step replays its lines as fgets gave
+		// them (a read past the end leaves str as it was, as fgets does)
+		if (!loaded) load(rainfilename);
+		size_t next = 0;
+		auto read_line = [&](char* s, int) { if (next < lines.size()) strcpy(s, lines[next].c_str()); next++; };
 
 		char* timeseriesptr = timeseries;
 
-		fgets(str, sizeof(str), fp);
+		read_line(str, sizeof(str));
 		sscanf(str, "%s", buf);
 
 		NUMERIC_TYPE value_1 = C(0.0);
@@ -53,17 +76,17 @@ typedef struct Rainfall_uniform
 		int num_rows_timeseries = 0;
 		int time_multiplier = 1;
 
-		fgets(str, sizeof(str), fp);
+		read_line(str, sizeof(str));
 
 		sscanf(str, "%d %s", &num_rows_timeseries, buf);
 
 		time_multiplier = (!strncmp(buf, "seconds", 7)) ? 1 : (!strncmp(buf, "minutes", 7)) ? 60 : 3600;
 
-		for (int i = 0; i < row + 1; i++) fgets(str, sizeof(str), fp);
+		for (int i = 0; i < row + 1; i++) read_line(str, sizeof(str));
 
 		sscanf(str, "%" NUM_FMT " %" NUM_FMT, &value_1, &t_1);
 
-		fgets(str, sizeof(str), fp);
+		read_line(str, sizeof(str));
 
 		sscanf(str, "%" NUM_FMT " %" NUM_FMT, &value_2, &t_2);
 
@@ -74,12 +97,10 @@ typedef struct Rainfall_uniform
 			t_1 = t_2*time_multiplier;
 			value_1 = value_2;
 
-			fgets(str, sizeof(str), fp);
+			read_line(str, sizeof(str));
 
 			sscanf(str, "%" NUM_FMT " %" NUM_FMT, &value_2, &t_2);
 		}
-
-		fclose(fp);
 
 		if (row + 1 >= num_rows_timeseries)
 		{
