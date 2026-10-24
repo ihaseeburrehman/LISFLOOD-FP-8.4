@@ -346,11 +346,14 @@ apply_losses_slopes
 	double* volume
 )
 {
+	// the rows this rank owns (1 to ysz on one GPU): the other ranks own the
+	// rest, and their losses are counted there
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
-	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	int global_j = cuda::fv1_owned_row_begin()
+		+ blockIdx.y*blockDim.y + threadIdx.y;
 	double removed = 0.0;
 
-	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
+	for (int j=global_j; j<cuda::fv1_owned_row_end(); j+=blockDim.y*gridDim.y)
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
@@ -366,9 +369,9 @@ apply_losses_slopes
 }
 
 /**
- * FV2 and DG2, the cell-wise updates after the fluxes in one pass, over the
- * same cells as the separate kernels: drain_nodata_water and update_max_field
- * on the rows this rank owns, apply_losses_slopes on rows 1 to ysz
+ * FV2 and DG2, the cell-wise updates after the fluxes in one pass, on the
+ * rows this rank owns: drain_nodata_water, apply_losses_slopes and
+ * update_max_field
  */
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
@@ -388,25 +391,25 @@ slopes_cell_updates
 )
 {
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
-	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	int global_j = cuda::fv1_owned_row_begin()
+		+ blockIdx.y*blockDim.y + threadIdx.y;
 	double removed = 0.0;
 
-	for (int j=global_j+1; j<cuda::geometry.ysz+1; j+=blockDim.y*gridDim.y)
+	for (int j=global_j; j<cuda::fv1_owned_row_end(); j+=blockDim.y*gridDim.y)
 	{
-		const bool owned = j >= cuda::fv1_owned_row_begin() && j < cuda::fv1_owned_row_end();
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
 			int idx = j*cuda::pitch + i;
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6))
 			{
-				if (drain && owned) drain_cell(H, idx, mass_stats);
+				if (drain) drain_cell(H, idx, mass_stats);
 			}
 			else if (losses)
 			{
 				loss_cell_slopes(H, H1x, H1y, HU, HU1x, HU1y, HV, HV1x, HV1y,
 						face, p, idx, removed);
 			}
-			if (owned) maxH[idx] = FMAX(maxH[idx], H[idx]);
+			maxH[idx] = FMAX(maxH[idx], H[idx]);
 		}
 	}
 
