@@ -11,3 +11,5 @@ paper_8.3/cases/alzette/*.ascii
 paper_8.3/cases/alzette/*.nc
 paper_8.3/cases/alzette/*.wd
 
+tests_8.4/halandri/case/
+tests_8.4/halandri/runs/
