@@ -329,6 +329,16 @@ int main(int argc, char *argv[])
 	ReadConfiguration(argc, argv, Fnameptr, Statesptr, Parptr, Solverptr,
 			verbosemode);
 
+#if !defined(CUDA) && !defined(METAL_ENABLED)
+	// checked here, not in ReadConfiguration: generateDG2DEM and
+	// generateDG2start read the same .par file but do not use the GPU
+	if (Statesptr->cuda == ON)
+	{
+		printf("\nERROR: lisflood has not been compiled with GPU (CUDA or Metal) support. Aborting...\n\n");
+		exit(1);
+	}
+#endif
+
 	// use output folder if requested in parameter file or command line
 	if (strlen(ParFp.res_dirname) > 0)
 	{

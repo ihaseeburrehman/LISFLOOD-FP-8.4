@@ -118,6 +118,15 @@ void lis::cuda::acc_nugrid::Simulation::run
 
 	if (strlen(filenames.nfilename) > 0) non_uniform_n = true;
 
+	if (pars.xsz > mesh_dim || pars.ysz > mesh_dim)
+	{
+		int needed = 0;
+		while ((1 << needed) < pars.xsz || (1 << needed) < pars.ysz) needed++;
+		fprintf(stderr, "ERROR: acc_nugrid works on a 2^L x 2^L grid that must cover the DEM "
+			"(%d x %d cells): set max_ref_lvl %d or more in the .par file.\n", pars.xsz, pars.ysz, needed);
+		exit(-1);
+	}
+
 //	CHECK_CUDA_ERROR(peek());
 //	CHECK_CUDA_ERROR(sync());
 

@@ -219,6 +219,22 @@ void lis::cuda::adaptive::Simulation::run
 	int mesh_dim      = 1 << solver_params.L;
 	int interface_dim = mesh_dim + 1;
 
+	if (test_case == 0 && (sim_params.xsz > mesh_dim || sim_params.ysz > mesh_dim))
+	{
+		int needed = 0;
+		while ((1 << needed) < sim_params.xsz || (1 << needed) < sim_params.ysz) needed++;
+		fprintf(stderr, "ERROR: hwfv1 and mwdg2 work on a 2^L x 2^L grid that must cover the DEM "
+			"(%d x %d cells): set max_ref_lvl %d or more in the .par file.\n",
+			(int)sim_params.xsz, (int)sim_params.ysz, needed);
+		exit(-1);
+	}
+	if (states.rainfall == ON || strlen(filenames.dynamicrainfilename) > 0)
+	{
+		fprintf(stderr, "ERROR: the CUDA hwfv1 and mwdg2 solvers take no rain (rainfall, "
+			"dynamicrainfile); use fv1, fv2 or dg2, or the Metal build.\n");
+		exit(-1);
+	}
+
 	real dx_finest = (test_case != 0) ? (sim_params.xmax - sim_params.xmin) / mesh_dim : read_cell_size(input_filename);
 	real dy_finest = (test_case != 0) ? (sim_params.ymax - sim_params.ymin) / mesh_dim : read_cell_size(input_filename);
 	real dt        = C(0.001);

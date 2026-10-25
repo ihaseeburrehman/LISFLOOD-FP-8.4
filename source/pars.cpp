@@ -1169,13 +1169,6 @@ void CheckParams(Fnames *Fnameptr, States *Statesptr, Pars *Parptr, Solver *Solv
 		exit(1);
 	}
 
-#if !defined(CUDA) && !defined(METAL_ENABLED)
-	if (Statesptr->cuda == ON)
-	{
-		printf("\nERROR: lisflood has not been compiled with CUDA support. Aborting...\n\n");
-		exit(1);
-	}
-#endif
 }
 
 //-----------------------------------------------------------------------------
