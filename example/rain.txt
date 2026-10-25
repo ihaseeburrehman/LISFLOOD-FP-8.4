@@ -1,0 +1,7 @@
+Example storm: uniform rain rate in mm/h, linearly interpolated between the rows
+5 minutes
+0 0
+60 20
+20 40
+0 60
+0 180

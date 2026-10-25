@@ -1,0 +1,180 @@
+# =============================================================================
+#  LISFLOOD-FP 8.4 example parameter file
+# =============================================================================
+#  Run it from this folder:
+#      ../build/lisflood example.par
+#  It simulates a 3 h storm on a synthetic valley (800 m x 1200 m, 10 m cells)
+#  and takes a few seconds on a GPU.
+#
+#  How this file is read:
+#  - One keyword per line, followed by its value if it takes one.
+#  - A line that starts with # is ignored. Text after a value is also ignored,
+#    so a short note can follow the value on the same line.
+#  - Keywords are not case sensitive. Paths are relative to the folder you
+#    run lisflood from.
+#  - Times are in seconds, lengths in metres, rain and soil rates in mm/h
+#    (unless a line says otherwise).
+# =============================================================================
+
+
+# --- 1. Input files ----------------------------------------------------------
+
+# Ground elevation, ESRI ASCII grid (.asc). It sets the domain, the cell size
+# and the coordinates that every other input uses.
+DEMfile         dem.asc
+
+# Roughness: one Manning n for the whole domain (fpfric), or a grid of n with
+# the same size as the DEM (manningfile). Use one of the two.
+fpfric          0.035
+#manningfile    manning.asc
+
+# Boundary conditions on the domain edges (.bci). This example has one line,
+# "S 0 800 FREE": the south edge from x = 0 to x = 800 m lets water out.
+# The first field is the edge (N, S, E or W), then the start and end
+# coordinate along it, then the type:
+#     FREE          open edge: water flows out freely. In 8.4 FREE is outflow
+#                   only: it never pulls water into the domain. In fv1, fv2
+#                   and dg2 it passes moving water; water at rest against
+#                   the edge stays, which is why this valley keeps a pond
+#                   at its outlet (acceleration drains it).
+#     HFIX  2.5     fixed water surface elevation (m)
+#     QFIX  1.0     fixed inflow per metre of edge (m2/s)
+#     HVAR  name    elevation time series from bdyfile
+#     QVAR  name    inflow time series from bdyfile
+# Edges that are not listed are closed walls. "P x y QVAR name" adds a
+# point source at (x, y).
+bcifile         boundary.bci
+#bdyfile        boundary.bdy   # time series named in the .bci (HVAR/QVAR)
+
+# Initial water depth (ASCII grid in m). Without it the domain starts dry.
+#startfile      start.wd
+
+
+# --- 2. Rain -----------------------------------------------------------------
+
+# Uniform rain: a time series in mm/h, the same over the whole domain.
+# File layout (see rain.txt):
+#     line 1      a comment
+#     line 2      number of rows, then seconds, minutes or hours
+#     then        one "rate time" pair per row, linearly interpolated
+# After the last row the rain is 0.
+rainfall        rain.txt
+
+# Or rain that varies in space and time, from a NetCDF file on the DEM grid:
+#dynamicrainfile rain.nc
+# Use only one of the two.
+
+
+# --- 3. Infiltration and evaporation (new in 8.4, on every GPU solver) -------
+
+# Pick ONE infiltration model. Every soil value can be one number or the name
+# of an ASCII grid with the same size as the DEM.
+
+# (a) Green-Ampt
+infiltration         greenampt
+greenampt_ks         5       # saturated hydraulic conductivity (mm/h)
+greenampt_psi        26.7    # wetting-front suction head (mm)
+greenampt_porosity   0.40    # porosity (-)
+greenampt_theta_init 0.30    # initial water content (-), below the porosity
+#greenampt_soil_depth 1.0    # optional: soil depth (m); infiltration stops when full
+
+# (b) Horton: f(t) = fc + (f0 - fc) exp(-k t)
+#infiltration   horton
+#horton_f0      60           # initial capacity (mm/h)
+#horton_fc      10           # final capacity (mm/h)
+#horton_k       2            # decay constant (1/h)
+
+# (c) Constant rate, in m/s, or a grid of rates in mm/h
+#infiltration   1e-6
+#infilfile      rates.asc
+
+# Evaporation: a time series in mm/day. It can be combined with any of the
+# above.
+#evaporation    evap.dat
+
+
+# --- 4. Solver ---------------------------------------------------------------
+
+# Choose one of:
+#   fv1           first-order finite volume (shallow water). Fast and robust.
+#                 The usual first choice.
+#   fv2           second-order finite volume
+#   dg2           second-order discontinuous Galerkin, the most accurate. It
+#                 needs slope files dem.asc1x and dem.asc1y next to the DEM.
+#                 Make them with:  generateDG2DEM example.par
+#                 That command OVERWRITES dem.asc, so run it on a copy.
+#   acceleration  local inertial (ACC). The fastest; for floodplains and
+#                 slowly varying flow, not for steep terrain.
+#   acc_nugrid    ACC on a non-uniform grid
+#   hwfv1         adaptive FV1 (multiresolution)
+#   mwdg2         adaptive DG2 (multiresolution)
+#                 On CUDA, hwfv1 and mwdg2 take no rain (Metal does); give them
+#                 water through startfile or the boundary conditions instead.
+fv1
+
+# acc_nugrid, hwfv1 and mwdg2 work on a square grid of 2^L x 2^L cells that
+# must cover the DEM: L = 7 gives 128, enough for this 80 x 120 DEM.
+# The other solvers ignore it.
+max_ref_lvl     7
+
+# Run on the GPU. "cuda" and "metal" are the same switch: the build picks
+# NVIDIA (CUDA) or Apple Silicon (Metal) itself. Without it the run is on
+# the CPU: much slower, and the CPU fv1 and dg2 take rain only from
+# dynamicrainfile.
+cuda
+
+# Several GPUs (fv1, fv2 and dg2; the build needs MPI). Start the run with
+#     mpirun -np 4 ../build/lisflood example.par
+# where -np equals the value below. Each GPU takes a band of DEM rows.
+# For fv2 and dg2, give each rank its own GPU:
+#     mpirun -np 4 ../tests_8.4/multigpu/rank_gpu.sh ../build/lisflood example.par
+#GPUs           4
+
+# Optional solver settings. The defaults suit most cases. Put them AFTER the
+# solver keyword above, which sets its own defaults.
+#cfl            0.5          # Courant number (default fv1 0.5, fv2 0.33, acceleration 0.7)
+#depththresh    1e-3         # depth (m) below which a cell counts as dry
+#epsilon        1e-3         # hwfv1/mwdg2: error threshold for mesh adaptation
+#limitslopes                 # fv2/dg2/mwdg2: slope limiter for steep fronts
+
+
+# --- 5. Time -----------------------------------------------------------------
+
+sim_time        10800        # length of the simulation (s): 3 h
+initial_tstep   10           # LARGEST time step allowed (s), also the first one;
+                             # the solver takes smaller steps when the CFL needs them
+massint         60           # interval of the mass-balance record (s)
+saveint         1800         # interval of the output grids (s)
+
+
+# --- 6. Output ---------------------------------------------------------------
+
+dirroot         results      # output folder (created if missing)
+resroot         example      # prefix of every output file
+
+# What is written, for resroot "example":
+#   example.mass           every massint: the water budget (time, time step,
+#                          wet area, volume, inflow Qin, outflow Qout, the
+#                          volume error Verror since the last line and its
+#                          rate Qerror, and rain minus infiltration and
+#                          evaporation since the start)
+#   example-0001.wd ...    water depth (m) every saveint
+#   example-0001.elev ...  water surface elevation (m) every saveint
+#   example.max            maximum depth over the whole run
+#   example.stage          depth (m) at the points of the stage file, every massint
+stagefile       gauges.stage # first line: number of points; then "x y" per point
+
+# Turn outputs off or add more:
+elevoff                      # do not write .elev grids
+#depthoff                    # do not write .wd grids
+#voutput                     # also write velocity grids (.Vx, .Vy) every saveint
+#netcdf_out                  # write the grids as NetCDF instead of ASCII
+
+
+# --- 7. DEM NoData cells -----------------------------------------------------
+
+# Cells with the DEM NODATA value (-9999 here) lie outside the catchment.
+# These two lines make them a low sink that removes the water reaching them,
+# so a catchment cut out of a larger DEM drains at its edge.
+#nodata_elevation -9999
+#drain_nodata
