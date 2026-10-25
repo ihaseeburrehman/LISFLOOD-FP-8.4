@@ -75,9 +75,8 @@ void lis::Stats::write
 		entry.mass.out,
 		entry.discharge_error,
 		entry.volume_error,
-		// Rain-(Inf+Evap): rain is not counted here; infiltration and
-		// evaporation (cuda_losses) as a negative volume, 0 when not used
-		(entry.losses > C(0.0)) ? -entry.losses : C(0.0)
+		// Rain-(Inf+Evap) since the start, m3, as in the CPU solvers
+		entry.rain - entry.losses
 	);
 	fflush(file);
 

@@ -339,6 +339,7 @@ void update_uniform_rain_func
 {
 	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y * blockDim.y + threadIdx.y;
+	int cells = 0; // real cells this rank owns given rain, for rain_volume
 
 	for (int j = global_j; j < cuda::geometry.ysz + 2; j += blockDim.y * gridDim.y)
 	{
@@ -356,9 +357,13 @@ void update_uniform_rain_func
 
 				NUMERIC_TYPE& Hval = U.H[j * cuda::pitch + i];
 				Hval += cell_rain;
+				if (i >= 1 && i <= cuda::geometry.xsz &&
+					j >= cuda::fv1_owned_row_begin() && j < cuda::fv1_owned_row_end()) cells++;
 			}
 		}
 	}
+	add_block_sum(cells*(double)rain_rate*cuda::dt*cuda::geometry.dx*cuda::geometry.dy,
+		&cuda::rain_volume);
 }
 
 __device__
@@ -483,7 +488,9 @@ void update_flow_variables_x
 
 				F_e = HLL::x(Ustar_neg_flux, Ustar_pos);
 				F[threadIdx.y][threadIdx.x] = F_e;
-				update_mass_stats_x(mass_stats, F_e.H, i, j, C(0.5));
+				// every rank computes these faces; only the owner of row j counts them
+				if (cuda::fv1_owns_row(j))
+					update_mass_stats_x(mass_stats, F_e.H, i, j, C(0.5));
 			}
 
 			__syncthreads();
@@ -572,7 +579,9 @@ void update_flow_variables_y
 				F_s = HLL::y(Ustar_neg, Ustar_pos_flux);
 
 				F[threadIdx.y][threadIdx.x] = F_s;
-				update_mass_stats_y(mass_stats, F_s.H, i, j, C(0.5));
+				if ((j == 0 && cuda::fv1_owns_row(1)) ||
+						(j > 0 && cuda::fv1_owns_row(j)))
+					update_mass_stats_y(mass_stats, F_s.H, i, j, C(0.5));
 			}
 
 			__syncthreads();

@@ -58,6 +58,13 @@ __device__ __forceinline__ int fv1_owned_row_end() { return cuda::geometry.ysz +
 
 extern const dim3 block_size;
 
+/** rain added to the cells this rank owns since the start, m3 (for .mass) */
+extern __device__ double rain_volume;
+/** rain_volume, read on the host */
+double rain_volume_total();
+/** sum of v over the threads of a block, added once per block to *total */
+__device__ void add_block_sum(double v, double* total);
+
 /** *a = min(*a, v) for v >= 0: the bit patterns of non-negative floats order as the values */
 __device__ inline void atomic_min_nonnegative(float* a, float v)
 {

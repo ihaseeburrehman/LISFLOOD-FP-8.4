@@ -24,6 +24,8 @@ inline void atomic_add_float(device atomic_uint* addr, float val) {
     }
 }
 
+// Threadgroups overlap by one face, so a face at a tile seam is computed by
+// two threads; only the one with tid > 0 (or the first tile) counts it.
 inline void account_boundary(device atomic_uint* totals, float outward_volume) {
     if (outward_volume > 0.0f) atomic_add_float(&totals[0], outward_volume);
     else if (outward_volume < 0.0f) atomic_add_float(&totals[1], -outward_volume);
@@ -491,8 +493,8 @@ kernel void update_flow_x(
         Hstar_sh[tid.y][tid.x] = Ustar_e.H;
 
         // Domain-edge bookkeeping: i == 0 is the west face, i == xsz the east.
-        if (i == 0) account_boundary(mass_totals, -F_e.H * solver.dt * geom.dy);
-        if (i == geom.xsz) account_boundary(mass_totals, F_e.H * solver.dt * geom.dy);
+        if (i == 0 && (tid.x > 0 || tgid.x == 0)) account_boundary(mass_totals, -F_e.H * solver.dt * geom.dy);
+        if (i == geom.xsz && (tid.x > 0 || tgid.x == 0)) account_boundary(mass_totals, F_e.H * solver.dt * geom.dy);
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -601,8 +603,8 @@ kernel void update_flow_y(
         F[tid.y][tid.x] = F_s;
         Hstar_sh[tid.y][tid.x] = Ustar_s.H;
 
-        if (j == 0 && geom.owns_north_ghost) account_boundary(mass_totals, -F_s.H * solver.dt * geom.dx);
-        if (j == geom.ysz && geom.owns_south_ghost) account_boundary(mass_totals, F_s.H * solver.dt * geom.dx);
+        if (j == 0 && geom.owns_north_ghost && (tid.y > 0 || tgid.y == 0)) account_boundary(mass_totals, -F_s.H * solver.dt * geom.dx);
+        if (j == geom.ysz && geom.owns_south_ghost && (tid.y > 0 || tgid.y == 0)) account_boundary(mass_totals, F_s.H * solver.dt * geom.dx);
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);

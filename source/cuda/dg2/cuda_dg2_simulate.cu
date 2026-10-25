@@ -198,6 +198,7 @@ void lis::cuda::dg2::Simulation::run
 	}
 
 	Flow& d_U = solve->d_U();
+	stats_collector.start(d_U.H);
 
 	time_t loop_start;
 	time(&loop_start);

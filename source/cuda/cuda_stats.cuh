@@ -20,6 +20,9 @@ public:
 		int element_count = 0
 	);
 
+	/** volume of the initial water: the first entry's error is measured from it */
+	void start(NUMERIC_TYPE* H);
+
 	void zero_instantaneous_mass();
 
 	void accumulate_mass();
@@ -43,29 +46,22 @@ public:
 	double total_loss = 0.0;    /**< since the start */
 
 private:
-	NUMERIC_TYPE area
+	/** water volume (m3) and wet area (m2) of the real cells, all ranks */
+	void measure
 	(
-		NUMERIC_TYPE* H
-	);
-
-	NUMERIC_TYPE volume
-	(
-		NUMERIC_TYPE* H
+		NUMERIC_TYPE* H,
+		NUMERIC_TYPE& volume,
+		NUMERIC_TYPE& area
 	);
 
 	void zero_cumulative_mass();
 
 	Geometry& geometry;
-	int element_offset;
-	int elements;
+	NUMERIC_TYPE depth_threshold;
+	bool ghost;        /**< FV1/FV2/DG2 layout with a ghost-cell ring */
 	bool distributed;
-	NUMERIC_TYPE* histogram_levels;
-	int* histogram_counts;
-	void* area_temp;
-	size_t area_bytes;
-	void* volume_temp;
-	size_t volume_bytes;
-	NUMERIC_TYPE* d_volume;
+	double* d_sums;    /**< depth sum and wet cells, from domain_sums */
+	double previous_rain = 0.0; /**< rain volume at the previous entry */
 	MassStats* d_cumulative_mass; /**< through BCs/PSs since last write */
 	NUMERIC_TYPE cumulative_time;
 //	MassStats* d_instantaneous_mass; /**< through BCs/PSs during timestep*/

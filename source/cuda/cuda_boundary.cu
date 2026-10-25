@@ -224,10 +224,12 @@ __global__ void update_H
 	NUMERIC_TYPE* H,
 	NUMERIC_TYPE* Qx,
 	NUMERIC_TYPE* Qy,
-	int drycheck
+	int drycheck,
+	MassStats* mass_stats
 )
 {
 	NUMERIC_TYPE dV, cv, WDweight;
+	NUMERIC_TYPE edge_q = C(0.0); // net inflow through the domain edges, m3/s
 
 	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -263,6 +265,15 @@ __global__ void update_H
 			hptr += dV / (cuda::geometry.dx * cuda::geometry.dx);
 			if (hptr < C(0.0)) hptr = C(0.0);
 
+			if (i == 0) edge_q += qxptr0;
+			if (i == cuda::geometry.xsz - 1) edge_q -= qxptr1;
+			if (j == 0) edge_q += qyptr0;
+			if (j == cuda::geometry.ysz - 1) edge_q -= qyptr1;
+			if (edge_q != C(0.0))
+			{
+				accumulate_point_source_stats(mass_stats, edge_q);
+				edge_q = C(0.0);
+			}
 		}
 	}
 }
@@ -697,7 +708,7 @@ void lis::cuda::Boundary::update_H
 )
 {
 	if (host_PS_count > 0) cuda::update_point_sources_Q << <1, CUDA_BLOCK_SIZE >> > (H, mass_stats);
-	cuda::update_H << <grid_size, cuda::block_size >> > (H, Qx, Qy, drycheck);
+	cuda::update_H << <grid_size, cuda::block_size >> > (H, Qx, Qy, drycheck, mass_stats);
 	if (host_PS_count > 0) cuda::update_point_sources_H << <1, CUDA_BLOCK_SIZE >> > (H, DEM, mass_stats);
 }								  
 void lis::cuda::Boundary::drain_nodata_water

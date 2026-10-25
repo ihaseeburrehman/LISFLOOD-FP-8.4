@@ -1526,6 +1526,7 @@ void simulate(Fnames &filenames, Files *files, States &states, Pars &pars,
 
         update_mass_stats(&states, &pars, &solver, &boundCs, &arrays);
         write_mass_stats(files, &pars, &solver, &boundCs);
+        if (states.save_stages == ON) write_depth_samples(files, &pars, &solver, &stage, &arrays);
       }
       pars.MassTotal += pars.MassInt;
     }

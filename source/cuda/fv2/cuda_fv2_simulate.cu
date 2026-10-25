@@ -200,6 +200,7 @@ void lis::cuda::fv2::Simulation::run
 
 	Rainfall_uniform rainfall_uniform(C(0.0));
 	Flow& d_U = solve->d_U();
+	stats_collector.start(d_U.H);
 
 	time_t loop_start;
 	time(&loop_start);

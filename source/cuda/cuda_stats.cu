@@ -1,7 +1,6 @@
 #include "cuda_stats.cuh"
 #include "cuda_solver.cuh"
 #include "cuda_util.cuh"
-#include <cub/cub.cuh>
 #include <limits>
 #include <cstdlib>
 #if defined(LISFLOOD_CUDA_MPI)
@@ -23,6 +22,36 @@ __global__ void accumulate_mass
 	cumulative->out += instantaneous->out * cuda::dt;
 }
 
+/**
+ * sums[0] += depth summed over the real cells this rank owns (no ghost
+ * cells), sums[1] += how many of them are wet (depth >= threshold)
+ */
+__global__ void domain_sums
+(
+	const NUMERIC_TYPE* H,
+	int ghost,
+	NUMERIC_TYPE threshold,
+	double* sums
+)
+{
+	const int nx = cuda::geometry.xsz;
+	const int row_begin = ghost ? cuda::fv1_owned_row_begin() : 0;
+	const int rows = (ghost ? cuda::fv1_owned_row_end() : cuda::geometry.ysz) - row_begin;
+	const int pitch = ghost ? nx + 2 : nx;
+	double depth = 0.0, wet = 0.0;
+	for (long k = blockIdx.x*(long)blockDim.x + threadIdx.x; k < (long)nx*rows;
+			k += (long)blockDim.x*gridDim.x)
+	{
+		const int i = (int)(k % nx) + (ghost ? 1 : 0);
+		const int j = (int)(k / nx) + row_begin;
+		const NUMERIC_TYPE h = H[j*pitch + i];
+		depth += h;
+		if (h >= threshold) wet += 1.0;
+	}
+	add_block_sum(depth, &sums[0]);
+	add_block_sum(wet, &sums[1]);
+}
+
 }
 }
 
@@ -36,41 +65,23 @@ lis::cuda::StatsCollector::StatsCollector
 )
 :
 geometry(geometry),
-element_offset(element_offset),
-elements(element_count > 0 ? element_count :
-		((acceleration == 0) ? lis::GhostRaster::elements(geometry) : lis::GhostRaster::elements_H(geometry))),
+depth_threshold(DepthThresh),
+ghost(acceleration == 0),
 distributed(element_count > 0)
 {
-	area_temp = nullptr;
-	volume_temp = nullptr;
-	NUMERIC_TYPE* dummy_in = nullptr;
-	NUMERIC_TYPE* dummy_reduce_out = nullptr;
-	int* dummy_histogram_out = nullptr;
-
-	histogram_levels = static_cast<NUMERIC_TYPE*>(
-			malloc_unified(3*sizeof(NUMERIC_TYPE)));
-
-	histogram_levels[0] = C(0.0);
-	histogram_levels[1] = DepthThresh;
-	histogram_levels[2] = std::numeric_limits<NUMERIC_TYPE>::max();
-
-	histogram_counts = static_cast<int*>(malloc_unified(2*sizeof(int)));
-
-	checkCudaErrors(cub::DeviceHistogram::HistogramRange(area_temp, area_bytes,
-				dummy_in, dummy_histogram_out, 3, histogram_levels, elements));
-	area_temp = malloc_device(area_bytes);
-
-	checkCudaErrors(cub::DeviceReduce::Sum(volume_temp, volume_bytes,
-				dummy_in, dummy_reduce_out, elements));
-	volume_temp = malloc_device(volume_bytes);
-
-	d_volume = static_cast<NUMERIC_TYPE*>(malloc_device(sizeof(NUMERIC_TYPE)));
+	d_sums = static_cast<double*>(malloc_device(2*sizeof(double)));
 
 	d_instantaneous_mass = static_cast<MassStats*>(
 			malloc_device(sizeof(MassStats)));
 	d_cumulative_mass = static_cast<MassStats*>(
 			malloc_device(sizeof(MassStats)));
 	zero_cumulative_mass();
+}
+
+void lis::cuda::StatsCollector::start(NUMERIC_TYPE* H)
+{
+	NUMERIC_TYPE initial_area;
+	measure(H, previous_volume, initial_area);
 }
 
 void lis::cuda::StatsCollector::zero_instantaneous_mass()
@@ -102,9 +113,12 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 	NUMERIC_TYPE* H
 )
 {
-	NUMERIC_TYPE current_volume = volume(H);
+	NUMERIC_TYPE current_volume, current_area;
+	measure(H, current_volume, current_area);
 	NUMERIC_TYPE volume_change = current_volume - previous_volume;
 	previous_volume = current_volume;
+
+	double rain_total = rain_volume_total();
 
 	MassStats h_instantaneous_mass;
 	cuda::copy(&h_instantaneous_mass, d_instantaneous_mass, sizeof(MassStats));
@@ -129,8 +143,13 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 			sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 		h_instantaneous_mass = global_instantaneous;
 		h_cumulative_mass = global_cumulative;
+		double global_rain = 0.0;
+		MPI_Allreduce(&rain_total, &global_rain, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		rain_total = global_rain;
 	}
 #endif
+	const double interval_rain = rain_total - previous_rain;
+	previous_rain = rain_total;
 
 	NUMERIC_TYPE time = cumulative_time;
 
@@ -139,10 +158,9 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 
 	zero_cumulative_mass();
 
-	// water removed by infiltration and evaporation is not an error
-	NUMERIC_TYPE volume_error = (interval_loss != 0.0)
-		? net_source_flux - volume_change - (NUMERIC_TYPE)interval_loss
-		: net_source_flux - volume_change;
+	// rain, infiltration and evaporation are sources and sinks, not errors
+	NUMERIC_TYPE volume_error = (NUMERIC_TYPE)((double)net_source_flux
+		+ interval_rain - interval_loss - (double)volume_change);
 	interval_loss = 0.0;
 
 	return {
@@ -150,70 +168,46 @@ lis::StatsEntry lis::cuda::StatsCollector::create_entry
 		cuda::dt,
 		solver.itCount,
 		solver.MinTstep,
-		area(H),
+		current_area,
 		current_volume,
 		h_instantaneous_mass,
 		volume_error,
 		volume_error/time,
-		(NUMERIC_TYPE)total_loss
+		(NUMERIC_TYPE)total_loss,
+		(NUMERIC_TYPE)rain_total
 	};
 }
 
 lis::cuda::StatsCollector::~StatsCollector()
 {
-	free_unified(histogram_levels);
-	free_unified(histogram_counts);
-	free_device(area_temp);
-	free_device(volume_temp);
-	free_device(d_volume);
+	free_device(d_sums);
 	free_device(d_instantaneous_mass);
 	free_device(d_cumulative_mass);
 }
 
-NUMERIC_TYPE lis::cuda::StatsCollector::area
+void lis::cuda::StatsCollector::measure
 (
-	NUMERIC_TYPE* H
+	NUMERIC_TYPE* H,
+	NUMERIC_TYPE& volume,
+	NUMERIC_TYPE& area
 )
 {
-	checkCudaErrors(cub::DeviceHistogram::HistogramRange(area_temp, area_bytes,
-				H + element_offset, histogram_counts, 3, histogram_levels, elements));
-	cuda::sync();
-	int wet_cells = histogram_counts[1];
+	checkCudaErrors(cudaMemsetAsync(d_sums, 0, 2*sizeof(double)));
+	const long cells = (long)geometry.xsz*geometry.ysz;
+	const int blocks = (int)std::min<long>(1024, std::max<long>(1, (cells + CUDA_BLOCK_SIZE - 1)/CUDA_BLOCK_SIZE));
+	domain_sums<<<blocks, CUDA_BLOCK_SIZE>>>(H, ghost ? 1 : 0, depth_threshold, d_sums);
+	double sums[2];
+	cuda::copy(sums, d_sums, 2*sizeof(double));
 #if defined(LISFLOOD_CUDA_MPI)
 	if (distributed) {
-		int global_wet_cells = 0;
-		MPI_Allreduce(&wet_cells, &global_wet_cells, 1, MPI_INT, MPI_SUM,
-				MPI_COMM_WORLD);
-		wet_cells = global_wet_cells;
+		double global_sums[2] = {0.0, 0.0};
+		MPI_Allreduce(sums, global_sums, 2, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+		sums[0] = global_sums[0];
+		sums[1] = global_sums[1];
 	}
 #endif
-	return wet_cells * geometry.dx * geometry.dy;
-}
-
-NUMERIC_TYPE lis::cuda::StatsCollector::volume
-(
-	NUMERIC_TYPE* H
-)
-{
-
-	checkCudaErrors(cub::DeviceReduce::Sum(volume_temp, volume_bytes,
-				H + element_offset, d_volume, elements));
-
-	NUMERIC_TYPE h_volume;
-
-	cuda::copy(&h_volume, d_volume, sizeof(NUMERIC_TYPE));
-
-#if defined(LISFLOOD_CUDA_MPI)
-	if (distributed) {
-		NUMERIC_TYPE global_volume = C(0.0);
-		MPI_Allreduce(&h_volume, &global_volume, 1,
-				sizeof(NUMERIC_TYPE) == sizeof(float) ? MPI_FLOAT : MPI_DOUBLE,
-				MPI_SUM, MPI_COMM_WORLD);
-		h_volume = global_volume;
-	}
-#endif
-
-	return h_volume * geometry.dx * geometry.dy;
+	volume = (NUMERIC_TYPE)(sums[0] * geometry.dx * geometry.dy);
+	area = (NUMERIC_TYPE)(sums[1] * geometry.dx * geometry.dy);
 }
 
 void lis::cuda::StatsCollector::zero_cumulative_mass()

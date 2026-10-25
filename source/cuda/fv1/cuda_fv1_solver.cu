@@ -287,6 +287,7 @@ void update_uniform_rain_func
 	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
 	int global_j = cuda::fv1_owned_row_begin()
 		+ blockIdx.y * blockDim.y + threadIdx.y;
+	int cells = 0; // real cells given rain, for rain_volume
 
 	for (int j = global_j; j < cuda::fv1_owned_row_end(); j += blockDim.y * gridDim.y)
 	{
@@ -304,9 +305,12 @@ void update_uniform_rain_func
 
 				NUMERIC_TYPE& Hval = U.H[j * cuda::pitch + i];
 				Hval += cell_rain;
+				if (i >= 1 && i <= cuda::geometry.xsz) cells++;
 			}
 		}
 	}
+	add_block_sum(cells*(double)rain_rate*cuda::dt*cuda::geometry.dx*cuda::geometry.dy,
+		&cuda::rain_volume);
 }
 
 __global__ void update_ghost_cells

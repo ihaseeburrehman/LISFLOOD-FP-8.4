@@ -23,6 +23,7 @@ typedef struct StatsEntry
 	NUMERIC_TYPE volume_error;
 	NUMERIC_TYPE discharge_error;
 	NUMERIC_TYPE losses; /**< infiltration + evaporation since the start, m3 */
+	NUMERIC_TYPE rain;   /**< rain since the start, m3 */
 } StatsEntry;
 
 class Stats

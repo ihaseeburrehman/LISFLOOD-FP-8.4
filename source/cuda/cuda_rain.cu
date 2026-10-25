@@ -1,6 +1,7 @@
 #include "cuda_rain.cuh"
 #include "../rain/rain.h"
 #include "cuda_unifiedallocator.cuh"
+#include "cuda_util.cuh"
 
 #if _NETCDF == 1
 	#include "../rain/rain.tpp"
@@ -9,6 +10,15 @@
 #endif
 
 template class DynamicRain<lis::cuda::UnifiedAllocator<NUMERIC_TYPE>>;
+
+__device__ double lis::cuda::rain_volume = 0.0;
+
+double lis::cuda::rain_volume_total()
+{
+	double v = 0.0;
+	checkCudaErrors(cudaMemcpyFromSymbol(&v, rain_volume, sizeof(double)));
+	return v;
+}
 
 __device__ 
 NUMERIC_TYPE lis::cuda::rate_at_cell
@@ -47,6 +57,7 @@ lis::cuda::DynamicRain::update
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 	int global_j = cuda::fv1_owned_row_begin()
 		+ blockIdx.y*blockDim.y + threadIdx.y;
+	double rate_sum = 0.0; // m/s summed over the cells, for rain_volume
 
 	for (int j=global_j; j<cuda::fv1_owned_row_end(); j+=blockDim.y*gridDim.y)
 	{
@@ -56,9 +67,12 @@ lis::cuda::DynamicRain::update
             if (FABS(Z - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE& Hval = H[j*cuda::pitch + i];
-            Hval += rate_at_cell(rain_data, i, j) * cuda::dt;
+			const NUMERIC_TYPE rate = rate_at_cell(rain_data, i, j);
+            Hval += rate * cuda::dt;
+			rate_sum += rate;
 		}
 	}
+	add_block_sum(rate_sum*cuda::dt*cuda::geometry.dx*cuda::geometry.dy, &rain_volume);
 #endif
 }
 
@@ -99,6 +113,7 @@ lis::cuda::DynamicRain::updateACC
 #if _NETCDF == 1
 	int global_i = blockIdx.x*blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y*blockDim.y + threadIdx.y;
+	double rate_sum = 0.0; // m/s summed over the cells, for rain_volume
 
 	for (int j=global_j; j<cuda::geometry.ysz; j+=blockDim.y*gridDim.y)
 	{
@@ -108,8 +123,11 @@ lis::cuda::DynamicRain::updateACC
             if (FABS(Z - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 
 			NUMERIC_TYPE& Hval = H[j*cuda::geometry.xsz + i];
-            Hval += rate_at_cell_ACC(rain_data, i, j) * cuda::dt;
+			const NUMERIC_TYPE rate = rate_at_cell_ACC(rain_data, i, j);
+            Hval += rate * cuda::dt;
+			rate_sum += rate;
 		}
 	}
+	add_block_sum(rate_sum*cuda::dt*cuda::geometry.dx*cuda::geometry.dy, &rain_volume);
 #endif
 }
