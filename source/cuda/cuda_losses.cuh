@@ -98,6 +98,12 @@ public:
 	);
 
 	bool enabled() const { return infiltration || greenampt || horton || evaporation; }
+	/** true if the loss parameters change with time (evaporation series) */
+	bool depends_on_time() const { return evaporation; }
+	/** the loss parameters at time t, for kernels that apply fv1_cell_values */
+	LossParams cell_params(NUMERIC_TYPE t) { return params(t); }
+	/** device counter of the volume removed (m3), as apply_fv1_cells adds to it */
+	double* device_volume() { return d_volume; }
 
 	/** FV1: ghost-cell layout; scales HU and HV with the depth */
 	void apply_fv1
@@ -226,6 +232,25 @@ private:
 	double* d_water = nullptr;
 	double reported = 0.0;
 };
+
+/**
+ * fv1_cell_updates for one cell on values held in registers, before they are
+ * stored: NoData drainage (if drain) or the losses (if losses), the same
+ * arithmetic in the same order. h is then the depth for the maximum.
+ */
+__device__ void fv1_cell_values
+(
+	NUMERIC_TYPE& h,
+	NUMERIC_TYPE& hu,
+	NUMERIC_TYPE& hv,
+	int idx,
+	bool nodata,
+	bool drain,
+	bool losses,
+	MassStats* mass_stats,
+	const LossParams& p,
+	double& removed
+);
 
 }
 }

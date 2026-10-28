@@ -2,6 +2,9 @@
 #include "../lisflood.h"
 #include "../geometry.h"
 #include "../lisflood2/DataTypes.h"
+#include <cstdint>
+#include <future>
+#include <vector>
 
 template<class Allocator = std::allocator<NUMERIC_TYPE>>
 class DynamicRain
@@ -108,11 +111,36 @@ public:
         return netcdf_.data;
     }
 
+    /**
+     * Prefetching (CUDA FV1): from the frame of the last update_time, the next
+     * frame is read and converted to m/s, as update_time does, in a background
+     * thread. advance_prefetched(t) then moves to the frame of time t as
+     * update_time does and returns true if the frame changed, with the new
+     * frame in frame(); data() is no longer updated. Only one thread calls
+     * the netCDF library at a time.
+     */
+    void start_prefetch();
+    bool advance_prefetched
+    (
+        NUMERIC_TYPE t
+    );
+    inline const NUMERIC_TYPE* frame() const
+    {
+        return frame_.data();
+    }
+
     ~DynamicRain();
 
 private:
+    /** reads frame idx into buffer as rainfall rate (m/s), as update_time */
+    void read_frame(size_t idx, std::vector<NUMERIC_TYPE>& buffer);
+    void prefetch_next();
+
     bool enabled_;
     NetCDFVariable netcdf_;
     Geometry geometry_;
     Allocator allocator_;
+    std::vector<NUMERIC_TYPE> frame_, next_frame_;
+    size_t next_idx_ = SIZE_MAX;
+    std::future<void> next_;
 };

@@ -253,16 +253,106 @@ void lis::cuda::fv1::Simulation::run
 	Flow& d_U = solve->d_U();
 	stats_collector.start(d_U.H);
 
+	// Dead cells (cuda_solver.cuh): NoData cells whose four neighbours are
+	// NoData cells inside the domain. Only with drain_nodata, which keeps their
+	// depth at zero, and without point sources. From the fourth step on, the
+	// first steps having removed any start water from them and written the
+	// same values into both states, blocks of dead cells skip their work.
+	// The rain, the ghost cells and the time step in two kernels (Solver::
+	// prepare_fused_dt), when nothing else changes the depths between them:
+	// no point sources, no uniform rain, and an adaptive time step.
+	Solver* fv1_solver = static_cast<Solver*>(solve.get());
+	// With several ranks the halo exchange sits between the rain and the time
+	// step and must see the rain: keep the separate kernels there.
+	const bool fused_dt = fv1_solver->fused_path() && states.adaptive_ts == ON
+		&& boundCs.numPS <= 0 && states.rainfall != ON
+#if defined(LISFLOOD_CUDA_MPI)
+		&& mpi_size == 1
+#endif
+		;
+
+	// On that path the next rain frame is read in the background while the
+	// GPU works (DynamicRain::start_prefetch) and copied to a device buffer.
+	const bool rain_prefetch = fused_dt && rain.enabled();
+	// and the host waits for the time step only after the step's kernels are
+	// queued (DynamicTimestep::start_dt), unless the losses change with time
+	const bool async_dt = fused_dt && !losses.depends_on_time();
+	NUMERIC_TYPE* d_rain = nullptr;
+	size_t rain_bytes = 0;
+	if (rain_prefetch)
+	{
+		rain_bytes = static_cast<size_t>(rain.geometry().xsz) * rain.geometry().ysz
+			* sizeof(NUMERIC_TYPE);
+		d_rain = static_cast<NUMERIC_TYPE*>(cuda::malloc_device(rain_bytes));
+		rain.start_prefetch();
+		checkCudaErrors(cudaMemcpy(d_rain, rain.frame(), rain_bytes, cudaMemcpyHostToDevice));
+	}
+
+	int* d_live_sat = nullptr;
+	const bool skip_dead = pars.drain_nodata && boundCs.numPS <= 0;
+	bool skipping = false;
+	if (skip_dead)
+	{
+		const int nx = geometry.xsz + 2, ny = geometry.ysz + 2;
+		auto nodata = [&](int i, int j) {
+			return FABS(DEM[j*pitch + i] - pars.nodata_elevation) < C(1e-6);
+		};
+		auto ghost = [&](int i, int j) {
+			return i == 0 || j == 0 || i == nx - 1 || j == ny - 1;
+		};
+		auto dead = [&](int i, int j) {
+			if (ghost(i, j) || !nodata(i, j)) return false;
+			const int di[4] = {-1, 1, 0, 0}, dj[4] = {0, 0, -1, 1};
+			for (int k = 0; k < 4; k++)
+				if (ghost(i + di[k], j + dj[k]) || !nodata(i + di[k], j + dj[k])) return false;
+			return true;
+		};
+		const int w = nx + 1;
+		std::vector<int> sat(static_cast<size_t>(ny + 1) * w, 0);
+		long dead_cells = 0;
+		for (int j = 0; j < ny; j++)
+		{
+			int row = 0;
+			for (int i = 0; i < nx; i++)
+			{
+				const bool d = dead(i, j);
+				dead_cells += d;
+				row += d ? 0 : 1;
+				sat[(j + 1)*w + i + 1] = sat[j*w + i + 1] + row;
+			}
+		}
+		d_live_sat = static_cast<int*>(cuda::malloc_device(sat.size() * sizeof(int)));
+		checkCudaErrors(cudaMemcpy(d_live_sat, sat.data(), sat.size() * sizeof(int),
+				cudaMemcpyHostToDevice));
+		cuda::copy_to_symbol(cuda::fv1_live_sat, &d_live_sat, sizeof(int*));
+		if (verbose) printf("FV1: %ld of %ld cells are dead NoData cells and are skipped from step 4\n",
+				dead_cells, static_cast<long>(nx) * ny);
+	}
+
 	time_t loop_start;
 	time(&loop_start);
 
 	while (solver.t < solver.Sim_Time)
 	{
-		if (rain.enabled())
+		if (skip_dead && !skipping && solver.itCount >= 3)
+		{
+			const int one = 1;
+			cuda::copy_to_symbol(cuda::fv1_skip_dead, &one, sizeof(int));
+			skipping = true;
+		}
+
+		if (rain_prefetch)
+		{
+			if (rain.advance_prefetched(solver.t))
+				checkCudaErrors(cudaMemcpy(d_rain, rain.frame(), rain_bytes,
+						cudaMemcpyHostToDevice));
+		}
+		else if (rain.enabled())
 		{
 			rain.update_time(solver.t);
-			lis::cuda::DynamicRain::update<<<cell_grid, CUDA_BLOCK_SIZE>>>(
-					d_DEM, d_U.H, rain.data());
+			if (!fused_dt)
+				lis::cuda::DynamicRain::update<<<cell_grid, CUDA_BLOCK_SIZE>>>(
+						d_DEM, d_U.H, rain.data());
 		}
 
 		if (states.rainfall == ON) {
@@ -280,8 +370,26 @@ void lis::cuda::fv1::Simulation::run
 #endif
 		stats_collector.accumulate_mass(step_dt);
 		stats_collector.zero_instantaneous_mass();
-		solve->update_ghost_cells();
-		step_dt = dynamic_dt.update_dt();
+		if (fused_dt)
+			fv1_solver->prepare_fused_dt(rain_prefetch ? d_rain : nullptr, cell_grid);
+		else
+			solve->update_ghost_cells();
+		if (async_dt)
+		{
+			// The step's kernels read dt on the device, so they are launched
+			// before the host has it; the loss parameters do not depend on t.
+			dynamic_dt.start_dt();
+			fv1_solver->set_cell_updates(
+					max_field.data(), pars.drain_nodata, losses.enabled(),
+					losses.cell_params(solver.t), losses.device_volume());
+			d_U = solve->update_flow_variables(
+					stats_collector.instantaneous_mass());
+			step_dt = dynamic_dt.finish_dt();
+		}
+		else
+		{
+			step_dt = dynamic_dt.update_dt();
+		}
 		solver.MinTstep = FMIN(solver.MinTstep, step_dt);
 
 		if (
@@ -292,12 +400,21 @@ void lis::cuda::fv1::Simulation::run
 		solver.t += step_dt;
 		solver.itCount++;
 
-		d_U = solve->update_flow_variables(
-				stats_collector.instantaneous_mass());
-		// drain, losses and maximum depth in one pass over the cells
-		losses.apply_fv1_cells(d_U.H, d_U.HU, d_U.HV, d_DEM, max_field.data(),
-				pars.drain_nodata, stats_collector.instantaneous_mass(),
-				solver.t, cell_grid);
+		// drain, losses and maximum depth: inside the y flux kernel, or in one
+		// pass over the cells after the separate kernels
+		bool cells_fused = async_dt;
+		if (!async_dt)
+		{
+			cells_fused = fv1_solver->set_cell_updates(
+					max_field.data(), pars.drain_nodata, losses.enabled(),
+					losses.cell_params(solver.t), losses.device_volume());
+			d_U = solve->update_flow_variables(
+					stats_collector.instantaneous_mass());
+		}
+		if (!cells_fused)
+			losses.apply_fv1_cells(d_U.H, d_U.HU, d_U.HV, d_DEM, max_field.data(),
+					pars.drain_nodata, stats_collector.instantaneous_mass(),
+					solver.t, cell_grid);
 		stats_collector.accumulate_mass(step_dt);
 
 		bool gathered_depth = false;
@@ -374,6 +491,8 @@ void lis::cuda::fv1::Simulation::run
 	cuda::free_device(d_manning);
 	cuda::free_device(Zstar_x);
 	cuda::free_device(Zstar_y);
+	if (d_live_sat != nullptr) cuda::free_device(d_live_sat);
+	if (d_rain != nullptr) cuda::free_device(d_rain);
 	Flow::free_pinned(U);
 	cuda::Boundary::free_device(boundaries);
 #if defined(LISFLOOD_CUDA_MPI)

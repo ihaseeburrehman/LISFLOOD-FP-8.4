@@ -1,4 +1,5 @@
 #include "cuda_flow.cuh"
+#include "cuda_device_functions.cuh"
 #include "cuda_solver.cuh"
 
 __device__ lis::cuda::FlowVector lis::cuda::FlowVector::star
@@ -7,9 +8,7 @@ __device__ lis::cuda::FlowVector lis::cuda::FlowVector::star
 	NUMERIC_TYPE Zstar
 ) const
 {
-	NUMERIC_TYPE Hstar = calculate_Hstar(Z, Zstar);
-
-	return { Hstar, Hstar*speed(HU), Hstar*speed(HV) };
+	return detail::star(*this, Z, Zstar);
 };
 
 __device__

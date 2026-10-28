@@ -390,6 +390,15 @@ bool read_file_netCDF(NetCDFVariable *ncvar, NUMERIC_TYPE curr_time)
   return old_idx != ncvar->time_idx;
 }
 
+void read_file_netCDF_frame(const NetCDFVariable *ncvar, size_t idx, NUMERIC_TYPE *data)
+{
+  int retval;
+  size_t start[] = {idx, 0, 0};
+  size_t count[] = {1, ncvar->ylen, ncvar->xlen};
+  if ((retval = NC_GET_VARA_NUMERIC_TYPE(ncvar->ncid, ncvar->varid, start,
+              count, data))) ERR(retval);
+}
+
 /*
 netcdf_varid: must be defined in netcdf_state
 */

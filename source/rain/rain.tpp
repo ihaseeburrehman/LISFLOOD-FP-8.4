@@ -234,9 +234,79 @@ void DynamicRain<Allocator>::update_rain_grid_SGM
 
 
 template<class Allocator>
+void DynamicRain<Allocator>::read_frame
+(
+    size_t idx,
+    std::vector<NUMERIC_TYPE>& buffer
+)
+{
+    // dt as read_file_netCDF, then the conversion of update_time
+    NUMERIC_TYPE dt = (idx < netcdf_.tlen-1)
+        ? netcdf_.times[idx+1] - netcdf_.times[idx]
+        : netcdf_.times[idx] - netcdf_.times[idx-1];
+    dt *= C(3600.0); // hr to s
+
+    const size_t n = netcdf_.xlen * netcdf_.ylen;
+    buffer.resize(n);
+    read_file_netCDF_frame(&netcdf_, idx, buffer.data());
+
+    for (size_t i=0; i<n; i++)
+    {
+        buffer[i] /= dt;
+        buffer[i] /= C(1000.0); // mm to m
+    }
+}
+
+template<class Allocator>
+void DynamicRain<Allocator>::prefetch_next()
+{
+    next_idx_ = SIZE_MAX;
+    if (netcdf_.time_idx + 1 >= netcdf_.tlen) return;
+    next_idx_ = netcdf_.time_idx + 1;
+    next_ = std::async(std::launch::async, [this]() { read_frame(next_idx_, next_frame_); });
+}
+
+template<class Allocator>
+void DynamicRain<Allocator>::start_prefetch()
+{
+    if (!enabled_) return;
+    const size_t n = netcdf_.xlen * netcdf_.ylen;
+    frame_.assign(netcdf_.data, netcdf_.data + n);
+    prefetch_next();
+}
+
+template<class Allocator>
+bool DynamicRain<Allocator>::advance_prefetched
+(
+    NUMERIC_TYPE t
+)
+{
+    if (!enabled_) return false;
+
+    // the time index as read_file_netCDF
+    const NUMERIC_TYPE curr_time = t / C(3600.0); // s to hr
+    const size_t old_idx = netcdf_.time_idx;
+    while (static_cast<int>(netcdf_.time_idx) < static_cast<int>(netcdf_.tlen)-1 &&
+            netcdf_.times[netcdf_.time_idx+1] <= curr_time)
+    {
+        netcdf_.time_idx++;
+    }
+    if (old_idx == netcdf_.time_idx) return false;
+
+    if (next_.valid()) next_.wait();
+    if (netcdf_.time_idx == next_idx_)
+        frame_.swap(next_frame_);
+    else
+        read_frame(netcdf_.time_idx, frame_);
+    prefetch_next();
+    return true;
+}
+
+template<class Allocator>
 DynamicRain<Allocator>::~DynamicRain()
 {
     if (!enabled_) return;
+    if (next_.valid()) next_.wait();
     free(netcdf_.xs);
     free(netcdf_.ys);
     free(netcdf_.times);

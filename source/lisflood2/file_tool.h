@@ -77,4 +77,6 @@ void read_file(const char * filename, const NUMERIC_TYPE nodata, int * num_cols,
 void compare_grids(char* dir1, char* dir2, char* prefix, char* ext);
 
 bool read_file_netCDF(NetCDFVariable *ncvar, NUMERIC_TYPE curr_time);
+/* frame idx of ncvar into data (xlen*ylen values), without changing ncvar */
+void read_file_netCDF_frame(const NetCDFVariable *ncvar, size_t idx, NUMERIC_TYPE *data);
 void read_file_netCDF_start(const char *ncfilename, const char *varname, NetCDFVariable *ncvar);

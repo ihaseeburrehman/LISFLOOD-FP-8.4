@@ -42,6 +42,7 @@ elements(element_count > 0 ? element_count : lis::GhostRaster::elements(geometry
 #if defined(LISFLOOD_CUDA_MPI)
 		checkCudaErrors(cudaMallocHost(reinterpret_cast<void**>(&h_reduced_dt),
 				sizeof(NUMERIC_TYPE)));
+		checkCudaErrors(cudaEventCreateWithFlags(&dt_ready, cudaEventDisableTiming));
 #endif
 	}
 	else
@@ -145,6 +146,43 @@ NUMERIC_TYPE lis::cuda::DynamicTimestepACC<F>::update_dt_ACC()
 }
 
 template<typename F>
+void lis::cuda::DynamicTimestep<F>::start_dt()
+{
+#if defined(LISFLOOD_CUDA_MPI)
+	if (adaptive)
+	{
+		if (!solver.reduce_dt(d_reduced_dt, element_offset, elements))
+		{
+			solver.update_dt_per_element(dt_field);
+			checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
+						dt_field + element_offset, d_reduced_dt, elements));
+		}
+		// the device dt from the reduction itself, then the copy for the host
+		checkCudaErrors(cudaMemcpyToSymbolAsync(lis::cuda::dt, d_reduced_dt,
+				sizeof(NUMERIC_TYPE), 0, cudaMemcpyDeviceToDevice));
+		checkCudaErrors(cudaMemcpyAsync(h_reduced_dt, d_reduced_dt,
+				sizeof(NUMERIC_TYPE), cudaMemcpyDeviceToHost));
+		checkCudaErrors(cudaEventRecord(dt_ready, 0));
+		return;
+	}
+#endif
+	pending_dt = update_dt();
+}
+
+template<typename F>
+NUMERIC_TYPE lis::cuda::DynamicTimestep<F>::finish_dt()
+{
+#if defined(LISFLOOD_CUDA_MPI)
+	if (adaptive)
+	{
+		checkCudaErrors(cudaEventSynchronize(dt_ready));
+		return *h_reduced_dt;
+	}
+#endif
+	return pending_dt;
+}
+
+template<typename F>
 lis::cuda::DynamicTimestep<F>::~DynamicTimestep()
 {
 	if (adaptive)
@@ -154,6 +192,7 @@ lis::cuda::DynamicTimestep<F>::~DynamicTimestep()
 		free_device(d_reduced_dt);
 #if defined(LISFLOOD_CUDA_MPI)
 		checkCudaErrors(cudaFreeHost(h_reduced_dt));
+		checkCudaErrors(cudaEventDestroy(dt_ready));
 #endif
 	}
 }

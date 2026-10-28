@@ -1,4 +1,5 @@
 #include "cuda_losses.cuh"
+#include "cuda_device_functions.cuh"
 #include "cuda_geometry.cuh"
 #include "cuda_util.cuh"
 #include "../cuda/ghostraster.h"
@@ -22,16 +23,7 @@ namespace cuda
 /** sum of v over the threads of a block, added once per block to *total */
 __device__ void add_block_sum(double v, double* total)
 {
-	__shared__ double partial[CUDA_BLOCK_SIZE];
-	int tid = threadIdx.y*blockDim.x + threadIdx.x;
-	partial[tid] = v;
-	__syncthreads();
-	for (int s = (blockDim.x*blockDim.y)/2; s > 0; s >>= 1)
-	{
-		if (tid < s) partial[tid] += partial[tid + s];
-		__syncthreads();
-	}
-	if (tid == 0 && partial[0] > 0.0) atomicAdd(total, partial[0]);
+	detail::add_block_sum(v, total);
 }
 
 /**
@@ -47,20 +39,7 @@ __device__ NUMERIC_TYPE depth_after_loss
 	NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 )
 {
-	if (h <= threshold || rate <= C(0.0))
-	{
-		residual = C(0.0);
-		return h;
-	}
-	NUMERIC_TYPE wanted = rate*step_dt + residual;
-	NUMERIC_TYPE h_new = h - wanted;
-	if (h_new <= C(0.0))
-	{
-		residual = C(0.0);
-		return C(0.0);
-	}
-	residual = wanted - (h - h_new); // h - h_new is exact (Sterbenz)
-	return h_new;
+	return detail::depth_after_loss(h, rate, residual, step_dt, threshold);
 }
 
 /**
@@ -71,22 +50,7 @@ __device__ NUMERIC_TYPE depth_after_loss
  */
 __device__ double horton_capacity(double F, double f0, double fc, double k, double dt)
 {
-	if (k <= 0.0 || f0 <= fc) return fmax(f0, fc)*dt;
-	const double A = (f0 - fc)/k;
-	if (fc <= 0.0 && F >= A) return 0.0;
-	double te = 0.0;
-	if (F > 0.0)
-	{
-		te = F/f0;
-		for (int n=0; n<50; n++)
-		{
-			double e = exp(-k*te);
-			double step = (F - (fc*te + A*(1.0 - e)))/(fc + (f0 - fc)*e);
-			te += step;
-			if (fabs(step) <= 1e-9*(te + 1.0)) break;
-		}
-	}
-	return fc*dt - A*exp(-k*te)*expm1(-k*dt);
+	return detail::horton_capacity(F, f0, fc, k, dt);
 }
 
 /**
@@ -100,52 +64,7 @@ __device__ NUMERIC_TYPE depth_after_greenampt
 	NUMERIC_TYPE h, NUMERIC_TYPE step_dt
 )
 {
-	NUMERIC_TYPE& residual = p.residual[idx];
-	if (h <= C(0.0))
-	{
-		residual = C(0.0);
-		return h;
-	}
-
-	double dt = step_dt;
-	double F = p.F[idx];
-	double ks = p.ks[idx];
-	double dF = 0.0;
-	if (p.horton)
-	{
-		// ks = fc, psi = f0, dtheta = k (see LossParams)
-		dF = horton_capacity(F, (double)p.psi[idx], ks, (double)p.dtheta[idx], dt);
-	}
-	else if (ks > 0.0)
-	{
-		// implicit Euler: F_new = F + dt Ks (1 + (psi + h) dtheta / F_new)
-		double M = ((double)p.psi[idx] + (double)h) * (double)p.dtheta[idx];
-		double a = F + ks*dt;
-		dF = 0.5*(a + sqrt(a*a + 4.0*ks*dt*M)) - F;
-		if (p.fmax != nullptr)
-		{
-			dF = fmin(dF, fmax((double)p.fmax[idx] - F, 0.0));
-		}
-	}
-	double e = (double)p.evap_rate * dt;
-	if (dF + e <= 0.0)
-	{
-		residual = C(0.0);
-		return h;
-	}
-
-	NUMERIC_TYPE wanted = (NUMERIC_TYPE)(dF + e) + residual;
-	NUMERIC_TYPE h_new = h - wanted;
-	if (h_new <= C(0.0))
-	{
-		// not enough water: infiltration takes it first, evaporation the rest
-		p.F[idx] = F + fmin(dF, (double)h);
-		residual = C(0.0);
-		return C(0.0);
-	}
-	residual = wanted - (h - h_new); // h - h_new is exact (Sterbenz)
-	p.F[idx] = F + dF;
-	return h_new;
+	return detail::depth_after_greenampt(p, idx, h, step_dt);
 }
 
 /** depth of cell idx after this step's losses */
@@ -156,10 +75,24 @@ __device__ NUMERIC_TYPE depth_after_losses
 	NUMERIC_TYPE h, NUMERIC_TYPE step_dt, NUMERIC_TYPE threshold
 )
 {
-	if (p.greenampt || p.horton) return depth_after_greenampt(p, idx, h, step_dt);
-	NUMERIC_TYPE rate = ((p.rate_grid != nullptr) ? p.rate_grid[idx] : p.uniform_rate)
-		+ p.evap_rate;
-	return depth_after_loss(h, rate, p.residual[idx], step_dt, threshold);
+	return detail::depth_after_losses(p, idx, h, step_dt, threshold);
+}
+
+__device__ void fv1_cell_values
+(
+	NUMERIC_TYPE& h,
+	NUMERIC_TYPE& hu,
+	NUMERIC_TYPE& hv,
+	int idx,
+	bool nodata,
+	bool drain,
+	bool losses,
+	MassStats* mass_stats,
+	const LossParams& p,
+	double& removed
+)
+{
+	detail::fv1_cell_values(h, hu, hv, idx, nodata, drain, losses, mass_stats, p, removed);
 }
 
 /** as drain_nodata_water, for one NoData cell */
@@ -293,6 +226,8 @@ fv1_cell_updates
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
+			const int ti = i - threadIdx.x, tj = j - threadIdx.y;
+			if (cuda::fv1_dead(ti, tj, ti + blockDim.x - 1, tj + blockDim.y - 1)) continue;
 			int idx = j*cuda::pitch + i;
 			NUMERIC_TYPE h = H[idx];
 			if (FABS(DEM[idx] - cuda::solver_params.nodata_elevation) < C(1e-6))

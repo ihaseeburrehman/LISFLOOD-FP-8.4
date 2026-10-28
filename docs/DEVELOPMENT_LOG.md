@@ -1,5 +1,68 @@
 # LISFLOOD-FP 8.4: how it was built and tested
 
+## Faster CUDA FV1, the same numbers (28 October 2026)
+
+The CUDA FV1 step was rewritten for speed with every output raster kept
+byte-identical to the 8.4 release, in single and in double precision. Each
+cell and each face gets the same arithmetic in the same order; only the
+order of the atomic sums behind `.mass` changes, as it already does from
+run to run. The other CUDA solvers are untouched: all 857 output files of
+the loss tests (`tests_8.4/losses`, FV1, FV2, DG2 and ACC) match the
+release byte for byte.
+
+| change | where |
+|---|---|
+| NoData cells whose four neighbours are NoData inside the domain ("dead") skip their work from step 4, per block, from a summed-area table | `fv1_dead`, `cuda_fv1_simulate.cu` |
+| rain and time step in one kernel, ghost cells and their time step in another | `rain_reduce_dt`, `update_ghost_cells_dt` |
+| on one rank, the step's kernels are queued before the host reads the time step | `DynamicTimestep::start_dt`/`finish_dt` |
+| NoData drainage, losses and maximum depth inside the y flux kernel | `fv1_cell_values` |
+| the next rain frame read from NetCDF in the background | `DynamicRain::start_prefetch` |
+| the shared device functions (HLL fluxes, star states, boundaries, mass statistics, losses, rain rate) inlined into the FV1 kernels | `cuda_device_functions.cuh` |
+| `Zstar` formed from the two DEM values instead of read | x and y flux kernels |
+| register limits for friction and the flux kernels; friction loads two cells at a time | `__launch_bounds__`, `apply_friction_batched` |
+| x and y fluxes marching down strips of rows: one thread per column for y, one warp per 32-cell row segment for x (neighbours by warp shuffle), the next row loaded a row ahead | `update_flow_variables_ym`, `update_flow_variables_xm` |
+
+The shared device functions are defined once, in
+`cuda_device_functions.cuh`; their out-of-line versions in `cuda_hll.cu`,
+`cuda_boundary.cu` and the rest call them, so DG2, FV2 and ACC compile as
+before, while the FV1 kernels call them directly and have them inlined.
+Device link-time optimisation gave FV1 the same inlining but recompiled the
+other solvers too, which moved their results at rounding level; it is not
+used.
+
+The strip height is 16 rows on large grids and falls to 1 or 2 rows on
+grids too small to fill the GPU with one thread per column and strip
+(`LISFLOOD_FV1_STRIP=n` sets it). `LISFLOOD_FV1_TILES=1` runs the 16 x 16
+tiled flux kernels instead, and `LISFLOOD_FV1_UNFUSED=1` the kernels of the
+release. A fused friction-and-x kernel and a single kernel for the whole
+step were tried and were slower than separate kernels; neither is kept.
+
+Nsight Compute showed why the marching kernels win: the tiled kernels used
+24 to 36 % of the A100's memory bandwidth, their warps waiting on load
+latency at 37 to 69 % occupancy. Per step on the Alzette 10 m grid (10.6
+million cells), the GPU time fell from about 2.0 ms (release) to 0.74 ms:
+y fluxes 267 µs, x fluxes 191 µs, rain and time step 152 µs, friction 104
+µs, ghost cells 21 µs.
+
+Solver loop time, one A100 unless stated, ECMWF (`fv1speed/suite.sbatch`,
+`bench96.sbatch`):
+
+| case | release | this version |
+|---|---|---|
+| Alzette 10 m, 96 h from dry | 1423 s | 633 s |
+| Alzette 10 m, 24 h from dry | 340 s | 216 s |
+| Alzette 10 m, 12 h warm start, Green-Ampt | 163 s | 104 s |
+| Alzette 10 m, 6 h warm start | 61 s | 22 s |
+| Alzette 10 m, 6 h, four A100s | 41 s | 40 s |
+| FloodCastBench UK (275 x 170) | 13 s | 10 s |
+| FloodCastBench Australia (1073 x 1073) | 257 s | 207 s |
+
+In double precision the 24 h case went from 535 s to 382 s and the 12 h
+Green-Ampt case from 259 s to 150 s, but Australia went from 449 s to 477 s
+(its 2-row strips suit single precision better). On four
+GPUs the per-step halo exchange and global time step set the pace, so the
+faster kernels gain nothing there.
+
 ## Native Metal for every GPU solver (11 October 2026)
 
 All seven GPU solver keywords now run natively on Apple Silicon:

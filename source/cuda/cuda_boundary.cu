@@ -1,4 +1,5 @@
 #include "cuda_atomic.cuh"
+#include "cuda_device_functions.cuh"
 #include "cuda_boundary.cuh"
 #include "cuda_solver.cuh"
 #include "cuda_util.cuh"
@@ -354,36 +355,7 @@ __device__ lis::cuda::FlowVector lis::cuda::Boundary::outside_x
 	NUMERIC_TYPE Zstar
 )
 {
-	FlowVector U_outside = { U_const.H, U_const.HU, U_const.HV }; 
-
-	switch (cuda::boundaries.BC_type[bc_i])
-	{
-	case FREE1:
-		// outflow only (swe/fv1.cpp): HU_sign is the inward normal, and
-		// inward-pointing momentum is reflected, as at a wall
-		if (HU_sign*U_const.HU > C(0.0)) U_outside.HU = -U_const.HU;
-		break;
-	case HFIX2:
-	case HVAR3:
-		U_outside.H = FMAX(C(0.0), cuda::boundaries.BC_value[bc_i] - Zstar);
-		break;
-	case QFIX4:
-	case QVAR5:
-		U_outside.HU = HU_sign * cuda::boundaries.BC_value[bc_i];
-		U_outside.HV = C(0.0);
-		if (FABS(U_outside.HU) > C(1e-6))
-		{
-			U_outside.H = FMAX(U_const.H,
-					C(1.1)*cuda::solver_params.DepthThresh);
-		}
-		break;
-	case NONE0:
-	default:
-		U_outside.HU = -U_const.HU;
-		break;
-	}
-
-	return U_outside;
+	return detail::outside_x(U_const, U_inside, bc_i, HU_sign, Zstar);
 }
 
 __device__ lis::cuda::FlowVector lis::cuda::Boundary::outside_y
@@ -395,12 +367,7 @@ __device__ lis::cuda::FlowVector lis::cuda::Boundary::outside_y
 	NUMERIC_TYPE Zstar
 )
 {
-	FlowVector U_const_rotated = { U_const.H, U_const.HV, U_const.HU };
-	FlowVector U_inside_rotated = { U_inside.H, U_inside.HV, U_inside.HU };
-	FlowVector U_outside = Boundary::outside_x(U_const_rotated,
-			U_inside_rotated, bc_i, HU_sign, Zstar);
-
-	return { U_outside.H, U_outside.HV, U_outside.HU };
+	return detail::outside_y(U_const, U_inside, bc_i, HU_sign, Zstar);
 }
 
 __device__ lis::cuda::FlowVector lis::cuda::Boundary::inside_x
@@ -411,20 +378,7 @@ __device__ lis::cuda::FlowVector lis::cuda::Boundary::inside_x
 	int bc_i
 )
 {
-	switch (cuda::boundaries.BC_type[bc_i])
-	{
-	case FREE1:
-		return U_inside;
-	case HFIX2:
-	case HVAR3:
-		U_const.H = U_outside.H;
-		break;
-	case QFIX4:
-	case QVAR5:
-		return { U_outside.H, U_outside.HU, U_const.HV };
-	}
-
-	return U_const;
+	return detail::inside_x(U_outside, U_const, U_inside, bc_i);
 }
 
 __device__ lis::cuda::FlowVector lis::cuda::Boundary::inside_y
@@ -435,11 +389,7 @@ __device__ lis::cuda::FlowVector lis::cuda::Boundary::inside_y
 	int bc_i
 )
 {
-	FlowVector U_outside_rotated = { U_outside.H, U_outside.HV, U_outside.HU };
-	FlowVector U_const_rotated = { U_const.H, U_const.HV, U_const.HU };
-	FlowVector U_inside_rotated = { U_inside.H, U_inside.HV, U_inside.HU };
-	U_inside = Boundary::inside_x(U_outside_rotated, U_const_rotated, U_inside_rotated, bc_i);
-	return { U_inside.H, U_inside.HV, U_inside.HU };
+	return detail::inside_y(U_outside, U_const, U_inside, bc_i);
 }
 
 __device__ int lis::cuda::Boundary::index_w
@@ -448,7 +398,7 @@ __device__ int lis::cuda::Boundary::index_w
 	const int j
 )
 {
-	return 2*cuda::geometry.xsz + 2*cuda::geometry.ysz - j;
+	return detail::index_w(i, j);
 }
 
 __device__ int lis::cuda::Boundary::index_e
@@ -457,7 +407,7 @@ __device__ int lis::cuda::Boundary::index_e
 	const int j
 )
 {
-	return cuda::geometry.xsz + j-1;
+	return detail::index_e(i, j);
 }
 
 __device__ int lis::cuda::Boundary::index_n
@@ -466,7 +416,7 @@ __device__ int lis::cuda::Boundary::index_n
 	const int j
 )
 {
-	return i-1;
+	return detail::index_n(i, j);
 }
 
 __device__ int lis::cuda::Boundary::index_s
@@ -475,7 +425,7 @@ __device__ int lis::cuda::Boundary::index_s
 	const int j
 )
 {
-	return 2*cuda::geometry.xsz + cuda::geometry.ysz - i;
+	return detail::index_s(i, j);
 }
 
 __device__ int lis::cuda::Boundary::index_w_ACC

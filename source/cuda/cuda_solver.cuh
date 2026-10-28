@@ -58,6 +58,28 @@ __device__ __forceinline__ int fv1_owned_row_end() { return cuda::geometry.ysz +
 
 extern const dim3 block_size;
 
+/**
+ * FV1: 1 once blocks whose cells are all dead skip their work. A dead cell is
+ * a NoData cell (drained every step) whose four neighbours are NoData cells
+ * inside the domain: its depth and discharges no longer change, so the work
+ * on it gives the values it already holds.
+ */
+extern __constant__ int fv1_skip_dead;
+/** FV1: summed-area table of the live cells, (ysz+3) rows of (pitch+1) */
+extern __constant__ const int* fv1_live_sat;
+
+/** true if fv1_skip_dead is set and every cell of columns [i0,i1], rows [j0,j1] is dead */
+__device__ __forceinline__ bool fv1_dead(int i0, int j0, int i1, int j1)
+{
+	if (!fv1_skip_dead) return false;
+	i0 = max(i0, 0); j0 = max(j0, 0);
+	i1 = min(i1, pitch - 1); j1 = min(j1, geometry.ysz + 1);
+	if (i0 > i1 || j0 > j1) return false;
+	const int w = pitch + 1;
+	return fv1_live_sat[(j1+1)*w + i1+1] - fv1_live_sat[j0*w + i1+1]
+		- fv1_live_sat[(j1+1)*w + i0] + fv1_live_sat[j0*w + i0] == 0;
+}
+
 /** rain added to the cells this rank owns since the start, m3 (for .mass) */
 extern __device__ double rain_volume;
 /** rain_volume, read on the host */
@@ -197,6 +219,14 @@ public:
 
 	NUMERIC_TYPE update_dt();
 
+	/**
+	 * update_dt in two halves, for one rank: start_dt reduces the time step
+	 * and sets the device dt, so that the step's kernels can be launched at
+	 * once; finish_dt waits for the same value on the host and returns it
+	 */
+	void start_dt();
+	NUMERIC_TYPE finish_dt();
+
 	~DynamicTimestep();
 
 private:
@@ -212,7 +242,9 @@ private:
 	NUMERIC_TYPE* d_reduced_dt;
 #if defined(LISFLOOD_CUDA_MPI)
 	NUMERIC_TYPE* h_reduced_dt;
+	cudaEvent_t dt_ready;
 #endif
+	NUMERIC_TYPE pending_dt;
 };
 
 

@@ -1,4 +1,5 @@
 #include "cuda_solver.cuh"
+#include "cuda_device_functions.cuh"
 #include "cuda_atomic.cuh"
 
 __constant__ Geometry lis::cuda::geometry;
@@ -18,6 +19,9 @@ __constant__ int lis::cuda::fv1_owns_north_ghost = 0;
 __constant__ int lis::cuda::fv1_owns_south_ghost = 0;
 #endif
 
+__constant__ int lis::cuda::fv1_skip_dead = 0;
+__constant__ const int* lis::cuda::fv1_live_sat = nullptr;
+
 const dim3 lis::cuda::block_size(CUDA_BLOCK_SIZE_X, CUDA_BLOCK_SIZE_Y);
 
 __device__ void lis::cuda::update_mass_stats_x
@@ -29,28 +33,7 @@ __device__ void lis::cuda::update_mass_stats_x
 	NUMERIC_TYPE time_stage_fraction
 )
 {
-	if (i == 0)
-	{
-		if (FH > C(0.0))
-		{
-			atomicAdd(&(stats->in), time_stage_fraction*FH*cuda::geometry.dy);
-		}
-		else
-		{
-			atomicAdd(&(stats->out), -time_stage_fraction*FH*cuda::geometry.dy);
-		}
-	}
-	else if (i == cuda::geometry.xsz)
-	{
-		if (FH < C(0.0))
-		{
-			atomicAdd(&(stats->in), -time_stage_fraction*FH*cuda::geometry.dy);
-		}
-		else
-		{
-			atomicAdd(&(stats->out), time_stage_fraction*FH*cuda::geometry.dy);
-		}
-	}
+	detail::update_mass_stats_x(stats, FH, i, j, time_stage_fraction);
 }
 
 __device__ void lis::cuda::update_mass_stats_y
@@ -62,26 +45,5 @@ __device__ void lis::cuda::update_mass_stats_y
 	NUMERIC_TYPE time_stage_fraction
 )
 {
-	if (j == 0)
-	{
-		if (FH < C(0.0))
-		{
-			atomicAdd(&(stats->in), -time_stage_fraction*FH*cuda::geometry.dx);
-		}
-		else
-		{
-			atomicAdd(&(stats->out), time_stage_fraction*FH*cuda::geometry.dx);
-		}
-	}
-	else if (j == cuda::geometry.ysz)
-	{
-		if (FH > C(0.0))
-		{
-			atomicAdd(&(stats->in), time_stage_fraction*FH*cuda::geometry.dx);
-		}
-		else
-		{
-			atomicAdd(&(stats->out), -time_stage_fraction*FH*cuda::geometry.dx);
-		}
-	}
+	detail::update_mass_stats_y(stats, FH, i, j, time_stage_fraction);
 }

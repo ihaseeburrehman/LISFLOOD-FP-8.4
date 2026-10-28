@@ -1,4 +1,5 @@
 #include "cuda_rain.cuh"
+#include "cuda_device_functions.cuh"
 #include "../rain/rain.h"
 #include "cuda_unifiedallocator.cuh"
 #include "cuda_util.cuh"
@@ -28,20 +29,7 @@ NUMERIC_TYPE lis::cuda::rate_at_cell
 	int j
 )
 {
-    int tile_i = (i-1) * cuda::geometry.dx / cuda::rain_geometry.dx;
-
-    NUMERIC_TYPE top_gap = cuda::geometry.tly - cuda::rain_geometry.tly;
-    int tile_j = (j-1 - top_gap/cuda::geometry.dy) *
-		cuda::geometry.dy / cuda::rain_geometry.dy;
-
-    if (tile_i < cuda::rain_geometry.xsz && tile_j >= 0)
-    {
-        return rain_data[tile_j*cuda::rain_geometry.xsz + tile_i];
-    }
-    else
-    {
-        return C(0.0);
-    }
+	return detail::rate_at_cell(rain_data, i, j);
 }
 
 __global__ void
@@ -63,6 +51,8 @@ lis::cuda::DynamicRain::update
 	{
 		for (int i=global_i+1; i<cuda::geometry.xsz+1; i+=blockDim.x*gridDim.x)
 		{
+			const int ti = i - threadIdx.x, tj = j - threadIdx.y;
+			if (cuda::fv1_dead(ti, tj, ti + blockDim.x - 1, tj + blockDim.y - 1)) continue;
 			NUMERIC_TYPE Z = DEM[j*cuda::pitch + i];
             if (FABS(Z - cuda::solver_params.nodata_elevation) < C(1e-6)) continue;
 

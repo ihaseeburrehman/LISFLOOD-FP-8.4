@@ -5,6 +5,7 @@
 #include "fv1/cuda_fv1_flow.cuh"
 #include "cuda_sample.cuh"
 #include "cuda_solver.cuh"
+#include "cuda_losses.cuh"
 
 namespace lis
 {
@@ -76,6 +77,47 @@ private:
 	NUMERIC_TYPE* Zstar_y;
 	NUMERIC_TYPE* manning;
 	bool friction;
+	bool fused;
+	bool march;
+	dim3 march_grid;
+	dim3 march_grid_x;
+	int strip;
+public:
+	/**
+	 * the next reduce_dt also applies the dynamic rain (rain_data, or none if
+	 * nullptr) and updates the ghost cells: the caller skips
+	 * DynamicRain::update and update_ghost_cells for this step
+	 */
+	void prepare_fused_dt(NUMERIC_TYPE* rain_data, dim3 cell_grid)
+	{
+		fused_rain = rain_data;
+		fused_cell_grid = cell_grid;
+		fused_dt_pending = true;
+	}
+	bool fused_path() const { return fused; }
+	/**
+	 * set before update_flow_variables to apply the cell-wise updates of
+	 * Losses::apply_fv1_cells inside the y flux kernel; returns false if the
+	 * separate kernels run (then the caller applies them)
+	 */
+	bool set_cell_updates(NUMERIC_TYPE* maxH, bool drain, bool losses,
+			const LossParams& p, double* volume)
+	{
+		cells = { maxH, drain, losses, p, volume };
+		return fused;
+	}
+private:
+	struct CellUpdates
+	{
+		NUMERIC_TYPE* maxH;
+		bool drain;
+		bool losses;
+		LossParams p;
+		double* volume;
+	} cells = {};
+	NUMERIC_TYPE* fused_rain = nullptr;
+	dim3 fused_cell_grid;
+	mutable bool fused_dt_pending = false;
 	const dim3 grid_size;
 	const int raster_pitch;
 };
