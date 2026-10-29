@@ -41,9 +41,13 @@ prepare() {  # case dir par prep
     python3 "$HERE/refine_dem.py" "$raw" 3 || { echo "refine failed for $1" >&2; return 1; } ;;
   esac
   case $4 in *dem*)
+    dem="$D/$(par_value "$D/$3" DEMfile)"
+    [ -f "$dem" ] || cp "$dem.raw" "$dem"   # generateDG2DEM reads DEMfile and overwrites it; the .raw copy stays untouched
     (cd "$D" && "$TOOLS/generateDG2DEM" "$3" > prepare_dem.log 2>&1) || { echo "generateDG2DEM failed for $1" >&2; return 1; } ;;
   esac
   case $4 in *start*)
+    st="$D/$(par_value "$D/$3" startfile)"
+    [ -f "$st" ] || cp "$st.raw" "$st"       # generateDG2start reads startfile and overwrites it likewise
     (cd "$D" && "$TOOLS/generateDG2start" "$3" > prepare_start.log 2>&1) || { echo "generateDG2start failed for $1" >&2; return 1; } ;;
   esac
   touch "$D/.prepared"
