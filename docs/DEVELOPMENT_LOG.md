@@ -1,5 +1,32 @@
 # LISFLOOD-FP 8.4: how it was built and tested
 
+## Faster CUDA ACC, the same numbers (28 October 2026)
+
+The CUDA ACC (local inertial) step keeps every output raster byte-identical
+to the release: all 1626 output files of the four FloodCastBench events and
+a 6 h Alzette run match.
+
+| change | where |
+|---|---|
+| Qx and Qy in one kernel (each reads the old discharges only) | `FloodplainQxy` |
+| the depth update, the copies Qxold = Qx/dx and Qyold = Qy/dx, and the maximum depth and times in one kernel (no point sources, `mint_hk` off) | `update_H_flow_max` |
+| the time step reduced without a host wait; the host reads it from a pinned copy when the step's first kernels are queued, and waits for a step only when it writes output, statistics, stages or checkpoints (GPUs with concurrent managed access) | `DynamicTimestepACC::start_dt_ACC`, `cuda_acc_simulate.cu` |
+
+`LISFLOOD_ACC_UNFUSED=1` runs the kernels of the release. Fusing the rain
+with the time step was tried and was slower than the separate kernels on
+every grid (latency-bound, and with many blocks the per-block minimum
+serialises on one address); it is not kept.
+
+Solver loop time, one A100, single precision (`fv1speed/accsuite.sbatch`):
+
+| case | release | this version |
+|---|---|---|
+| FloodCastBench UK (0.05 M cells, 3 days) | 11 s | 6 s |
+| FloodCastBench Australia (1.15 M cells, 10 days) | 121 s | 88 s |
+| FloodCastBench Mozambique (5.38 M cells, 6 days) | 225 s | 193 s |
+| FloodCastBench Pakistan (0.36 M cells, 14 days) | 260 s | 242 s |
+| Alzette 10 m, 6 h warm start | 98 s | 84 s |
+
 ## Faster CUDA FV1, the same numbers (28 October 2026)
 
 The CUDA FV1 step was rewritten for speed with every output raster kept

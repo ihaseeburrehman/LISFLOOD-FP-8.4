@@ -75,20 +75,7 @@ NUMERIC_TYPE lis::cuda::rate_at_cell_ACC
 	int j
 )
 {
-    int tile_i = (i) * cuda::geometry.dx / cuda::rain_geometry.dx;
-
-    NUMERIC_TYPE top_gap = cuda::geometry.tly - cuda::rain_geometry.tly;
-    int tile_j = (j - top_gap/cuda::geometry.dy) *
-		cuda::geometry.dy / cuda::rain_geometry.dy;
-
-    if (tile_i < cuda::rain_geometry.xsz && tile_j >= 0)
-    {
-        return rain_data[tile_j*cuda::rain_geometry.xsz + tile_i];
-    }
-    else
-    {
-        return C(0.0);
-    }
+	return detail::rate_at_cell_ACC(rain_data, i, j);
 }
 
 __global__ void

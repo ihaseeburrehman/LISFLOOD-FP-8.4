@@ -263,6 +263,14 @@ public:
 
 	NUMERIC_TYPE update_dt_ACC();
 
+	/**
+	 * update_dt_ACC in two halves: start_dt_ACC reduces the time step into
+	 * the device dt without waiting, so that the step's kernels can be
+	 * launched at once; finish_dt_ACC waits for the same value on the host
+	 */
+	void start_dt_ACC();
+	NUMERIC_TYPE finish_dt_ACC();
+
 	~DynamicTimestepACC();
 
 private:
@@ -274,6 +282,8 @@ private:
 	const int elements;
 	void* d_temp;
 	size_t bytes;
+	NUMERIC_TYPE* h_dt = nullptr;
+	cudaEvent_t dt_ready;
 };
 
 

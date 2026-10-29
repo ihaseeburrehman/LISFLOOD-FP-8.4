@@ -1,4 +1,6 @@
 #include "cuda_acc_solver.cuh"
+#include "cuda_device_functions.cuh"
+#include <cstdlib>
 #include "cuda_boundary.cuh"
 #include "cuda_hll.cuh"
 #include "cuda_solver.cuh"
@@ -547,6 +549,29 @@ __global__ void update_ghost_cells
 
 
 
+/** update_max_field_ACC for one cell */
+__device__ __forceinline__ void max_field_cell
+(
+	Flow& Uold,
+	int pqptr,
+	NUMERIC_TYPE time
+)
+{
+	if (Uold.H[pqptr] > cuda::solver_params.DepthThresh)
+	{
+		if (Uold.initHtm[pqptr] == NULLVAL)
+			Uold.initHtm[pqptr] = time / C(3600.0);
+		
+		Uold.totalHtm[pqptr] += cuda::dt / C(3600.0);
+		// Update maximum water depths, and time of maximum (in hours) TDF updated only track maxH when h > DepthThresh
+		if (Uold.H[pqptr] > Uold.maxH[pqptr])
+		{
+			Uold.maxH[pqptr] = Uold.H[pqptr];
+			Uold.maxHtm[pqptr] = time / C(3600.0);
+		}
+	}
+}
+
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
 update_max_field_ACC
@@ -565,21 +590,7 @@ update_max_field_ACC
 //			NUMERIC_TYPE& maxHvalue = maxH[j * cuda::pitch + i];
 //			maxHvalue = FMAX(maxHvalue, H[j * cuda::pitch + i]);
 
-			int pqptr = i + j * cuda::pitch;
-
-			if (Uold.H[pqptr] > cuda::solver_params.DepthThresh)
-			{
-				if (Uold.initHtm[pqptr] == NULLVAL)
-					Uold.initHtm[pqptr] = time / C(3600.0);
-				
-				Uold.totalHtm[pqptr] += cuda::dt / C(3600.0);
-				// Update maximum water depths, and time of maximum (in hours) TDF updated only track maxH when h > DepthThresh
-				if (Uold.H[pqptr] > Uold.maxH[pqptr])
-				{
-					Uold.maxH[pqptr] = Uold.H[pqptr];
-					Uold.maxHtm[pqptr] = time / C(3600.0);
-				}
-			}
+			max_field_cell(Uold, i + j * cuda::pitch, time);
 		
 
 		}
@@ -851,6 +862,29 @@ __device__ NUMERIC_TYPE CalcFPQyAcc_
 
 
 
+/** the discharge of FloodplainQX at face (i, j) */
+__device__ __forceinline__ void floodplain_qx
+(
+	int i,
+	int j,
+	Flow& U,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* manning,
+	bool friction
+)
+{
+	NUMERIC_TYPE h0 = U.H[j * cuda::geometry.xsz + i];
+	NUMERIC_TYPE h1 = U.H[j * cuda::geometry.xsz + i + 1];
+	NUMERIC_TYPE& qptr = U.Qx[j * (cuda::geometry.xsz + 1) + i + 1];
+
+	qptr = C(0.0);
+
+	if (h0 > cuda::solver_params.DepthThresh || h1 > cuda::solver_params.DepthThresh)
+	{
+		qptr = CalcFPQxAcc_(i, j, U, DEM, manning, friction);
+	}
+}
+
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
 FloodplainQx
@@ -874,20 +908,34 @@ FloodplainQx
 		{
 
 
-			NUMERIC_TYPE h0 = U.H[j * cuda::geometry.xsz + i];
-			NUMERIC_TYPE h1 = U.H[j * cuda::geometry.xsz + i + 1];
-			NUMERIC_TYPE& qptr = U.Qx[j * (cuda::geometry.xsz + 1) + i + 1];
-
-			qptr = C(0.0);
-
-			if (h0 > cuda::solver_params.DepthThresh || h1 > cuda::solver_params.DepthThresh)
-			{
-				qptr = CalcFPQxAcc_(i, j, U, DEM, manning, friction);
-			}
+			floodplain_qx(i, j, U, DEM, manning, friction);
 		}
 	}
 }
 
+
+/** the discharge of FloodplainQY at face (i, j) */
+__device__ __forceinline__ void floodplain_qy
+(
+	int i,
+	int j,
+	Flow& U,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* manning,
+	bool friction
+)
+{
+	NUMERIC_TYPE h0 = U.H[j * cuda::geometry.xsz + i];
+	NUMERIC_TYPE h1 = U.H[(j + 1) * cuda::geometry.xsz + i /*+ 1*/];
+	NUMERIC_TYPE& qptr = U.Qy[(j + 1) * (cuda::geometry.xsz + 1) + i /*+ 1*/];
+
+	qptr = C(0.0);
+
+	if (h0 > cuda::solver_params.DepthThresh || h1 > cuda::solver_params.DepthThresh)
+	{
+		qptr = CalcFPQyAcc_(i, j, U, DEM, manning, friction);
+	}
+}
 
 __global__ void
 __launch_bounds__(CUDA_BLOCK_SIZE)
@@ -912,16 +960,75 @@ FloodplainQy
 		{
 
 
-			NUMERIC_TYPE h0 = U.H[j * cuda::geometry.xsz + i];
-			NUMERIC_TYPE h1 = U.H[(j + 1) * cuda::geometry.xsz + i /*+ 1*/];
-			NUMERIC_TYPE& qptr = U.Qy[(j + 1) * (cuda::geometry.xsz + 1) + i /*+ 1*/];
+			floodplain_qy(i, j, U, DEM, manning, friction);
+		}
+	}
+}
 
-			qptr = C(0.0);
+/** FloodplainQx and FloodplainQy in one pass over the cells */
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
+FloodplainQxy
+(
+	Flow U,
+	NUMERIC_TYPE* DEM,
+	NUMERIC_TYPE* manning,
+	bool friction
+)
+{
+	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
+	int global_j = blockIdx.y * blockDim.y + threadIdx.y;
 
-			if (h0 > cuda::solver_params.DepthThresh || h1 > cuda::solver_params.DepthThresh)
+	for (int j = global_j; j < cuda::geometry.ysz; j += blockDim.y * gridDim.y)
+	{
+		for (int i = global_i; i < cuda::geometry.xsz; i += blockDim.x * gridDim.x)
+		{
+			if (i < cuda::geometry.xsz - 1) floodplain_qx(i, j, U, DEM, manning, friction);
+			if (j < cuda::geometry.ysz - 1) floodplain_qy(i, j, U, DEM, manning, friction);
+		}
+	}
+}
+
+/**
+ * Boundary::update_H (without point sources), then update_flow_variables_x
+ * and _y (the faces west and north of each cell, and the east and south
+ * edges) and, if max_field, update_max_field_ACC at time t + dt, the time
+ * the step ends at
+ */
+__global__ void
+__launch_bounds__(CUDA_BLOCK_SIZE)
+update_H_flow_max
+(
+	Flow U,
+	int drycheck,
+	MassStats* mass_stats,
+	bool max_field,
+	NUMERIC_TYPE t
+)
+{
+	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
+	int global_j = blockIdx.y * blockDim.y + threadIdx.y;
+	const NUMERIC_TYPE time = t + cuda::dt;
+
+	for (int j = global_j; j < cuda::geometry.ysz; j += blockDim.y * gridDim.y)
+	{
+		for (int i = global_i; i < cuda::geometry.xsz; i += blockDim.x * gridDim.x)
+		{
+			detail::update_H_cell(U.H, U.Qx, U.Qy, drycheck, mass_stats, i, j);
+
+			int pqptr = i + j*(cuda::geometry.xsz + 1);
+			// Divide Q by dx to return m2/s
+			U.Qxold[pqptr] = U.Qx[pqptr]*(C(1.0)/cuda::geometry.dx);
+			U.Qyold[pqptr] = U.Qy[pqptr]*(C(1.0)/cuda::geometry.dx);
+			if (i == cuda::geometry.xsz - 1)
+				U.Qxold[pqptr + 1] = U.Qx[pqptr + 1]*(C(1.0)/cuda::geometry.dx);
+			if (j == cuda::geometry.ysz - 1)
 			{
-				qptr = CalcFPQyAcc_(i, j, U, DEM, manning, friction);
+				pqptr += cuda::geometry.xsz + 1;
+				U.Qyold[pqptr] = U.Qy[pqptr]*(C(1.0)/cuda::geometry.dx);
 			}
+
+			if (max_field) max_field_cell(U, i + j * cuda::pitch, time);
 		}
 	}
 }
@@ -956,6 +1063,8 @@ maxH(geometry)
 	Flow::copy(U1, U, geometry);
 
 	friction = (physical_params.manning > C(0.0)) || (manning != nullptr);
+	// LISFLOOD_ACC_UNFUSED=1: the kernels of the 8.4 release
+	fused = std::getenv("LISFLOOD_ACC_UNFUSED") == nullptr;
 }
 
 void lis::cuda::acc::Solver::zero_ghost_cells()
@@ -1054,8 +1163,28 @@ void lis::cuda::acc::Solver::update_dt_per_element
 
 
 
+lis::cuda::acc::Flow& lis::cuda::acc::Solver::update_H_flow
+(
+	MassStats* mass_stats,
+	int drycheck,
+	bool max_field,
+	NUMERIC_TYPE t
+)
+{
+	update_H_flow_max<<<grid_size, cuda::block_size>>>
+			(Uold, drycheck, mass_stats, max_field, t);
+	return Uold;
+}
+
 void lis::cuda::acc::Solver::FloodplainQ()
 {
+  if (fused)
+  {
+    FloodplainQxy<<<grid_size, cuda::block_size>>>
+			(Uold, DEM, manning, friction);
+    return;
+  }
+
   // Calculate Qx
   FloodplainQx<<<grid_size, cuda::block_size>>>
 			(Uold, DEM, manning, friction);

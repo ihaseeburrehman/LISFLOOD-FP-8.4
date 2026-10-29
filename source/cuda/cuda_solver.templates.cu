@@ -146,6 +146,29 @@ NUMERIC_TYPE lis::cuda::DynamicTimestepACC<F>::update_dt_ACC()
 }
 
 template<typename F>
+void lis::cuda::DynamicTimestepACC<F>::start_dt_ACC()
+{
+	if (h_dt == nullptr)
+	{
+		h_dt = static_cast<NUMERIC_TYPE*>(malloc_pinned(sizeof(NUMERIC_TYPE)));
+		checkCudaErrors(cudaEventCreateWithFlags(&dt_ready, cudaEventDisableTiming));
+	}
+	solver.update_dt_per_element(dt_field);
+	checkCudaErrors(cub::DeviceReduce::Min(d_temp, bytes,
+				dt_field, &dt, elements));
+	checkCudaErrors(cudaMemcpyAsync(h_dt, &dt, sizeof(NUMERIC_TYPE),
+			cudaMemcpyDefault));
+	checkCudaErrors(cudaEventRecord(dt_ready, 0));
+}
+
+template<typename F>
+NUMERIC_TYPE lis::cuda::DynamicTimestepACC<F>::finish_dt_ACC()
+{
+	checkCudaErrors(cudaEventSynchronize(dt_ready));
+	return *h_dt;
+}
+
+template<typename F>
 void lis::cuda::DynamicTimestep<F>::start_dt()
 {
 #if defined(LISFLOOD_CUDA_MPI)
@@ -203,5 +226,10 @@ lis::cuda::DynamicTimestepACC<F>::~DynamicTimestepACC()
 
 		cuda::free_device(dt_field);
 		free_device(d_temp);
+		if (h_dt != nullptr)
+		{
+			free_pinned(h_dt);
+			checkCudaErrors(cudaEventDestroy(dt_ready));
+		}
 
 }

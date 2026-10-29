@@ -193,6 +193,26 @@ void lis::cuda::acc::Simulation::run
 	time_t loop_start;                                                          
 	time(&loop_start);
 
+	// Qx and Qy in one kernel, and the depth update with Qxold, Qyold and the
+	// maximum field in one (acc::Solver), unless LISFLOOD_ACC_UNFUSED is set.
+	// The second needs no point sources, which change the depth after
+	// update_H, and the maximum field updated every step.
+	Solver* acc_solver = static_cast<Solver*>(solve.get());
+	const bool fused = acc_solver->fused_path();
+	const bool fused_H = fused && !cuda::Boundary::has_point_sources()
+		&& states.mint_hk == OFF;
+	// The host then waits for a step only when it reads its results; the
+	// rain frame (managed memory) is written meanwhile, so this needs a GPU
+	// with concurrent managed access, as on Linux
+	int concurrent_managed = 0;
+	{
+		int device = 0;
+		checkCudaErrors(cudaGetDevice(&device));
+		checkCudaErrors(cudaDeviceGetAttribute(&concurrent_managed,
+				cudaDevAttrConcurrentManagedAccess, device));
+	}
+	const bool overlap = fused && concurrent_managed;
+
 	while (solver.t < solver.Sim_Time) 
 	{		
 		
@@ -205,7 +225,10 @@ void lis::cuda::acc::Simulation::run
 
 		stats_collector.zero_instantaneous_mass(); 
 
-		dynamic_dt.update_dt_ACC(); 
+		if (overlap)
+			dynamic_dt.start_dt_ACC();
+		else
+			dynamic_dt.update_dt_ACC(); 
 
 		solve->FloodplainQ();
 
@@ -233,26 +256,45 @@ void lis::cuda::acc::Simulation::run
 			solve->update_uniform_rain(rainfall_uniform.value);
 		}
 
-		stats_collector.accumulate_mass();
+		// the time step on the host: with overlap the host waits for it only
+		// here, the step's first kernels already queued
+		const NUMERIC_TYPE step_dt = overlap ? dynamic_dt.finish_dt_ACC() : cuda::dt;
+
+		stats_collector.accumulate_mass(step_dt);
 
 		stats_collector.zero_instantaneous_mass();
 
+		if (fused_H)
+		{
+			d_U = acc_solver->update_H_flow(stats_collector.instantaneous_mass(),
+					states.drychecking, true, solver.t);
+			stats_collector.accumulate_mass(step_dt);
+		}
+		else
+		{
 		cuda::Boundary::update_H(d_U.H, d_DEM, d_U.Qx, d_U.Qy, 
 				stats_collector.instantaneous_mass(), grid_size, states.drychecking);
 
-		stats_collector.accumulate_mass();
+		stats_collector.accumulate_mass(step_dt);
 	
 
 		d_U = solve->update_flow_variables( 
 				stats_collector.instantaneous_mass());
+		}
 		
-		cuda::sync();
+		if (!overlap) cuda::sync();
 	
-		solver.MinTstep = FMIN(solver.MinTstep, cuda::dt);
+		solver.MinTstep = FMIN(solver.MinTstep, step_dt);
 
-		if (verbose) printf("t=%f\tdt=%f\n", solver.t, cuda::dt);
-		solver.t += cuda::dt; 
+		if (verbose) printf("t=%f\tdt=%f\n", solver.t, step_dt);
+		solver.t += step_dt; 
 		solver.itCount++;
+
+		// wait for the step only when the host reads its results: output,
+		// statistics, stages, checkpoints
+		if (overlap && (stats.need_to_write(solver.t) || solver.t >= snapshot.next_save
+				|| states.checkpoint == ON || states.killsim == ON))
+			cuda::sync();
 
 		//if ((Statesptr->reset_timeinit == ON) & (Solverptr->t > Parptr->reset_timeinit_time))
 		//{ //reset the time of initial inundation if called for in parameter file
@@ -271,7 +313,7 @@ void lis::cuda::acc::Simulation::run
 //		max_field.updateACC(d_U.H);
 		
 		// Update maxH, maxHtm, totalHtm and initHtm at the mass interval if mint_hk is specifed in the .par file OR at every time step if not
-		if (stats.need_to_write(solver.t) || states.mint_hk == OFF)
+		if (!fused_H && (stats.need_to_write(solver.t) || states.mint_hk == OFF))
 		{
 			solve->updateMaxFieldACC(solver.t);
 		}

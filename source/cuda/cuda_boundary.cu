@@ -84,14 +84,7 @@ __device__ void accumulate_point_source_stats
 	NUMERIC_TYPE discharge
 )
 {
-	if (discharge > C(0.0))
-	{
-		atomicAdd(&(mass_stats->in), discharge);
-	}
-	else
-	{
-		atomicAdd(&(mass_stats->out), -discharge);
-	}
+	detail::accumulate_point_source_stats(mass_stats, discharge);
 }
 
 __global__ void update_point_sources
@@ -229,9 +222,6 @@ __global__ void update_H
 	MassStats* mass_stats
 )
 {
-	NUMERIC_TYPE dV, cv, WDweight;
-	NUMERIC_TYPE edge_q = C(0.0); // net inflow through the domain edges, m3/s
-
 	int global_i = blockIdx.x * blockDim.x + threadIdx.x;
 	int global_j = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -239,42 +229,7 @@ __global__ void update_H
 	{
 		for (int i = global_i; i < cuda::geometry.xsz; i += blockDim.x * gridDim.x)
 		{
-
-			NUMERIC_TYPE qxptr0 = Qx[i + j * (cuda::geometry.xsz + 1)];
-			NUMERIC_TYPE qxptr1 = Qx[i + j * (cuda::geometry.xsz + 1) + 1];
-			NUMERIC_TYPE qyptr0 = Qy[i + j * (cuda::geometry.xsz + 1)];
-			NUMERIC_TYPE qyptr1 = Qy[i + (j + 1) * (cuda::geometry.xsz + 1)];
-			NUMERIC_TYPE& hptr = H[i + j * (cuda::geometry.xsz)];
-			
-			dV = cuda::dt * (qxptr0 - qxptr1 + qyptr0 - qyptr1);
-
-			cv = hptr * (cuda::geometry.dx * cuda::geometry.dx);
-
-			if (drycheck) {
-
-				if (cv + dV < C(0.0))
-				{
-					WDweight = -cv / dV; 
-					if (qxptr0 < C(0.0)) qxptr0 *= WDweight;
-					if (qxptr1 > C(0.0)) qxptr1 *= WDweight;
-					if (qyptr0 < C(0.0)) qyptr0 *= WDweight;
-					if (qyptr1 > C(0.0)) qyptr1 *= WDweight;
-				}
-			}
-
-			dV = cuda::dt * (qxptr0 - qxptr1 + qyptr0 - qyptr1);
-			hptr += dV / (cuda::geometry.dx * cuda::geometry.dx);
-			if (hptr < C(0.0)) hptr = C(0.0);
-
-			if (i == 0) edge_q += qxptr0;
-			if (i == cuda::geometry.xsz - 1) edge_q -= qxptr1;
-			if (j == 0) edge_q += qyptr0;
-			if (j == cuda::geometry.ysz - 1) edge_q -= qyptr1;
-			if (edge_q != C(0.0))
-			{
-				accumulate_point_source_stats(mass_stats, edge_q);
-				edge_q = C(0.0);
-			}
+			detail::update_H_cell(H, Qx, Qy, drycheck, mass_stats, i, j);
 		}
 	}
 }
@@ -644,6 +599,11 @@ void lis::cuda::Boundary::update_point_sources
 {
 	if (host_PS_count == 0) return;
 	cuda::update_point_sources<<<1, CUDA_BLOCK_SIZE>>>(H, DEM, mass_stats);
+}
+
+bool lis::cuda::Boundary::has_point_sources()
+{
+	return host_PS_count > 0;
 }
 
 void lis::cuda::Boundary::update_H

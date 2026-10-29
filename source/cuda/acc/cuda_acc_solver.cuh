@@ -58,6 +58,21 @@ public:
 
 	~Solver();
 
+	/** the kernels of the release (LISFLOOD_ACC_UNFUSED) or the fused ones */
+	bool fused_path() const { return fused; }
+
+	/**
+	 * Boundary::update_H (no point sources) and update_flow_variables in one
+	 * kernel, and updateMaxFieldACC(t + dt) if max_field
+	 */
+	Flow& update_H_flow
+	(
+		MassStats* mass_stats,
+		int drycheck,
+		bool max_field,
+		NUMERIC_TYPE t
+	);
+
 private:
 	Flow U1;
 //	Flow U2;
@@ -71,6 +86,7 @@ private:
 	MaxH maxH;
 	
 	bool friction;
+	bool fused;
 	const dim3 grid_size;
 };
 

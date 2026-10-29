@@ -566,6 +566,99 @@ __device__ __forceinline__ NUMERIC_TYPE rate_at_cell
     }
 }
 
+/** a point source's or an edge's discharge into the mass statistics */
+__device__ __forceinline__ void accumulate_point_source_stats
+(
+	MassStats* mass_stats,
+	NUMERIC_TYPE discharge
+)
+{
+	if (discharge > C(0.0))
+	{
+		atomicAdd(&(mass_stats->in), discharge);
+	}
+	else
+	{
+		atomicAdd(&(mass_stats->out), -discharge);
+	}
+}
+
+/** update_H for cell (i, j) of the ACC grid */
+__device__ __forceinline__ void update_H_cell
+(
+	NUMERIC_TYPE* H,
+	NUMERIC_TYPE* Qx,
+	NUMERIC_TYPE* Qy,
+	int drycheck,
+	MassStats* mass_stats,
+	int i,
+	int j
+)
+{
+	NUMERIC_TYPE dV, cv, WDweight;
+	NUMERIC_TYPE edge_q = C(0.0); // net inflow through the domain edges, m3/s
+
+	NUMERIC_TYPE qxptr0 = Qx[i + j * (cuda::geometry.xsz + 1)];
+	NUMERIC_TYPE qxptr1 = Qx[i + j * (cuda::geometry.xsz + 1) + 1];
+	NUMERIC_TYPE qyptr0 = Qy[i + j * (cuda::geometry.xsz + 1)];
+	NUMERIC_TYPE qyptr1 = Qy[i + (j + 1) * (cuda::geometry.xsz + 1)];
+	NUMERIC_TYPE& hptr = H[i + j * (cuda::geometry.xsz)];
+	
+	dV = cuda::dt * (qxptr0 - qxptr1 + qyptr0 - qyptr1);
+
+	cv = hptr * (cuda::geometry.dx * cuda::geometry.dx);
+
+	if (drycheck) {
+
+		if (cv + dV < C(0.0))
+		{
+			WDweight = -cv / dV; 
+			if (qxptr0 < C(0.0)) qxptr0 *= WDweight;
+			if (qxptr1 > C(0.0)) qxptr1 *= WDweight;
+			if (qyptr0 < C(0.0)) qyptr0 *= WDweight;
+			if (qyptr1 > C(0.0)) qyptr1 *= WDweight;
+		}
+	}
+
+	dV = cuda::dt * (qxptr0 - qxptr1 + qyptr0 - qyptr1);
+	hptr += dV / (cuda::geometry.dx * cuda::geometry.dx);
+	if (hptr < C(0.0)) hptr = C(0.0);
+
+	if (i == 0) edge_q += qxptr0;
+	if (i == cuda::geometry.xsz - 1) edge_q -= qxptr1;
+	if (j == 0) edge_q += qyptr0;
+	if (j == cuda::geometry.ysz - 1) edge_q -= qyptr1;
+	if (edge_q != C(0.0))
+	{
+		accumulate_point_source_stats(mass_stats, edge_q);
+		edge_q = C(0.0);
+	}
+}
+
+/** rate_at_cell on the ACC grid (no ghost cells) */
+__device__ __forceinline__ NUMERIC_TYPE rate_at_cell_ACC
+(
+	NUMERIC_TYPE* rain_data,
+	int i,
+	int j
+)
+{
+    int tile_i = (i) * cuda::geometry.dx / cuda::rain_geometry.dx;
+
+    NUMERIC_TYPE top_gap = cuda::geometry.tly - cuda::rain_geometry.tly;
+    int tile_j = (j - top_gap/cuda::geometry.dy) *
+		cuda::geometry.dy / cuda::rain_geometry.dy;
+
+    if (tile_i < cuda::rain_geometry.xsz && tile_j >= 0)
+    {
+        return rain_data[tile_j*cuda::rain_geometry.xsz + tile_i];
+    }
+    else
+    {
+        return C(0.0);
+    }
+}
+
 }
 
 }

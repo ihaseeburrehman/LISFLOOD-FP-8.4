@@ -89,6 +89,9 @@ struct Boundary
 	 	BoundaryConditions& boundaries
 	);
 
+	/** true if the boundary file has point sources */
+	static bool has_point_sources();
+
 	__device__ static FlowVector outside_x
 	(
 		FlowVector U_const,
