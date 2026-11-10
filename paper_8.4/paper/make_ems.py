@@ -152,7 +152,7 @@ Luxembourg (FNR) under the Industrial Fellowship (IF) grant [project number
 \section*{Declaration of generative AI and AI-assisted technologies in the manuscript preparation process}
 During the preparation of this work the authors used Anthropic's Claude
 models (Opus 5.5 and Fable 5.1) to improve the grammar and language of the
-manuscript and for AI-assisted coding and debugging of the CUDA and Metal
+manuscript and for AI-assisted coding and debugging of parts of the CUDA and Metal
 code. After using this tool, the authors reviewed and edited the content as
 needed and take full responsibility for the content of the published article.
 
