@@ -28,7 +28,7 @@ data/
   verification/             loss tests (losses_cuda, losses_metal, horton, checks), metal_vs_reference.csv,
                             baseline_cpu_vs_cuda.csv
   floodcastbench/           hourly scores of the four events (Sect. 4.1, Table 5, Fig. 2); README there
-  alzette/                  observations/, scores_models.csv (Table 6), hydrographs_models.csv (Fig. 3),
+  alzette/                  observations/ (README only: the AGE discharge is not redistributed), scores_models.csv (Table 6), hydrographs_models.csv (Fig. 3),
                             water_balance_models.csv, scores_sensitivity.csv (Ks x0.5, x2, ERA5-Land start),
                             runs/<model>_<infiltration>_<n>gpu (LISFLOOD-FP .mass/par/log, SERGHEI-SWE inputs and
                             series, TRITON logs), horton_inputs/ (Horton grids recipe)
