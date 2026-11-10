@@ -1,0 +1,5 @@
+label,min_1gpu,min_4gpu,speedup,efficiency_pct,job,output_files_identical_1_vs_4_gpus,steps,ms_per_step_1gpu,ms_per_step_4gpu
+"10 m, 24 h\n(stored start)",4.62,3.82,1.21,30,p_scale-33411858,101,166299,1.67,1.38
+"10 m, 96 h",10.77,6.51,1.66,41,p_scale-33125392,21,628907,1.03,0.62
+"5 m, 24 h",9.79,5.64,1.74,43,p_scale-33125394,11,196212,2.99,1.72
+"5 m, 96 h",55.35,28.97,1.91,48,p_scale-33125396,35,1266801,2.62,1.37

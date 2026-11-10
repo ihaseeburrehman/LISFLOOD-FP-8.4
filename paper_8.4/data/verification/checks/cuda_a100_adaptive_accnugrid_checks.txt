@@ -1,0 +1,332 @@
+PASS hwfv1_0_off exits successfully (rc=0)
+PASS hwfv1_0_off nonnegative finite depths
+PASS hwfv1_0_moving_off exits successfully (rc=0)
+PASS hwfv1_0_moving_off nonnegative finite depths
+PASS hwfv1_0_constant exits successfully (rc=0)
+PASS hwfv1_0_constant nonnegative finite depths
+PASS hwfv1_0_constant closed volume balance (1.12e-07)
+PASS hwfv1_0_constant analytic depth
+PASS hwfv1_0_grid exits successfully (rc=0)
+PASS hwfv1_0_grid nonnegative finite depths
+PASS hwfv1_0_grid closed volume balance (1.12e-07)
+PASS hwfv1_0_grid analytic depth
+PASS hwfv1_0_evap exits successfully (rc=0)
+PASS hwfv1_0_evap nonnegative finite depths
+PASS hwfv1_0_evap closed volume balance (3.96e-08)
+PASS hwfv1_0_evap analytic depth
+PASS hwfv1_0_half exits successfully (rc=0)
+PASS hwfv1_0_half nonnegative finite depths
+PASS hwfv1_0_half closed volume balance (1.68e-07)
+PASS hwfv1_0 raster north/south rates have correct orientation
+PASS hwfv1_0_ga exits successfully (rc=0)
+PASS hwfv1_0_ga nonnegative finite depths
+PASS hwfv1_0_ga closed volume balance (1.93e-08)
+PASS hwfv1_0_ga_grid exits successfully (rc=0)
+PASS hwfv1_0_ga_grid nonnegative finite depths
+PASS hwfv1_0_ga_grid closed volume balance (1.93e-08)
+PASS hwfv1_0_cap exits successfully (rc=0)
+PASS hwfv1_0_cap nonnegative finite depths
+PASS hwfv1_0_cap closed volume balance (1.93e-08)
+PASS hwfv1_0 cap stops at 46 mm
+PASS hwfv1_0_moving_cap exits successfully (rc=0)
+PASS hwfv1_0_moving_cap nonnegative finite depths
+PASS hwfv1_0 moving_cap balance vs loss-free solver (loss=0.00268, reference=0.00365)
+PASS hwfv1_0 moving mesh retains soil cap
+PASS hwfv1_0_rectangle_off exits successfully (rc=0)
+PASS hwfv1_0_rectangle_off nonnegative finite depths
+PASS hwfv1_0_rectangle exits successfully (rc=0)
+PASS hwfv1_0_rectangle nonnegative finite depths
+PASS hwfv1_0 rectangle balance vs loss-free solver (loss=4.5e-08, reference=1.02e-08)
+PASS hwfv1_0_rectangle loss excludes padding/NoData
+PASS hwfv1_0_mask_off exits successfully (rc=0)
+PASS hwfv1_0_mask_off nonnegative finite depths
+PASS hwfv1_0_mask exits successfully (rc=0)
+PASS hwfv1_0_mask nonnegative finite depths
+PASS hwfv1_0 mask balance vs loss-free solver (loss=4.45e-07, reference=3.13e-07)
+PASS hwfv1_0_mask loss excludes padding/NoData
+PASS hwfv1_0_dry exits successfully (rc=0)
+PASS hwfv1_0_dry nonnegative finite depths
+PASS hwfv1_0_dry closed volume balance (4.11e-08)
+PASS hwfv1_0 drains to dry threshold
+PASS hwfv1_0 constant == grid
+PASS hwfv1_0 ga == ga_grid
+PASS hwfv1_0_off83 exits successfully (rc=0)
+PASS hwfv1_0 off == 8.3 depth grids
+PASS hwfv1_0 off == 8.3 qx
+PASS hwfv1_0 off == 8.3 qy
+PASS hwfv1_0_moving83 exits successfully (rc=0)
+PASS hwfv1_0 moving off == 8.3 depth grids
+PASS hwfv1_0_repeat exits successfully (rc=0)
+PASS hwfv1_0 repeat grids identical
+PASS hwfv1_0.001_off exits successfully (rc=0)
+PASS hwfv1_0.001_off nonnegative finite depths
+PASS hwfv1_0.001_moving_off exits successfully (rc=0)
+PASS hwfv1_0.001_moving_off nonnegative finite depths
+PASS hwfv1_0.001_constant exits successfully (rc=0)
+PASS hwfv1_0.001_constant nonnegative finite depths
+PASS hwfv1_0.001_constant closed volume balance (1.49e-08)
+PASS hwfv1_0.001_constant analytic depth
+PASS hwfv1_0.001_grid exits successfully (rc=0)
+PASS hwfv1_0.001_grid nonnegative finite depths
+PASS hwfv1_0.001_grid closed volume balance (1.49e-08)
+PASS hwfv1_0.001_grid analytic depth
+PASS hwfv1_0.001_evap exits successfully (rc=0)
+PASS hwfv1_0.001_evap nonnegative finite depths
+PASS hwfv1_0.001_evap closed volume balance (1.49e-08)
+PASS hwfv1_0.001_evap analytic depth
+PASS hwfv1_0.001_half exits successfully (rc=0)
+PASS hwfv1_0.001_half nonnegative finite depths
+PASS hwfv1_0.001_half closed volume balance (4.69e-08)
+PASS hwfv1_0.001 raster north/south rates have correct orientation
+PASS hwfv1_0.001_ga exits successfully (rc=0)
+PASS hwfv1_0.001_ga nonnegative finite depths
+PASS hwfv1_0.001_ga closed volume balance (4.16e-08)
+PASS hwfv1_0.001_ga_grid exits successfully (rc=0)
+PASS hwfv1_0.001_ga_grid nonnegative finite depths
+PASS hwfv1_0.001_ga_grid closed volume balance (4.16e-08)
+PASS hwfv1_0.001_cap exits successfully (rc=0)
+PASS hwfv1_0.001_cap nonnegative finite depths
+PASS hwfv1_0.001_cap closed volume balance (4.16e-08)
+PASS hwfv1_0.001 cap stops at 46 mm
+PASS hwfv1_0.001_moving_cap exits successfully (rc=0)
+PASS hwfv1_0.001_moving_cap nonnegative finite depths
+PASS hwfv1_0.001 moving_cap balance vs loss-free solver (loss=0.00193, reference=0.00124)
+PASS hwfv1_0.001 moving mesh retains soil cap
+PASS hwfv1_0.001 mesh changes during moving test
+PASS hwfv1_0.001_rectangle_off exits successfully (rc=0)
+PASS hwfv1_0.001_rectangle_off nonnegative finite depths
+PASS hwfv1_0.001_rectangle exits successfully (rc=0)
+PASS hwfv1_0.001_rectangle nonnegative finite depths
+PASS hwfv1_0.001 rectangle balance vs loss-free solver (loss=1.18e-07, reference=5.61e-06)
+PASS hwfv1_0.001_rectangle loss excludes padding/NoData
+PASS hwfv1_0.001_mask_off exits successfully (rc=0)
+PASS hwfv1_0.001_mask_off nonnegative finite depths
+PASS hwfv1_0.001_mask exits successfully (rc=0)
+PASS hwfv1_0.001_mask nonnegative finite depths
+PASS hwfv1_0.001 mask balance vs loss-free solver (loss=2.05e-05, reference=0)
+PASS hwfv1_0.001_mask loss excludes padding/NoData
+PASS hwfv1_0.001_dry exits successfully (rc=0)
+PASS hwfv1_0.001_dry nonnegative finite depths
+PASS hwfv1_0.001_dry closed volume balance (3.11e-08)
+PASS hwfv1_0.001 drains to dry threshold
+PASS hwfv1_0.001 constant == grid
+PASS hwfv1_0.001 ga == ga_grid
+PASS hwfv1_0.001_off83 exits successfully (rc=0)
+PASS hwfv1_0.001 off == 8.3 depth grids
+PASS hwfv1_0.001 off == 8.3 qx
+PASS hwfv1_0.001 off == 8.3 qy
+PASS hwfv1_0.001_moving83 exits successfully (rc=0)
+PASS hwfv1_0.001 moving off == 8.3 depth grids
+PASS hwfv1_0.001_repeat exits successfully (rc=0)
+PASS hwfv1_0.001 repeat grids identical
+PASS mwdg2_0_off exits successfully (rc=0)
+PASS mwdg2_0_off nonnegative finite depths
+PASS mwdg2_0_moving_off exits successfully (rc=0)
+PASS mwdg2_0_moving_off nonnegative finite depths
+PASS mwdg2_0_constant exits successfully (rc=0)
+PASS mwdg2_0_constant nonnegative finite depths
+PASS mwdg2_0_constant closed volume balance (6.27e-08)
+PASS mwdg2_0_constant analytic depth
+PASS mwdg2_0_grid exits successfully (rc=0)
+PASS mwdg2_0_grid nonnegative finite depths
+PASS mwdg2_0_grid closed volume balance (6.27e-08)
+PASS mwdg2_0_grid analytic depth
+PASS mwdg2_0_evap exits successfully (rc=0)
+PASS mwdg2_0_evap nonnegative finite depths
+PASS mwdg2_0_evap closed volume balance (1e-07)
+PASS mwdg2_0_evap analytic depth
+PASS mwdg2_0_half exits successfully (rc=0)
+PASS mwdg2_0_half nonnegative finite depths
+PASS mwdg2_0_half closed volume balance (9.69e-08)
+PASS mwdg2_0 raster north/south rates have correct orientation
+PASS mwdg2_0_ga exits successfully (rc=0)
+PASS mwdg2_0_ga nonnegative finite depths
+PASS mwdg2_0_ga closed volume balance (4.87e-08)
+PASS mwdg2_0_ga_grid exits successfully (rc=0)
+PASS mwdg2_0_ga_grid nonnegative finite depths
+PASS mwdg2_0_ga_grid closed volume balance (4.87e-08)
+PASS mwdg2_0_cap exits successfully (rc=0)
+PASS mwdg2_0_cap nonnegative finite depths
+PASS mwdg2_0_cap closed volume balance (7.2e-08)
+PASS mwdg2_0 cap stops at 46 mm
+PASS mwdg2_0_moving_cap exits successfully (rc=0)
+PASS mwdg2_0_moving_cap nonnegative finite depths
+PASS mwdg2_0 moving_cap balance vs loss-free solver (loss=0.00165, reference=0.000987)
+PASS mwdg2_0 moving mesh retains soil cap
+PASS mwdg2_0_dry exits successfully (rc=0)
+PASS mwdg2_0_dry nonnegative finite depths
+PASS mwdg2_0_dry closed volume balance (3.11e-08)
+PASS mwdg2_0 drains to dry threshold
+PASS mwdg2_0 constant == grid
+PASS mwdg2_0 ga == ga_grid
+PASS mwdg2_0_off83 exits successfully (rc=0)
+PASS mwdg2_0 off == 8.3 depth grids
+PASS mwdg2_0 off == 8.3 qx
+PASS mwdg2_0 off == 8.3 qy
+PASS mwdg2_0_moving83 exits successfully (rc=0)
+PASS mwdg2_0 moving off == 8.3 depth grids
+PASS mwdg2_0_repeat exits successfully (rc=0)
+PASS mwdg2_0 repeat grids identical
+PASS mwdg2_0.001_off exits successfully (rc=0)
+PASS mwdg2_0.001_off nonnegative finite depths
+PASS mwdg2_0.001_moving_off exits successfully (rc=0)
+PASS mwdg2_0.001_moving_off nonnegative finite depths
+PASS mwdg2_0.001_constant exits successfully (rc=0)
+PASS mwdg2_0.001_constant nonnegative finite depths
+PASS mwdg2_0.001_constant closed volume balance (1.49e-08)
+PASS mwdg2_0.001_constant analytic depth
+PASS mwdg2_0.001_grid exits successfully (rc=0)
+PASS mwdg2_0.001_grid nonnegative finite depths
+PASS mwdg2_0.001_grid closed volume balance (1.49e-08)
+PASS mwdg2_0.001_grid analytic depth
+PASS mwdg2_0.001_evap exits successfully (rc=0)
+PASS mwdg2_0.001_evap nonnegative finite depths
+PASS mwdg2_0.001_evap closed volume balance (1.49e-08)
+PASS mwdg2_0.001_evap analytic depth
+PASS mwdg2_0.001_half exits successfully (rc=0)
+PASS mwdg2_0.001_half nonnegative finite depths
+PASS mwdg2_0.001_half closed volume balance (9.26e-06)
+PASS mwdg2_0.001 raster north/south rates have correct orientation
+PASS mwdg2_0.001_ga exits successfully (rc=0)
+PASS mwdg2_0.001_ga nonnegative finite depths
+PASS mwdg2_0.001_ga closed volume balance (4.16e-08)
+PASS mwdg2_0.001_ga_grid exits successfully (rc=0)
+PASS mwdg2_0.001_ga_grid nonnegative finite depths
+PASS mwdg2_0.001_ga_grid closed volume balance (4.16e-08)
+PASS mwdg2_0.001_cap exits successfully (rc=0)
+PASS mwdg2_0.001_cap nonnegative finite depths
+PASS mwdg2_0.001_cap closed volume balance (4.16e-08)
+PASS mwdg2_0.001 cap stops at 46 mm
+PASS mwdg2_0.001_moving_cap exits successfully (rc=0)
+PASS mwdg2_0.001_moving_cap nonnegative finite depths
+PASS mwdg2_0.001 moving_cap balance vs loss-free solver (loss=0.014, reference=0.0106)
+PASS mwdg2_0.001 moving mesh retains soil cap
+PASS mwdg2_0.001 mesh changes during moving test
+PASS mwdg2_0.001_dry exits successfully (rc=0)
+PASS mwdg2_0.001_dry nonnegative finite depths
+PASS mwdg2_0.001_dry closed volume balance (3.11e-08)
+PASS mwdg2_0.001 drains to dry threshold
+PASS mwdg2_0.001 constant == grid
+PASS mwdg2_0.001 ga == ga_grid
+PASS mwdg2_0.001_off83 exits successfully (rc=0)
+PASS mwdg2_0.001 off == 8.3 depth grids
+PASS mwdg2_0.001 off == 8.3 qx
+PASS mwdg2_0.001 off == 8.3 qy
+PASS mwdg2_0.001_moving83 exits successfully (rc=0)
+PASS mwdg2_0.001 moving off == 8.3 depth grids
+PASS mwdg2_0.001_repeat exits successfully (rc=0)
+PASS mwdg2_0.001 repeat grids identical
+0 failures
+PASS hwfv1_0 point-source volume agrees with 8.3 (difference=7.34e-10; balance error new=0.00011, reference=8.77e-05)
+PASS hwfv1_0.001 point-source volume agrees with 8.3 (difference=4.34e-06; balance error new=0.00856, reference=0.00856)
+PASS mwdg2_0 point-source volume agrees with 8.3 (difference=7.85e-11; balance error new=1.44e-06, reference=7.21e-07)
+PASS mwdg2_0.001 point-source volume agrees with 8.3 (difference=3.07e-07; balance error new=0.00323, reference=0.00323)
+PASS unsupported padded mesh rejected clearly
+0 failures
+PASS acc_nugrid_0_off exits successfully (rc=0)
+PASS acc_nugrid_0_constant exits successfully (rc=0)
+PASS acc_nugrid_0_constant finite nonnegative volumes
+PASS acc_nugrid_0_constant closed volume balance (1.66e-09)
+PASS acc_nugrid_0_constant analytic loss
+PASS acc_nugrid_0_grid exits successfully (rc=0)
+PASS acc_nugrid_0_grid finite nonnegative volumes
+PASS acc_nugrid_0_grid closed volume balance (1.66e-09)
+PASS acc_nugrid_0_grid analytic loss
+PASS acc_nugrid_0_evap exits successfully (rc=0)
+PASS acc_nugrid_0_evap finite nonnegative volumes
+PASS acc_nugrid_0_evap closed volume balance (1.66e-09)
+PASS acc_nugrid_0_evap analytic loss
+PASS acc_nugrid_0_orient exits successfully (rc=0)
+PASS acc_nugrid_0_orient finite nonnegative volumes
+PASS acc_nugrid_0_orient closed volume balance (1.66e-09)
+PASS acc_nugrid_0 north/south raster orientation
+PASS acc_nugrid_0 north/south losses reach the intended cells
+PASS acc_nugrid_0_ga exits successfully (rc=0)
+PASS acc_nugrid_0_ga finite nonnegative volumes
+PASS acc_nugrid_0_ga closed volume balance (1.66e-09)
+PASS acc_nugrid_0_ga_grid exits successfully (rc=0)
+PASS acc_nugrid_0_ga_grid finite nonnegative volumes
+PASS acc_nugrid_0_ga_grid closed volume balance (1.66e-09)
+PASS acc_nugrid_0_cap exits successfully (rc=0)
+PASS acc_nugrid_0_cap finite nonnegative volumes
+PASS acc_nugrid_0_cap closed volume balance (4.46e-10)
+PASS acc_nugrid_0 Green-Ampt soil cap is 46 mm
+PASS acc_nugrid_0_mask exits successfully (rc=0)
+PASS acc_nugrid_0_mask finite nonnegative volumes
+PASS acc_nugrid_0_mask closed volume balance (1.66e-09)
+PASS acc_nugrid_0_mask analytic loss
+PASS acc_nugrid_0_rectangle exits successfully (rc=0)
+PASS acc_nugrid_0_rectangle finite nonnegative volumes
+PASS acc_nugrid_0_rectangle closed volume balance (1.66e-09)
+PASS acc_nugrid_0_rectangle analytic loss
+PASS acc_nugrid_0_compressed exits successfully (rc=0)
+PASS acc_nugrid_0_compressed finite nonnegative volumes
+PASS acc_nugrid_0_compressed closed volume balance (1.49e-08)
+PASS acc_nugrid_0_compressed analytic loss
+PASS acc_nugrid_0 zero threshold retains the finest mesh
+PASS acc_nugrid_0_dry exits successfully (rc=0)
+PASS acc_nugrid_0_dry finite nonnegative volumes
+PASS acc_nugrid_0_dry closed volume balance (1.66e-09)
+PASS acc_nugrid_0 dry case stops at threshold or zero
+PASS acc_nugrid_0 constant == grid
+PASS acc_nugrid_0 ga == ga_grid
+PASS acc_nugrid_0_off83 exits successfully (rc=0)
+PASS acc_nugrid_0 feature off matches 8.3 numerically (max depth error 0 m)
+PASS acc_nugrid_0_repeat exits successfully (rc=0)
+PASS acc_nugrid_0 repeat physical outputs are byte-identical
+PASS acc_nugrid_0 repeat diagnostics agree (0 m3 maximum difference)
+PASS acc_nugrid_0.001_off exits successfully (rc=0)
+PASS acc_nugrid_0.001_constant exits successfully (rc=0)
+PASS acc_nugrid_0.001_constant finite nonnegative volumes
+PASS acc_nugrid_0.001_constant closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001_constant analytic loss
+PASS acc_nugrid_0.001_grid exits successfully (rc=0)
+PASS acc_nugrid_0.001_grid finite nonnegative volumes
+PASS acc_nugrid_0.001_grid closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001_grid analytic loss
+PASS acc_nugrid_0.001_evap exits successfully (rc=0)
+PASS acc_nugrid_0.001_evap finite nonnegative volumes
+PASS acc_nugrid_0.001_evap closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001_evap analytic loss
+PASS acc_nugrid_0.001_orient exits successfully (rc=0)
+PASS acc_nugrid_0.001_orient finite nonnegative volumes
+PASS acc_nugrid_0.001_orient closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001 north/south raster orientation
+PASS acc_nugrid_0.001 north/south losses reach the intended cells
+PASS acc_nugrid_0.001_ga exits successfully (rc=0)
+PASS acc_nugrid_0.001_ga finite nonnegative volumes
+PASS acc_nugrid_0.001_ga closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001_ga_grid exits successfully (rc=0)
+PASS acc_nugrid_0.001_ga_grid finite nonnegative volumes
+PASS acc_nugrid_0.001_ga_grid closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001_cap exits successfully (rc=0)
+PASS acc_nugrid_0.001_cap finite nonnegative volumes
+PASS acc_nugrid_0.001_cap closed volume balance (4.46e-10)
+PASS acc_nugrid_0.001 Green-Ampt soil cap is 46 mm
+PASS acc_nugrid_0.001_mask exits successfully (rc=0)
+PASS acc_nugrid_0.001_mask finite nonnegative volumes
+PASS acc_nugrid_0.001_mask closed volume balance (3.94e-08)
+PASS acc_nugrid_0.001_mask analytic loss
+PASS acc_nugrid_0.001_rectangle exits successfully (rc=0)
+PASS acc_nugrid_0.001_rectangle finite nonnegative volumes
+PASS acc_nugrid_0.001_rectangle closed volume balance (3.84e-08)
+PASS acc_nugrid_0.001_rectangle analytic loss
+PASS acc_nugrid_0.001_compressed exits successfully (rc=0)
+PASS acc_nugrid_0.001_compressed finite nonnegative volumes
+PASS acc_nugrid_0.001_compressed closed volume balance (1.49e-08)
+PASS acc_nugrid_0.001_compressed analytic loss
+PASS acc_nugrid_0.001 losses run on a compressed mesh
+PASS acc_nugrid_0.001_dry exits successfully (rc=0)
+PASS acc_nugrid_0.001_dry finite nonnegative volumes
+PASS acc_nugrid_0.001_dry closed volume balance (1.66e-09)
+PASS acc_nugrid_0.001 dry case stops at threshold or zero
+PASS acc_nugrid_0.001 constant == grid
+PASS acc_nugrid_0.001 ga == ga_grid
+PASS acc_nugrid_0.001_off83 exits successfully (rc=0)
+PASS acc_nugrid_0.001 feature off matches 8.3 numerically (max depth error 0 m)
+PASS acc_nugrid_0.001_repeat exits successfully (rc=0)
+PASS acc_nugrid_0.001 repeat physical outputs are byte-identical
+PASS acc_nugrid_0.001 repeat diagnostics agree (3.81e-06 m3 maximum difference)
+PASS small-tree loss run is rejected
+PASS stage output without velocity closes files safely
+0 failures

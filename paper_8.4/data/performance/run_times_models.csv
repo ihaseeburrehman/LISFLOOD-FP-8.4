@@ -1,0 +1,9 @@
+model,infiltration,min_1gpu,min_4gpu,speedup,source_jobs,steps,ms_per_step_1gpu,steps_source
+LISFLOOD-FP 8.4,none,33.4,23.7,1.41,p_alz1-33114275 / p_noinf4-33138287,666556,3.01,"NumTsteps, last row of 1hr.mass"
+LISFLOOD-FP 8.4,Green-Ampt,33.5,24.1,1.39,om_lf1g-33335098 / p_alz4-33125381,661820,3.04,"NumTsteps, last row of 1hr.mass"
+LISFLOOD-FP 8.4,Horton,34.2,24.7,1.39,om_lf1g-33335100 / p_alz4-33125382,662612,3.10,"NumTsteps, last row of 1hr.mass"
+HiPIMS,none,250.2,80.1,3.12,run_hp_R1_31220375 (job elapsed) / run_hpmg_R_1km_5min_31315043 (time -v),1726457,8.70,lines of output/timestep_log.txt (1 GPU run)
+HiPIMS,Green-Ampt,217.2,75.0,2.89,om_hp1g-33335102 (time -v) / run_hpmg_R_1km_5min_inf_31325039 (time -v),1767888,7.37,lines of output/timestep_log.txt (1 GPU run)
+TRITON,none,36.4,13.4,2.72,om_run noinf96_triton_drain_1g / noinf96_triton_drain_4g,667662,3.27,it: in run.log (1 GPU run)
+SERGHEI-SWE,none,59.7,50.1,1.19,om_c1n-33413389 / om_c4n-33413397 (2 x 2),935374,3.83,iter: in run.log (1 GPU run)
+SERGHEI-SWE,Horton,62.7,47.1,1.33,om_c1h-33413391 / om_c4h-33413399 (2 x 2),930337,4.04,iter: in run.log (1 GPU run)

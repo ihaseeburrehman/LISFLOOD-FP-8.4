@@ -1,0 +1,6 @@
+sample: 200000 pervious cells; median f0 5.64 fc 0.75 k 0.125
+to 12 h: rain    1.7 mm | time-based   1.66 mm | cumulative   1.70 mm | ratio  0.98
+to 17 h: rain    6.4 mm | time-based   2.90 mm | cumulative   4.95 mm | ratio  0.59
+to 24 h: rain   51.1 mm | time-based  10.79 mm | cumulative  28.54 mm | ratio  0.38
+to 28 h: rain   78.7 mm | time-based  14.35 mm | cumulative  36.63 mm | ratio  0.39
+to 96 h: rain   82.5 mm | time-based  16.35 mm | cumulative  39.29 mm | ratio  0.42

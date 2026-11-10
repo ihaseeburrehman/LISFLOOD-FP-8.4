@@ -1,0 +1,18 @@
+# Wall-clock time of the whole model process (input, simulation, output) for the same case and solver on one
+# NVIDIA A100-SXM4-40GB (CUDA 12.6, final 8.4 build, single precision; HPC lf84/paper84/build, jobs 33493375 and
+# 33493839) and on an Apple M1 Max (32-core GPU, Metal, build_timing from commit d2eb115, single precision).
+# Runs with tests/run_suite.sh (label A1 / M1), inputs prepared on each machine. ms_per_step = wall / steps.
+# T05 is listed for completeness only: it runs for seconds and the ACC step counts differ (see the paper, Sect. 3.5).
+case,cells_M,sim_h,solver,steps_a100,wall_s_a100,steps_m1max,wall_s_m1max,ms_per_step_a100,ms_per_step_m1max,ratio_m1max_over_a100
+T06,1.7,30,fv1,158477,50,158477,184,0.32,1.16,3.7
+T06,1.7,30,fv2,230264,2749,230266,512,11.94,2.22,0.19
+T06,1.7,30,dg2,262584,3198,262559,996,12.18,3.79,0.31
+T06,1.7,30,acc,154090,29,154090,196,0.19,1.27,6.8
+T07s,0.58,6,fv1,60611,12,60612,47,0.20,0.78,3.9
+T07s,0.58,6,fv2,91685,394,91684,116,4.30,1.27,0.29
+T07s,0.58,6,dg2,196409,896,196923,357,4.56,1.81,0.40
+T07s,0.58,6,acc,37886,5,37886,39,0.13,1.03,7.8
+T05,0.32,,fv1,3137,4,3132,3,,,
+T05,0.32,,fv2,4733,14,4725,7,,,
+T05,0.32,,dg2,9932,29,10216,16,,,
+T05,0.32,,acc,121453,8,1695,3,,,

@@ -1,0 +1,5 @@
+solver,case,pair,outputs,identical_pct,within_1cm_pct,max_diff_mm,max_volume_diff_pct
+dg2,T03,CPU vs CUDA,30,44.40,99.06,70,0.0101
+dg2,T05,CPU vs CUDA,10,83.99,97.63,165,0.0048
+acc,T05,CPU vs CUDA,10,5.94,7.21,3913224,99.6994
+acc,T06,CPU vs CUDA,30,42.09,55.62,1964,4.1685

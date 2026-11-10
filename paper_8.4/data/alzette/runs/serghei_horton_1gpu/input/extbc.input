@@ -1,0 +1,6 @@
+bccount : 1
+
+id : outlet
+bctype : 5
+direction : 0.0 1.0
+polygon : polygon.input

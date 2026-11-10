@@ -1,0 +1,17 @@
+dirroot /ec/res4/scratch/lux0804/lf84/paper84/alzette/L84_R_1km_5min_noinf_dpn_1g/results
+resroot                  1hr
+DEMfile                  /ec/res4/scratch/lux0804/radar_scale_2026/inputs/Alzette_sub_basin_10m_bridge_burn.asc
+manningfile              /ec/res4/scratch/lux0804/radar_scale_2026/inputs/manning.n.ascii
+dynamicrainfile          /ec/res4/scratch/lux0804/radar_scale_2026/forcing/rain_R_1km_5min.nc
+startfile                /ec/res4/scratch/lux0804/radar_scale_2026/inputs/13_july_18hr.wd
+fv1
+cuda
+GPUs 1
+sim_time                 345600
+initial_tstep            10
+massint                  600
+saveint                  3600
+bcifile                  /ec/res4/scratch/lux0804/radar_scale_2026/inputs/Border.bci
+nodata_elevation         -9999
+drain_nodata
+qoutput

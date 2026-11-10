@@ -1,0 +1,9 @@
+simLength  : 345600
+cfl        : 0.5
+outFreq    : 3600.0
+obsFreq    : 3600.0
+parNx      : 1
+parNy      : 1
+outFormat  : NETCDF
+BCtype     : REFLECTIVE
+nScreen    : 20000

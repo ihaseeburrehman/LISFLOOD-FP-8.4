@@ -1,0 +1,7 @@
+Highlights
+
+- Infiltration and evaporation added to all CUDA and native Apple Metal solvers
+- FV1, FV2 and DG2 run on several GPUs; FV1 identical on one and four GPUs
+- CUDA FV1 and ACC steps 1.3-3.3 times faster than in 8.3, identical predictions
+- Uncalibrated Green-Ampt raises mean NSE at four Alzette gauges from 0.12 to 0.66
+- CUDA FV1 fastest of four GPU solvers (HiPIMS, SERGHEI-SWE, TRITON) on the Alzette

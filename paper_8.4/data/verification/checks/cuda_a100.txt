@@ -1,0 +1,87 @@
+== T012: flat basin, 0.4464 m of water, 100 days
+   (expected depth: h0 minus the sum of rate x dt over the steps the model took)
+PASS  t012_base_cpu_acc_84: depth at output 1 (50 days) = 0.2232 m (largest error 0.0030 mm)
+PASS  t012_base_cpu_acc_84: depth at output 2 (100 days) between 0 and the 1 mm threshold (range 0.9380 to 0.9380 mm)
+PASS  t012_base_cpu_acc_84: volume removed 1625179.9 m3, depth grids lost 1623709.0 m3, largest |Verror| after the first row 1.09e+03 m3
+PASS  t012_base_cuda_acc_84: depth at output 1 (50 days) = 0.2232 m (largest error 0.0000 mm)
+PASS  t012_base_cuda_acc_84: depth at output 2 (100 days) between 0 and the 1 mm threshold (range 0.9990 to 0.9990 mm)
+PASS  t012_base_cuda_acc_84: volume removed 1623500.0 m3, depth grids lost 1623486.6 m3, largest |Verror| after the first row 0.108 m3
+PASS  t012_base_cuda_fv1_84: depth at output 1 (50 days) = 0.2232 m (largest error 0.0001 mm)
+PASS  t012_base_cuda_fv1_84: depth at output 2 (100 days) between 0 and the 1 mm threshold (range 0.9830 to 0.9830 mm)
+PASS  t012_base_cuda_fv1_84: volume removed 1623500.0 m3, depth grids lost 1623545.0 m3, largest |Verror| after the first row 0.105 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_base_cuda_fv2_84: depth at output 1 (50 days) = 0.2232 m (largest error 0.2905 mm)
+PASS  t012_base_cuda_fv2_84: depth at output 2 (100 days) between 0 and the 1 mm threshold (range 0.9960 to 0.9960 mm)
+PASS  t012_base_cuda_fv2_84: volume removed 1624200.0 m3, depth grids lost 1623497.6 m3, largest |Verror| after the first row 5.02 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_base_cuda_dg2_84: depth at output 1 (50 days) = 0.2232 m (largest error 0.1541 mm)
+PASS  t012_base_cuda_dg2_84: depth at output 2 (100 days) between 0 and the 1 mm threshold (range 0.9970 to 0.9970 mm)
+PASS  t012_base_cuda_dg2_84: volume removed 1624000.0 m3, depth grids lost 1623493.9 m3, largest |Verror| after the first row 2.43 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_off_cpu_acc_84: depth at output 2 (no losses, 100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_off_cuda_acc_84: depth at output 2 (no losses, 100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_off_cuda_fv1_84: depth at output 2 (no losses, 100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_off_cuda_fv2_84: depth at output 2 (no losses, 100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_off_cuda_dg2_84: depth at output 2 (no losses, 100 days) = 0.4464 m (largest error 0.0010 mm)
+FAIL  t012 off, cuda_acc: 8.4 vs 8.3: differ: r.mass
+PASS  t012_ramp_cuda_acc_84: depth at output 1 (ramp, 50 days) = 0.3564 m (largest error 0.0001 mm)
+PASS  t012_ramp_cuda_acc_84: depth at output 2 (ramp, 100 days) = 0.0868 m (largest error 0.0002 mm)
+PASS  t012_ramp_cuda_acc_84: ramp: volume removed 1310800.0 m3, depth grids lost 1310814.9 m3, largest |Verror| after the first row 0.112 m3
+PASS  t012_wall_cuda_acc_84: depth at output 1 left half (50 days) = 0.0863 m (largest error 0.0001 mm)
+PASS  t012_wall_cuda_acc_84: depth at output 2 left half (100 days) between 0 and the 1 mm threshold (range 0.9990 to 0.9990 mm)
+PASS  t012_wall_cuda_acc_84: depth at output 2 right half (100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_wall_cuda_acc_84: wall: volume removed 649390.0 m3, depth grids lost 649394.7 m3, largest |Verror| after the first row 0.0953 m3
+FAIL  t012 off, cuda_fv1: 8.4 vs 8.3: differ: r.mass
+PASS  t012_ramp_cuda_fv1_84: depth at output 1 (ramp, 50 days) = 0.3564 m (largest error 0.0002 mm)
+PASS  t012_ramp_cuda_fv1_84: depth at output 2 (ramp, 100 days) = 0.0864 m (largest error 0.0004 mm)
+PASS  t012_ramp_cuda_fv1_84: ramp: volume removed 1312200.0 m3, depth grids lost 1312247.4 m3, largest |Verror| after the first row 0.11 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_wall_cuda_fv1_84: depth at output 1 left half (50 days) = 0.0863 m (largest error 0.0002 mm)
+PASS  t012_wall_cuda_fv1_84: depth at output 2 left half (100 days) between 0 and the 1 mm threshold (range 0.9990 to 0.9990 mm)
+PASS  t012_wall_cuda_fv1_84: depth at output 2 right half (100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_wall_cuda_fv1_84: wall: volume removed 649400.0 m3, depth grids lost 649394.7 m3, largest |Verror| after the first row 0.124 m3 (not checked: FV1 .mass volume includes ghost cells)
+FAIL  t012 off, cuda_fv2: 8.4 vs 8.3: differ: r.mass
+PASS  t012_ramp_cuda_fv2_84: depth at output 1 (ramp, 50 days) = 0.3564 m (largest error 0.1611 mm)
+PASS  t012_ramp_cuda_fv2_84: depth at output 2 (ramp, 100 days) = 0.0864 m (largest error 0.2728 mm)
+PASS  t012_ramp_cuda_fv2_84: ramp: volume removed 1312200.0 m3, depth grids lost 1311220.7 m3, largest |Verror| after the first row 6.94 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_wall_cuda_fv2_84: depth at output 1 left half (50 days) = 0.0861 m (largest error 0.7596 mm)
+PASS  t012_wall_cuda_fv2_84: depth at output 2 left half (100 days) between 0 and the 1 mm threshold (range 0.9990 to 0.9990 mm)
+PASS  t012_wall_cuda_fv2_84: depth at output 2 right half (100 days) = 0.4464 m (largest error 0.0000 mm)
+PASS  t012_wall_cuda_fv2_84: wall: volume removed 648230.0 m3, depth grids lost 649394.7 m3, largest |Verror| after the first row 37.4 m3 (not checked: FV1 .mass volume includes ghost cells)
+FAIL  t012 off, cuda_dg2: 8.4 vs 8.3: differ: r.mass
+PASS  t012_ramp_cuda_dg2_84: depth at output 1 (ramp, 50 days) = 0.3564 m (largest error 0.1621 mm)
+PASS  t012_ramp_cuda_dg2_84: depth at output 2 (ramp, 100 days) = 0.0864 m (largest error 0.2606 mm)
+PASS  t012_ramp_cuda_dg2_84: ramp: volume removed 1312200.0 m3, depth grids lost 1311258.2 m3, largest |Verror| after the first row 12.6 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_wall_cuda_dg2_84: depth at output 1 left half (50 days) = 0.0861 m (largest error 0.5210 mm)
+PASS  t012_wall_cuda_dg2_84: depth at output 2 left half (100 days) between 0 and the 1 mm threshold (range 0.9970 to 1.0000 mm)
+PASS  t012_wall_cuda_dg2_84: depth at output 2 right half (100 days) = 0.4464 m (largest error 0.0010 mm)
+PASS  t012_wall_cuda_dg2_84: wall: volume removed 648590.0 m3, depth grids lost 649395.7 m3, largest |Verror| after the first row 13.1 m3 (not checked: FV1 .mass volume includes ghost cells)
+
+== Green-Ampt: flat basin, 0.1 m of water, Ks 10 mm/h, psi 110 mm, dtheta 0.23, 1 day
+PASS  t012_ga_pond_cuda_fv1_84: depth against Green-Ampt as stepped, 24 hourly outputs (largest error 0.0002 mm)
+FAIL  t012_ga_pond_cuda_fv1_84: depth against the continuous Green-Ampt solution (largest difference 0.803 mm at the nominal hours; 0.941 mm at the written output times, steps 136-607 s: see analysis/paper_figures.py)
+PASS  t012_ga_pond_cuda_fv1_84: Green-Ampt: volume removed 364500.0 m3, depth grids lost 364500.0 m3, largest |Verror| after the first row 0.00691 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_ga_grid_cuda_fv1_84: parameters as grid files vs numbers: 25 files identical
+PASS  t012_ga_cap_cuda_fv1_84: soil depth 0.2 m stops infiltration at 46 mm: depth 0.054000 m (expected 0.054000)
+PASS  t012_ga_wall_cuda_fv1_84: depth at output 3 left half, Ks 10 mm/h (3 h) = 0.0301 m (largest error 0.0001 mm)
+PASS  t012_ga_wall_cuda_fv1_84: depth at output 3 right half, Ks 0 (3 h) = 0.1000 m (largest error 0.0000 mm)
+PASS  t012_ga_pond_cuda_acc_84: depth against Green-Ampt as stepped, 24 hourly outputs (largest error 0.0004 mm)
+PASS  t012_ga_pond_cuda_acc_84: depth against the continuous Green-Ampt solution (largest difference 0.468 mm; 60 s steps)
+PASS  t012_ga_pond_cuda_acc_84: Green-Ampt: volume removed 364500.0 m3, depth grids lost 364500.0 m3, largest |Verror| after the first row 0.00384 m3
+PASS  t012_ga_grid_cuda_acc_84: parameters as grid files vs numbers: 25 files identical
+PASS  t012_ga_cap_cuda_acc_84: soil depth 0.2 m stops infiltration at 46 mm: depth 0.054000 m (expected 0.054000)
+PASS  t012_ga_wall_cuda_acc_84: depth at output 3 left half, Ks 10 mm/h (3 h) = 0.0301 m (largest error 0.0001 mm)
+PASS  t012_ga_wall_cuda_acc_84: depth at output 3 right half, Ks 0 (3 h) = 0.1000 m (largest error 0.0000 mm)
+PASS  t012_ga_pond_cuda_fv2_84: depth against Green-Ampt as stepped, 24 hourly outputs (largest error 0.0009 mm)
+PASS  t012_ga_pond_cuda_fv2_84: depth against the continuous Green-Ampt solution (largest difference 0.469 mm; 60 s steps)
+PASS  t012_ga_pond_cuda_fv2_84: Green-Ampt: volume removed 364500.0 m3, depth grids lost 364500.0 m3, largest |Verror| after the first row 0.025 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_ga_grid_cuda_fv2_84: parameters as grid files vs numbers: 25 files identical
+PASS  t012_ga_cap_cuda_fv2_84: soil depth 0.2 m stops infiltration at 46 mm: depth 0.054001 m (expected 0.054000)
+PASS  t012_ga_wall_cuda_fv2_84: depth at output 3 left half, Ks 10 mm/h (3 h) = 0.0301 m (largest error 0.0009 mm)
+PASS  t012_ga_wall_cuda_fv2_84: depth at output 3 right half, Ks 0 (3 h) = 0.1000 m (largest error 0.0000 mm)
+PASS  t012_ga_pond_cuda_dg2_84: depth against Green-Ampt as stepped, 24 hourly outputs (largest error 0.0009 mm)
+PASS  t012_ga_pond_cuda_dg2_84: depth against the continuous Green-Ampt solution (largest difference 0.469 mm; 60 s steps)
+PASS  t012_ga_pond_cuda_dg2_84: Green-Ampt: volume removed 364500.0 m3, depth grids lost 364500.0 m3, largest |Verror| after the first row 0.0116 m3 (not checked: FV1 .mass volume includes ghost cells)
+PASS  t012_ga_grid_cuda_dg2_84: parameters as grid files vs numbers: 75 files identical
+PASS  t012_ga_cap_cuda_dg2_84: soil depth 0.2 m stops infiltration at 46 mm: depth 0.054002 m (expected 0.054000)
+PASS  t012_ga_wall_cuda_dg2_84: depth at output 3 left half, Ks 10 mm/h (3 h) = 0.0301 m (largest error 0.0009 mm)
+PASS  t012_ga_wall_cuda_dg2_84: depth at output 3 right half, Ks 0 (3 h) = 0.1000 m (largest error 0.0000 mm)
+PASS  t012_ga_conflict_cuda_fv1_84: both infiltration models in one file stop with an error
+
+5 FAILED

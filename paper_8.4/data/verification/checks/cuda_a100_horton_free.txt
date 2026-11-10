@@ -1,0 +1,17 @@
+horton: exact F = 31.6166 mm, volume 17242.458 m3
+free:   start volume 5120.000 m3
+horton fv1        PASS  t=3600 s  F=31.6258 mm  error +0.029 %
+horton fv2        PASS  t=3600 s  F=31.6167 mm  error +0.000 %
+horton dg2        PASS  t=3600 s  F=31.6166 mm  error -0.000 %
+horton acc        PASS  t=3600 s  F=31.6166 mm  error -0.000 %
+horton acc_nugrid PASS  t=3600 s  F=31.6166 mm  error -0.000 %
+horton hwfv1      PASS  t=3600 s  F=31.6253 mm  error +0.027 %
+horton mwdg2      PASS  t=3600 s  F=31.6214 mm  error +0.015 %
+free   fv1        PASS  t=1800 s  volume=5120.002 m3  vs start +0.0000 %
+free   fv2        PASS  t=1800 s  volume=5120.014 m3  vs start +0.0003 %
+free   dg2        info  t=1800 s  volume=5117.989 m3  vs start -0.0393 %
+free   acc        info  t=1800 s  volume=5041.585 m3  vs start -1.5315 %
+free   acc_nugrid info  t=1800 s  volume=5120.001 m3  vs start +0.0000 %
+free   hwfv1      info  t=1800 s  volume=4054.062 m3  vs start -20.8191 %
+free   mwdg2      info  t=1800 s  volume=5117.345 m3  vs start -0.0519 %
+ALL PASSED

@@ -1,0 +1,94 @@
+== uniform regression, 8.4 HEAD vs 8.3
+RESULT fv1 fv1 H83 rc=0 wall_s=3 steps=10000
+RESULT fv1 fv2 H83 rc=0 wall_s=14 steps=10000
+RESULT fv1 acc H83 rc=0 wall_s=2 steps=10000
+RESULT T01 fv1 H83 rc=0 wall_s=1 steps=3516
+RESULT T01 fv2 H83 rc=0 wall_s=8 steps=5327
+RESULT T01 dg2 H83 rc=0 wall_s=10 steps=5327
+RESULT T01 acc H83 rc=0 wall_s=0 steps=2471
+RESULT T02 fv1 H83 rc=0 wall_s=1 steps=992
+RESULT T02 fv2 H83 rc=0 wall_s=2 steps=1496
+RESULT T02 dg2 H83 rc=0 wall_s=3 steps=1597
+RESULT T02 acc H83 rc=0 wall_s=1 steps=3619
+RESULT T03 fv1 H83 rc=0 wall_s=1 steps=531
+RESULT T03 fv2 H83 rc=0 wall_s=1 steps=798
+RESULT T03 dg2 H83 rc=0 wall_s=2 steps=912
+RESULT T03 acc H83 rc=0 wall_s=2 steps=4929
+RESULT T05 fv1 H83 rc=0 wall_s=2 steps=3137
+RESULT T05 fv2 H83 rc=0 wall_s=18 steps=4733
+RESULT T05 dg2 H83 rc=0 wall_s=41 steps=9932
+RESULT T05 acc H83 rc=0 wall_s=31 steps=121453
+RESULT T030 fv1 H83 rc=0 wall_s=1 steps=3
+RESULT T030 fv2 H83 rc=0 wall_s=0 steps=4
+RESULT T030 dg2 H83 rc=0 wall_s=0 steps=4
+RESULT T030 acc H83 rc=0 wall_s=1 steps=3
+RESULT T031 fv1 H83 rc=0 wall_s=0 steps=211
+RESULT T031 fv2 H83 rc=0 wall_s=1 steps=219
+RESULT T031 dg2 H83 rc=0 wall_s=3 steps=219
+RESULT T031 acc H83 rc=0 wall_s=0 steps=200
+RESULT fv1 fv1 H84 rc=0 wall_s=2 steps=10000
+RESULT fv1 fv2 H84 rc=0 wall_s=14 steps=10000
+RESULT fv1 acc H84 rc=0 wall_s=2 steps=10000
+RESULT T01 fv1 H84 rc=0 wall_s=1 steps=3516
+RESULT T01 fv2 H84 rc=0 wall_s=8 steps=5327
+RESULT T01 dg2 H84 rc=0 wall_s=9 steps=5327
+RESULT T01 acc H84 rc=0 wall_s=1 steps=2471
+RESULT T02 fv1 H84 rc=0 wall_s=1 steps=992
+RESULT T02 fv2 H84 rc=0 wall_s=2 steps=1496
+RESULT T02 dg2 H84 rc=0 wall_s=3 steps=1597
+RESULT T02 acc H84 rc=0 wall_s=1 steps=3619
+RESULT T03 fv1 H84 rc=0 wall_s=1 steps=531
+RESULT T03 fv2 H84 rc=0 wall_s=1 steps=798
+RESULT T03 dg2 H84 rc=0 wall_s=2 steps=912
+RESULT T03 acc H84 rc=0 wall_s=2 steps=4929
+RESULT T05 fv1 H84 rc=0 wall_s=2 steps=3137
+RESULT T05 fv2 H84 rc=0 wall_s=18 steps=4733
+RESULT T05 dg2 H84 rc=0 wall_s=41 steps=9932
+RESULT T05 acc H84 rc=0 wall_s=31 steps=121453
+RESULT T030 fv1 H84 rc=0 wall_s=1 steps=3
+RESULT T030 fv2 H84 rc=0 wall_s=0 steps=4
+RESULT T030 dg2 H84 rc=0 wall_s=0 steps=4
+RESULT T030 acc H84 rc=0 wall_s=1 steps=3
+RESULT T031 fv1 H84 rc=0 wall_s=0 steps=211
+RESULT T031 fv2 H84 rc=0 wall_s=1 steps=219
+RESULT T031 dg2 H84 rc=0 wall_s=1 steps=219
+RESULT T031 acc H84 rc=0 wall_s=0 steps=200
+| case | solver | run | result | files that differ |
+|---|---|---|---|---|
+| T01 | acc | H84 vs H83 | bit-identical |  |
+| T01 | dg2 | H84 vs H83 | bit-identical |  |
+| T01 | fv1 | H84 vs H83 | bit-identical |  |
+| T01 | fv2 | H84 vs H83 | bit-identical |  |
+| T02 | acc | H84 vs H83 | bit-identical |  |
+| T02 | dg2 | H84 vs H83 | same except .mass |  |
+| T02 | fv1 | H84 vs H83 | bit-identical |  |
+| T02 | fv2 | H84 vs H83 | same except .mass |  |
+| T030 | acc | H84 vs H83 | bit-identical |  |
+| T030 | dg2 | H84 vs H83 | bit-identical |  |
+| T030 | fv1 | H84 vs H83 | bit-identical |  |
+| T030 | fv2 | H84 vs H83 | bit-identical |  |
+| T031 | acc | H84 vs H83 | bit-identical |  |
+| T031 | dg2 | H84 vs H83 | same except .mass |  |
+| T031 | fv1 | H84 vs H83 | same except .mass |  |
+| T031 | fv2 | H84 vs H83 | same except .mass |  |
+| T03 | acc | H84 vs H83 | bit-identical |  |
+| T03 | dg2 | H84 vs H83 | same except .mass |  |
+| T03 | fv1 | H84 vs H83 | bit-identical |  |
+| T03 | fv2 | H84 vs H83 | same except .mass |  |
+| T05 | acc | H84 vs H83 | bit-identical |  |
+| T05 | dg2 | H84 vs H83 | bit-identical |  |
+| T05 | fv1 | H84 vs H83 | bit-identical |  |
+| T05 | fv2 | H84 vs H83 | bit-identical |  |
+| fv1 | acc | H84 vs H83 | bit-identical |  |
+| fv1 | fv1 | H84 vs H83 | bit-identical |  |
+| fv1 | fv2 | H84 vs H83 | bit-identical |  |
+== uniform losses (tests_8.4 T012 + Green-Ampt)
+39
+ALL PASSED
+== adaptive
+0 failures
+0 failures
+== acc_nugrid
+0 failures
+HEAD84_DONE
+

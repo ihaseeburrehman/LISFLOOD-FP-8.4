@@ -1,0 +1,5 @@
+# analysis/othermodels/soil_stats.py on the 10 m Alzette grid (cells with data only), 29 Oct 2026
+cells with data 4677444 pervious 3324501 share 71.1 %
+mean Ks 0.756 mm/h, median Ks 0.747; median f0 5.63 mm/h, median fc 0.747, median k 0.125 1/h
+ponded, mean over pervious cells after 6 h: Green-Ampt 25.0 mm, Horton 24.8 mm
+ponded, mean over pervious cells after 24 h: Green-Ampt 56.7 mm, Horton 54.3 mm

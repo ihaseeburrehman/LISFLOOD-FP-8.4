@@ -1,0 +1,10 @@
+# release zips: archived separately (git archive of LISFLOOD-FP commit 3766138)
+code/*.zip
+# LaTeX build files
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+__pycache__/
+.DS_Store
