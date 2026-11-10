@@ -8,3 +8,4 @@ code/*.zip
 *.out
 __pycache__/
 .DS_Store
+*.spl
